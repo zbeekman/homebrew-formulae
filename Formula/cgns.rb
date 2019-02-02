@@ -5,10 +5,11 @@ class Cgns < Formula
   sha256 "81093693b2e21a99c5640b82b267a495625b663d7b8125d5f1e9e7aaa1f8d469"
   revision 1
 
-  depends_on "gcc"
   depends_on "cmake" => :build
-  depends_on "hdf5" => :recommended
+  depends_on "gcc"
   depends_on "szip"
+  depends_on "hdf5"
+
 
   def install
     args = std_cmake_args + [
