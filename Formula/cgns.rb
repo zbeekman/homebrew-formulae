@@ -3,6 +3,7 @@ class Cgns < Formula
   homepage "http://cgns.org/"
   url "https://github.com/CGNS/CGNS/archive/v3.3.1.tar.gz"
   sha256 "81093693b2e21a99c5640b82b267a495625b663d7b8125d5f1e9e7aaa1f8d469"
+  revision 1
 
   depends_on "gcc"
   depends_on "cmake" => :build
