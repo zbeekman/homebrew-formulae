@@ -7,9 +7,8 @@ class Cgns < Formula
 
   depends_on "cmake" => :build
   depends_on "gcc"
-  depends_on "szip"
   depends_on "hdf5"
-
+  depends_on "szip"
 
   def install
     args = std_cmake_args + [
