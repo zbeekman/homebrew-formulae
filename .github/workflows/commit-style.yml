@@ -15,4 +15,35 @@ jobs:
       - name: Check commit format
         uses: Homebrew/actions/check-commit-format@e99025eb970cfa124b8284a35463d87426917478 # 2026.09.28.1
         with:
+          # The package checks manage labels for homebrew-core's autosquash
+          # bot; the formula commit checks below cover what applies here.
           check_package_commit_format: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check formula commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          for sha in $(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}"); do
+            subject="$(git log -1 --format=%s "${sha}")"
+            formulae=()
+            while IFS= read -r file; do
+              formulae+=("$(basename "${file}" .rb)")
+            done < <(git diff-tree -M --no-commit-id --name-only -r "${sha}" -- Formula/)
+            if (( ${#formulae[@]} > 1 )); then
+              echo "::error::${sha:0:10} modifies ${#formulae[@]} formulae (${formulae[*]}); use one commit per formula."
+              status=1
+            elif (( ${#formulae[@]} == 1 )) && [[ "${subject}" != "${formulae[0]}: "* ]]; then
+              echo "::error::${sha:0:10} modifies ${formulae[0]}; its subject must start with \"${formulae[0]}: \"."
+              status=1
+            fi
+          done
+          exit "${status}"
