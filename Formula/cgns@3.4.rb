@@ -1,8 +1,11 @@
-class Cgns < Formula
+class CgnsAT34 < Formula
   desc "CFD General Notation System"
-  homepage "http://cgns.org/"
+  homepage "https://cgns.github.io/"
   url "https://github.com/CGNS/CGNS/archive/refs/tags/v3.4.0.tar.gz"
   sha256 "6372196caf25b27d38cf6f056258cb0bdd45757f49d9c59372b6dbbddb1e05da"
+  license "Zlib"
+
+  keg_only :versioned_formula
 
   depends_on "cmake" => :build
   depends_on "gcc"
