@@ -15,14 +15,21 @@ defaults:
 jobs:
   test-bot:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ macos-26 ]
+        os: [ macos-26, macos-15-intel ]
         include:
           - os: ubuntu-latest
             container:
               image: ghcr.io/homebrew/brew:main
               options: --privileged
+          - os: ubuntu-24.04-arm
+            container:
+              image: ghcr.io/homebrew/brew:main
+              options: --privileged
     runs-on: ${{ matrix.os }}
+    # arm64 Linux is experimental here.
+    continue-on-error: ${{ matrix.os == 'ubuntu-24.04-arm' }}
     container: ${{ fromJSON(toJSON(matrix.container)) }} # zizmor: ignore[unpinned-images]
     permissions:
       actions: read
