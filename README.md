@@ -8,7 +8,7 @@ Or `brew tap zbeekman/formulae` and then `brew install <formula>`.
 Or install via URL (which will not receive updates):
 
 ```
-brew install https://raw.githubusercontent.com/zbeekman/homebrew-formulae/master/Formula/<formula>.rb
+brew install https://raw.githubusercontent.com/zbeekman/homebrew-formulae/main/Formula/<formula>.rb
 ```
 
 ## Documentation
