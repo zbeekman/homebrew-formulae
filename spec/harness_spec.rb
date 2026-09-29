@@ -1,7 +1,7 @@
 # typed: true
 # frozen_string_literal: true
 
-RSpec.describe "the spec harness" do
+RSpec.describe "the spec harness", type: :system do
   it "loads Homebrew with its prefix in a temporary directory" do
     expect(HOMEBREW_PREFIX.to_s).to start_with(TEST_TMPDIR)
   end
