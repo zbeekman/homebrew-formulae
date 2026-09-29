@@ -110,6 +110,38 @@ RSpec.describe Timed::LLM do
       end
     end
 
+    it "names the path, never the contents, when the key has characters outside RFC 6750's `b64token`" do
+      ["sk-FAKEKEY\"quoted", "sk-FAKEKEY\\escaped", "sk-FAKEKEY=padded-too-soon", "sk-FAKEKEY!"].each do |content|
+        file = write_key_file(content)
+        expect(usage_error(key_file: file.to_s)).to include(file.to_s).and exclude("FAKEKEY")
+      end
+    end
+
+    it "accepts every RFC 6750 `b64token` character, then trailing `=`" do
+      token = "AZaz09-._~+/sk=="
+      expect(described_class.settings(key_file: write_key_file(token).to_s).key&.value).to eq(token)
+    end
+
+    it "never shows an error body, however it echoes the key" do
+      slashed = "sk-proj-FAKE/SLASHED/KEY0123456789=="
+      settings = described_class.settings(key_file: write_key_file(slashed).to_s)
+      escaped = slashed.gsub(%r{[a-z/]}) { format("\\u%04x", it.ord) }
+      upstream = { error: "invalid key #{slashed}" }.to_json.gsub("/", "\\/")
+      [
+        "invalid key #{slashed}",
+        upstream,
+        %Q({"error":"invalid key #{escaped}"}),
+        { error: { message: "upstream said #{upstream}" } }.to_json.gsub("/", "\\/"),
+        %Q({"error":"invalid key #{escaped}","retry":NaN}),
+        "{\"error\":\"invalid key \xff#{slashed}\"}".b,
+      ].each do |body|
+        expect do
+          described_class.estimates(settings, subjects, machine:, clock:, http: fake_http(response(body, code: 401)))
+        end.to output("Warning: LLM build time estimates failed (openai gpt-5-mini), using median build times: " \
+                      "HTTP 401; check `--llm-api-key-file`\n").to_stderr
+      end
+    end
+
     it "names the path when the key file is missing" do
       file = mktmpdir/"missing"
       expect(usage_error(key_file: file.to_s)).to include(file.to_s)
@@ -167,7 +199,7 @@ RSpec.describe Timed::LLM do
         .to not_to_output.to_stdout.and not_to_output.to_stderr
     end
 
-    it "redacts the key from the warning on every failure, even when cut short" do
+    it "redacts the key from the warning on every failure" do
       settings = described_class.settings(key_file: key_file.to_s, provider: "openai")
       [
         response({ error: { message: "invalid x-api-key #{key}" } }.to_json, code: 401),
@@ -175,7 +207,6 @@ RSpec.describe Timed::LLM do
         SocketError.new("failed with #{key}"),
         response("#{key} oops"),
         response({ choices: [{ message: { content: "#{key} {" } }] }.to_json),
-        response("#{"x" * 180}#{key}#{"y" * 100}", code: 500),
       ].each do |failure|
         expect do
           described_class.estimates(settings, subjects, machine:, clock:, http: fake_http(failure, failure))
@@ -442,37 +473,37 @@ RSpec.describe Timed::LLM do
       expect(estimates(anthropic, response("<html>"))).to eq({})
     end
 
-    it "warns with the provider's message on an error" do
+    it "warns with just the status on an error" do
       body = { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }.to_json
       expect { estimates(anthropic, response(body, code: 529), response(body, code: 529)) }
-        .to output(/failed \(anthropic claude-haiku-4-5\), using median build times: HTTP 529: Overloaded$/).to_stderr
-    end
-
-    it "warns with the whole error body when it has no message" do
-      expect { estimates(openai, response({ error: "model not loaded" }.to_json, code: 422)) }
-        .to output(/HTTP 422: \{"error":"model not loaded"\}$/).to_stderr
+        .to output(/failed \(anthropic claude-haiku-4-5\), using median build times: HTTP 529$/).to_stderr
     end
 
     it "names `--llm-model` on HTTP 400" do
       body = { error: { message: "model 'qwen9' not found", code: "model_not_found" } }.to_json
-      expect { estimates(openai, response(body, code: 400)) }
-        .to output(/HTTP 400: model 'qwen9' not found; check `--llm-model`$/).to_stderr
+      expect { estimates(openai, response(body, code: 400)) }.to output(/: HTTP 400; check `--llm-model`$/).to_stderr
+    end
+
+    it "names `--llm-api-key-file` on HTTP 401 and 403" do
+      [401, 403].each do |code|
+        expect { estimates(openai, response("", code:)) }
+          .to output(/: HTTP #{code}; check `--llm-api-key-file`$/).to_stderr
+      end
     end
 
     it "names `--llm-url` and `--llm-model` on HTTP 404" do
       body = { error: { message: "model 'qwen9' not found", code: "model_not_found" } }.to_json
       expect { estimates(openai, response(body, code: 404)) }
-        .to output(/HTTP 404: model 'qwen9' not found; check `--llm-url` and `--llm-model`$/).to_stderr
+        .to output(/: HTTP 404; check `--llm-url` and `--llm-model`$/).to_stderr
     end
 
-    it "warns about an error body that isn't UTF-8" do
-      settings = described_class.settings(url: local_url, model: "modèle")
-      gateway = response("<p>Passerelle \xff</p>".b, code: 502)
-      expect { estimates(settings, gateway, gateway) }.to output(%r{HTTP 502: <p>Passerelle �</p>$}).to_stderr
+    it "says it was rate-limited on HTTP 429" do
+      expect { estimates(openai, response("slow down", code: 429), response("slow down", code: 429)) }
+        .to output(/: HTTP 429; rate-limited$/).to_stderr
     end
 
-    it "shortens a long error" do
-      expect { estimates(openai, response("x" * 1000, code: 401)) }.to output(/HTTP 401: x{197}\.\.\.$/).to_stderr
+    it "calls a successful answer that isn't valid UTF-8 JSON not JSON" do
+      expect { estimates(openai, response("{\"\xff\":1}".b)) }.to output(/: the response is not JSON$/).to_stderr
     end
 
     it "treats a redirect as a failure" do
@@ -607,7 +638,7 @@ RSpec.describe Timed::LLM do
       ENV["https_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 403 Forbidden\r\n\r\n") }}"
       secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [],
                                        headers: { "x-api-key" => key }, body: "{}")
-      expect { described_class.post(secure, 5.0) }.to raise_error(Net::HTTPClientException)
+      expect { described_class.post(secure, 5.0) }.to raise_error(Timed::LLM::Error)
       expect(received.pop(timeout: 5).to_s).to start_with("CONNECT 192.0.2.1:443 HTTP/1.1\r\n").and exclude(key)
     end
 
@@ -616,9 +647,27 @@ RSpec.describe Timed::LLM do
       ENV["https_proxy"] = "http://me%40home:p%3Ass@127.0.0.1:#{port}"
       secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [],
                                        headers: {}, body: "{}")
-      expect { described_class.post(secure, 5.0) }.to raise_error(Net::HTTPClientException)
+      expect { described_class.post(secure, 5.0) }.to raise_error(Timed::LLM::Error)
       expect(received.pop(timeout: 5).to_s)
         .to include("\r\nProxy-Authorization: Basic #{["me@home:p:ss"].pack("m0")}\r\n")
+    end
+
+    it "never quotes the reason `https_proxy` gives for refusing" do
+      ENV["https_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 407 sk-SLY-KNOTS\r\n\r\n") }}"
+      secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [], headers: {}, body: "{}")
+      expect { described_class.post(secure, 5.0) }
+        .to raise_error(Timed::LLM::Error, "`https_proxy` answered HTTP 407")
+    end
+
+    it "never quotes a malformed status or chunk-size line" do
+      [
+        "HTTP/1.1 2xx sk-SLY-KNOTS\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nsk-SLY-KNOTS\r\n",
+      ].each do |answer|
+        malformed = local_request(serve { |client| client.write(answer) })
+        expect { described_class.post(malformed, 5.0) }
+          .to raise_error(Timed::LLM::Error, "the response is not valid HTTP")
+      end
     end
 
     it "connects `https://` directly to hosts in `no_proxy`" do

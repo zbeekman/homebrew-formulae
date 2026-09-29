@@ -18,7 +18,6 @@ module Timed
 
     BUDGET_SECONDS = 45.0
     MAX_SECONDS = T.let(48 * 60 * 60, Integer)
-    MAX_ERROR_LENGTH = 200
     # Decoded; a real answer for hundreds of formulae is a few KB. Only the
     # body is capped: capping the status, header and chunk-size lines would
     # mean hooking private `Net::HTTP` internals, the endpoint is one the
@@ -33,7 +32,8 @@ module Timed
     SYSTEM_PROMPT = "You estimate how long Homebrew takes to build formulae from source on one machine. " \
                     "Give every formula asked about an estimated build time in seconds."
 
-    # A failure worth a warning; the message is shown, redacted.
+    # A failure worth a warning; the message is shown, redacted, and never
+    # holds text from the server.
     class Error < RuntimeError; end
 
     # An API key that never shows up in `inspect`, `to_s` or error messages,
@@ -136,7 +136,8 @@ module Timed
       def body(model, prompt, schema); end
 
       # The estimates list from a parsed response; raises
-      # `NoMatchingPatternError` or `JSON::ParserError` without one.
+      # `NoMatchingPatternError`, `JSON::ParserError` or `EncodingError`
+      # without one.
       sig { abstract.params(response: T.anything).returns(T.anything) }
       def estimates(response); end
     end
@@ -273,7 +274,7 @@ module Timed
       if retry?(response.code) && (time_left = deadline - clock.call).positive?
         response = http.call(request, time_left)
       end
-      raise Error, http_error(response, settings) unless (200..299).cover?(response.code)
+      raise Error, http_error(response.code) unless (200..299).cover?(response.code)
 
       valid(response_estimates(adapter, response.body), names)
     rescue => e
@@ -312,9 +313,15 @@ module Timed
             http.finish if http.started?
           end
         end
-      rescue
+      rescue => e
         raise Error, too_large if body.bytesize > MAX_RESPONSE_BYTES
 
+        # Their messages quote the server's status, chunk-size or reason
+        # line, and no server text is shown.
+        case e
+        when Net::HTTPBadResponse then raise Error, "the response is not valid HTTP"
+        when Net::HTTPExceptions then raise Error, "`https_proxy` answered HTTP #{e.response.code}"
+        end
         raise
       end
     end
@@ -424,8 +431,10 @@ module Timed
 
       key = File.binread(path).strip
       raise UsageError, "LLM API key file #{path} is empty." if key.empty?
-      unless key.match?(/\A[!-~]+\z/n)
-        raise UsageError, "LLM API key file #{path} must hold just the key, on one line, in ASCII."
+      # RFC 6750's `b64token`, which every provider's keys fit.
+      unless key.match?(%r{\A[A-Za-z0-9\-._~+/]+=*\z}n)
+        raise UsageError, "LLM API key file #{path} must hold just the key, on one line: " \
+                          "letters, digits and `-._~+/`, then any `=`."
       end
 
       if path.stat.mode.anybits?(0044)
@@ -456,26 +465,19 @@ module Timed
       code == 429 || (500..599).cover?(code)
     end
 
-    # The provider's error message, or the body as valid UTF-8, redacted
-    # before it is cut short so no part of the key survives.
-    sig { params(response: Response, settings: Settings).returns(String) }
-    private_class_method def self.http_error(response, settings)
-      message = begin
-        JSON.parse(response.body, symbolize_names: true) => { error: { message: String => message } }
-        message
-      rescue JSON::ParserError, NoMatchingPatternError
-        String.new(response.body, encoding: Encoding::UTF_8).scrub
+    # Just the status and a hint. The body is never shown: a server can echo
+    # the key in it in more forms than redaction can recognise.
+    sig { params(code: Integer).returns(String) }
+    private_class_method def self.http_error(code)
+      # 400 and 404 usually mean a retired model name, or a base URL instead
+      # of the full endpoint.
+      hint = case code
+      when 400 then "check `--llm-model`"
+      when 401, 403 then "check `--llm-api-key-file`"
+      when 404 then "check `--llm-url` and `--llm-model`"
+      when 429 then "rate-limited"
       end
-      message = redact(message.gsub(/\s+/, " ").strip, settings)
-      message = "#{message[0, MAX_ERROR_LENGTH - 3]}..." if message.length > MAX_ERROR_LENGTH
-      error = "HTTP #{response.code}"
-      error += ": #{message}" if message.present?
-      # A retired model name, or a base URL instead of the full endpoint.
-      case response.code
-      when 400 then error += "; check `--llm-model`"
-      when 404 then error += "; check `--llm-url` and `--llm-model`"
-      end
-      error
+      ["HTTP #{code}", hint].compact.join("; ")
     end
 
     # Parse errors quote the body, which may hold part of the key, so they
@@ -483,7 +485,7 @@ module Timed
     sig { params(adapter: Adapter, body: String).returns(T.anything) }
     private_class_method def self.response_estimates(adapter, body)
       adapter.estimates(JSON.parse(body, symbolize_names: true))
-    rescue JSON::ParserError
+    rescue JSON::ParserError, EncodingError
       raise Error, "the response is not JSON"
     rescue NoMatchingPatternError
       raise Error, "the response has no estimates"
