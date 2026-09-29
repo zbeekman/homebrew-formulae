@@ -1,0 +1,374 @@
+# typed: strict
+# frozen_string_literal: true
+
+require "sorbet-runtime"
+
+module Timed
+  # Sorts casks into those to run before the formula batches ("first") and
+  # after them ("last"), and says why. Pure Ruby over cask objects: what is on
+  # disk and whether sudo can prompt come in through seams; no brew calls.
+  module Casks
+    # One file as `lstat` sees it (symlinks not followed).
+    class FileEntry < T::Struct
+      const :path, Pathname
+      const :uid, Integer
+      # Readable by the current user.
+      const :readable, T::Boolean
+    end
+
+    # What the classifier needs to know about the disk. Real implementation
+    # elsewhere; specs pass fakes.
+    module Facts
+      extend T::Helpers
+
+      interface!
+
+      # The current user's uid.
+      sig { abstract.returns(Integer) }
+      def uid; end
+
+      # `nil` when nothing (not even a symlink) is at `path`.
+      sig { abstract.params(path: Pathname).returns(T.nilable(FileEntry)) }
+      def lstat(path); end
+
+      # `path` and everything under it, each by `lstat`; symlinks are not
+      # followed. Empty when `path` is missing.
+      sig { abstract.params(path: Pathname).returns(T::Array[FileEntry]) }
+      def walk(path); end
+
+      # Like `Pathname#writable?`: follows symlinks, false when missing.
+      sig { abstract.params(path: Pathname).returns(T::Boolean) }
+      def writable?(path); end
+
+      # Like `Pathname#realpath`, `nil` when missing.
+      sig { abstract.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def realpath(path); end
+    end
+
+    # Why a cask goes last. `kind` is `:dependency` (waits for the run),
+    # `:sudo` (may prompt for a password) or `:dialog` (may raise a macOS
+    # dialog or permission prompt, but needs no sudo).
+    class Reason < T::Struct
+      const :kind, Symbol
+      const :message, String
+    end
+
+    # A cask's place in the run and the reasons for it.
+    class Entry < T::Struct
+      const :cask, Cask::Cask
+      const :reasons, T::Array[Reason], default: []
+    end
+
+    # Casks to run before the formula batches, after them, and not at all.
+    class Plan < T::Struct
+      const :first, T::Array[Entry]
+      const :last, T::Array[Entry]
+      const :skipped, T::Array[Entry]
+    end
+
+    # `in_run` names everything (formulae and casks) in this run. `macos`
+    # says whether brew runs `add_altname_metadata`. `tty` says whether
+    # `/dev/tty` can be opened, where sudo reads the password.
+    #
+    # `installed` maps a token to the cask loaded from its installed caskfile.
+    # On upgrade and reinstall brew runs the `uninstall_phase` of every artifact
+    # of that cask, so the uninstall side (`uninstall` directives, uninstall
+    # flight blocks and steps, and its bundles and links) applies to it (to the
+    # new cask when it is missing), and brew merges its config into the new
+    # cask's, as `Cask::Upgrade` does: this assigns `Cask#config` of the new
+    # casks.
+    sig {
+      params(
+        casks:     T::Array[Cask::Cask],
+        verb:      Symbol,
+        in_run:    T::Array[String],
+        facts:     Facts,
+        tty:       T.proc.returns(T::Boolean),
+        macos:     T::Boolean,
+        env:       T::Hash[String, String],
+        installed: T::Hash[String, Cask::Cask],
+      ).returns(Plan)
+    }
+    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {})
+      upgrading = [:upgrade, :reinstall].include?(verb)
+      entries = casks.map do |cask|
+        old = installed[cask.token] if upgrading
+        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, in_run:, facts:, macos:))
+      end
+      first, last = entries.partition { |entry| entry.reasons.empty? }
+      # A cask upgrade that fails partway is rolled back, and the rollback may
+      # need sudo too, so without a way to prompt these are skipped, not tried.
+      skipped, last = last.partition { |entry| entry.reasons.any? { |reason| reason.kind == :sudo } }
+      if skipped.empty? || tty.call || !env["SUDO_ASKPASS"].to_s.empty?
+        last = entries - first
+        skipped = []
+      end
+      Plan.new(first:, last:, skipped:)
+    end
+
+    sig {
+      params(
+        cask:      Cask::Cask,
+        old:       T.nilable(Cask::Cask),
+        upgrading: T::Boolean,
+        in_run:    T::Array[String],
+        facts:     Facts,
+        macos:     T::Boolean,
+      ).returns(T::Array[Reason])
+    }
+    def self.reasons(cask, old:, upgrading:, in_run:, facts:, macos:)
+      cask.config = cask.default_config.merge(old.config) if old
+      reasons = depends_on_run(cask, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
+      # Upgrade and reinstall uninstall the old version first.
+      if upgrading
+        uninstalled = old || cask
+        reasons += flight_blocks(uninstalled, uninstall: true) + uninstall_directives(uninstalled) +
+                   uninstall_steps(uninstalled, facts:) + replaced_bundles(cask, facts:)
+        reasons += replaced_bundles(old, facts:) + unwritable_directories(old, facts:) if old
+      end
+      reasons += unwritable_directories(cask, facts:)
+      reasons += altname_metadata(cask, facts:) if macos
+      (reasons + install_steps(cask, facts:)).uniq(&:message)
+    end
+
+    # Brew's own check, used for `HOMEBREW_NO_SUDO` in `cask/installer.rb`.
+    sig { params(cask: Cask::Cask).returns(T::Array[Reason]) }
+    def self.requires_sudo(cask)
+      cask.artifacts.select(&:requires_sudo?).map do |artifact|
+        Reason.new(kind: :sudo, message: "`#{artifact.class.dsl_key}` requires sudo")
+      end
+    end
+
+    sig { params(cask: Cask::Cask, in_run: T::Array[String]).returns(T::Array[Reason]) }
+    def self.depends_on_run(cask, in_run:)
+      names = in_run.map { |name| Utils.name_from_full_name(name) }
+      (cask.depends_on.formula + cask.depends_on.cask).filter_map do |name|
+        next unless names.include?(Utils.name_from_full_name(name))
+
+        Reason.new(kind: :dependency, message: "depends on `#{name}`, which is in this run")
+      end
+    end
+
+    # Arbitrary Ruby that may call `system_command ..., sudo: true`, invisible
+    # to `requires_sudo?`. Conservative: blocks that don't need sudo go last too.
+    # The `uninstall_*` blocks run when a cask is uninstalled, the others when
+    # it is installed.
+    sig { params(cask: Cask::Cask, uninstall: T::Boolean).returns(T::Array[Reason]) }
+    def self.flight_blocks(cask, uninstall:)
+      cask.artifacts.grep(Cask::Artifact::AbstractFlightBlock).flat_map do |artifact|
+        artifact.directives.keys.select { |key| key.start_with?("uninstall_") == uninstall }.map do |key|
+          Reason.new(kind: :sudo, message: "`#{key}` block may call sudo")
+        end
+      end
+    end
+
+    # Run as root, via `sudo`.
+    ROOT_UNINSTALL_DIRECTIVES = [:pkgutil, :launchctl, :kext, :delete].freeze
+    # Run as root only with `sudo: true`.
+    SCRIPT_UNINSTALL_DIRECTIVES = [:script, :early_script].freeze
+
+    sig { params(cask: Cask::Cask).returns(T::Array[Reason]) }
+    def self.uninstall_directives(cask)
+      cask.artifacts.grep(Cask::Artifact::Uninstall).flat_map do |artifact|
+        # Brew skips `signal` on upgrade and reinstall unless `on_upgrade` names it.
+        raw_on_upgrade = artifact.directives[:on_upgrade]
+        on_upgrade = case raw_on_upgrade
+        when Symbol then [raw_on_upgrade]
+        when Array then raw_on_upgrade.map(&:to_sym)
+        else []
+        end
+        # `signal` is always present, empty when unused.
+        artifact.directives.reject { |_, value| value.respond_to?(:empty?) && value.empty? }
+                .filter_map do |directive, value|
+          if ROOT_UNINSTALL_DIRECTIVES.include?(directive) ||
+             (SCRIPT_UNINSTALL_DIRECTIVES.include?(directive) && value.is_a?(Hash) && value[:sudo] == true)
+            Reason.new(kind: :sudo, message: "`uninstall #{directive}` runs as root")
+          elsif directive == :quit || (directive == :signal && on_upgrade.include?(:signal))
+            # `login_item` returns early when brew upgrades or reinstalls (it has a `successor`).
+            Reason.new(kind: :dialog, message: "`uninstall #{directive}` may raise a dialog")
+          end
+        end
+      end
+    end
+
+    # Brew backs an existing bundle up with `cp -pR` (sudo retry when anything
+    # is unreadable), deletes it with `gain_permissions_remove` (`sudo chown`
+    # for an entry that isn't the user's) and moves the new one in (`sudo cp`
+    # when the target isn't writable). Typical trigger: root-owned helpers
+    # inside an app that updated itself.
+    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
+    def self.replaced_bundles(cask, facts:)
+      cask.artifacts.grep(Cask::Artifact::Moved).filter_map do |artifact|
+        target = artifact.target
+        next if facts.lstat(target).nil?
+
+        message = if (entry = facts.walk(target).find { |e| e.uid != facts.uid || !e.readable })
+          "`#{artifact.class.dsl_key}` target has `#{entry.path}` not owned by or readable by you"
+        elsif !facts.writable?(target)
+          "`#{artifact.class.dsl_key}` target `#{target}` is not writable"
+        end
+        Reason.new(kind: :sudo, message:) if message
+      end
+    end
+
+    # `sudo mkdir`, `sudo ln`, `sudo rm` for the old link, and `sudo cp` for a
+    # bundle, when the nearest existing ancestor of the target's directory is
+    # not writable.
+    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
+    def self.unwritable_directories(cask, facts:)
+      cask.artifacts.grep(Cask::Artifact::Relocated).filter_map do |artifact|
+        directory = artifact.target.dirname
+        directory = directory.dirname while facts.lstat(directory).nil? && !directory.root?
+        next if facts.writable?(directory)
+
+        Reason.new(kind: :sudo, message: "`#{artifact.class.dsl_key}` needs `#{directory}` writable")
+      end
+    end
+
+    # `Relocated#add_altname_metadata` runs `chmod u+rw` on a file and its
+    # realpath and `xattr -w` on the file, each with `sudo: nil`, when the
+    # target's basename differs from the source's. The file is the target of a
+    # bundle and the (staged) source of a link.
+    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
+    def self.altname_metadata(cask, facts:)
+      cask.artifacts.grep(Cask::Artifact::Relocated).filter_map do |artifact|
+        next if artifact.source.basename.to_s.casecmp?(artifact.target.basename.to_s)
+
+        file = artifact.is_a?(Cask::Artifact::Symlinked) ? artifact.source : artifact.target
+        unless [file, facts.realpath(file)].compact.all? { |path| user_can_change?(path, facts:) }
+          Reason.new(kind: :sudo, message: "`#{artifact.class.dsl_key}` needs `#{file}` owned by and writable by you")
+        end
+      end
+    end
+
+    sig { params(path: Pathname, facts: Facts).returns(T::Boolean) }
+    def self.user_can_change?(path, facts:)
+      entry = facts.lstat(path)
+      entry.nil? || (entry.uid == facts.uid && facts.writable?(path))
+    end
+
+    # `requires_sudo?` passes `include_optional: false`, so brew runs steps
+    # with `sudo: :if_needed` with sudo only when the target's parent directory
+    # is not writable (`dirname.writable?` is false when it is missing), and
+    # `set_ownership` needs the terminal's macOS App Management permission,
+    # may raise its prompt and fails without it (`install_steps.rb`).
+    #
+    # `Uninstall*Steps` have no `install_phase`, so brew's `requires_sudo?` is
+    # always false for them, yet they run before an upgrade or reinstall: ask
+    # the runner's own predicate there, and skip them on install.
+    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
+    def self.install_steps(cask, facts:)
+      cask.artifacts.grep(Cask::Artifact::AbstractInstallSteps).select { |a| a.respond_to?(:install_phase) }
+          .flat_map do |artifact|
+        artifact.steps.flat_map { |step| step_reasons(cask, artifact.class.dsl_key, step, facts:) }
+      end
+    end
+
+    # The cask being uninstalled, which is the installed one on upgrade.
+    # `Uninstall*Steps` run all their steps; `preflight_steps` and
+    # `postflight_steps` only remove their `symlink … uninstall: true` links
+    # (`run_uninstall_step`).
+    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
+    def self.uninstall_steps(cask, facts:)
+      installing, uninstalling = cask.artifacts.grep(Cask::Artifact::AbstractInstallSteps)
+                                     .partition { |artifact| artifact.respond_to?(:install_phase) }
+      links = installing.flat_map { |artifact| removed_links(cask, artifact.class.dsl_key, artifact.steps, facts:) }
+      steps = uninstalling.flat_map do |artifact|
+        stanza = artifact.class.dsl_key
+        reasons = artifact.steps.flat_map { |step| step_reasons(cask, stanza, step, facts:) }
+        if Homebrew::InstallSteps::Runner.new(context: cask).sudo_required?(artifact.steps, include_optional: false)
+          reasons << Reason.new(kind: :sudo, message: "`#{stanza}` runs a step as root")
+        end
+        reasons
+      end
+      links + steps
+    end
+
+    sig {
+      params(cask: Cask::Cask, stanza: Symbol, steps: Homebrew::InstallSteps::Steps, facts: Facts)
+        .returns(T::Array[Reason])
+    }
+    def self.removed_links(cask, stanza, steps, facts:)
+      steps.select { |step| step["type"] == "symlink" && step["uninstall"] == true }.filter_map do |step|
+        sudo = step["sudo"]
+        next unless [true, "if_needed"].include?(sudo)
+
+        target = step["target"]
+        # A `symlink` step always has a hash target; the guard is for Sorbet.
+        path = resolve_path(cask, target) if target.is_a?(Hash)
+        # Brew returns early unless the link is there, and only escalates when its directory isn't writable.
+        next if path && (facts.lstat(path).nil? || facts.writable?(path.dirname))
+
+        Reason.new(kind: :sudo, message: "`#{stanza}` removes its `symlink` on uninstall with sudo")
+      end
+    end
+
+    sig {
+      params(cask: Cask::Cask, stanza: Symbol, step: Homebrew::InstallSteps::Step, facts: Facts)
+        .returns(T::Array[Reason])
+    }
+    def self.step_reasons(cask, stanza, step, facts:)
+      if step["type"] == "set_ownership"
+        # `chown` runs with `sudo: nil`, which `SystemCommand` retries with sudo.
+        [Reason.new(kind: :sudo, message: "`#{stanza}` runs `set_ownership`, which retries `chown` with sudo"),
+         Reason.new(kind: :dialog, message: "`#{stanza}` runs `set_ownership`, which needs App Management access")]
+      elsif step["sudo"] == "if_needed"
+        if_needed_reasons(cask, stanza, step, facts:)
+      else
+        []
+      end
+    end
+
+    # Brew runs the step with sudo when the parent directory of its target is
+    # not writable. `create_symlink` first runs `mkpath` without sudo, so a
+    # missing directory is no reason, and `remove` returns early for a path that
+    # isn't there. A path that can't be resolved here counts, to be safe.
+    sig {
+      params(cask: Cask::Cask, stanza: Symbol, step: Homebrew::InstallSteps::Step, facts: Facts)
+        .returns(T::Array[Reason])
+    }
+    def self.if_needed_reasons(cask, stanza, step, facts:)
+      specs = case step["type"]
+      when "remove" then [step["paths"]]
+      when "symlink" then [step["target"]]
+      else []
+      end
+      specs.flatten.grep(Hash).filter_map do |spec|
+        path = resolve_path(cask, spec)
+        directory = path&.dirname
+        if path && directory
+          # A glob is expanded by brew, so the directory stands in for its matches.
+          present = (step["type"] == "remove" && !glob?(path.basename.to_s)) ? path : directory
+          next if facts.lstat(present).nil? || facts.writable?(directory)
+        end
+
+        Reason.new(kind: :sudo, message: "`#{stanza}` runs `#{step["type"]}` with sudo when " \
+                                         "#{directory || "its target"} is not writable")
+      end
+    end
+
+    sig { params(string: String).returns(T::Boolean) }
+    def self.glob?(string) = string.match?(/[?*\[{]/)
+
+    # Templates, globs in the directory, and every base other than the blank
+    # and `absolute` ones, `home`, `homebrew_prefix`, `staged_path`,
+    # `caskroom_path` and the `Cask::Config` directories (so `relative`,
+    # `temp`, `formula_*` and any unknown base) are left unresolved.
+    sig { params(cask: Cask::Cask, spec: Homebrew::InstallSteps::PathSpec).returns(T.nilable(Pathname)) }
+    def self.resolve_path(cask, spec)
+      path = spec.fetch("path")
+      return if path.include?("{{") || glob?(File.dirname(path))
+
+      case (base = spec["base"])
+      when nil, "", "absolute" then Pathname(path).expand_path
+      when "home" then Pathname(Dir.home)/path
+      when "homebrew_prefix" then HOMEBREW_PREFIX/path
+      when "staged_path" then cask.staged_path/path
+      when "caskroom_path" then cask.caskroom_path/path
+      else
+        option = base.to_s.to_sym
+        cask.config.public_send(option)/path if Cask::Config::DEFAULT_DIRS.key?(option)
+      end
+    end
+  end
+end

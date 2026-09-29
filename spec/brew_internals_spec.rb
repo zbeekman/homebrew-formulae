@@ -88,6 +88,16 @@ RSpec.describe "brew internals", type: :system do
     it "is false for app" do
       expect(artifacts('app "Foo.app"').any?(&:requires_sudo?)).to be(false)
     end
+
+    it "is false for an install step with `sudo: :if_needed`" do
+      steps = [{ type: "remove", paths: [{ path: "/opt/x/f" }], sudo: "if_needed" }]
+      expect(artifacts("postflight_steps steps: #{steps.inspect}").any?(&:requires_sudo?)).to be(false)
+    end
+
+    it "is false for a `set_ownership` install step" do
+      steps = [{ type: "set_ownership", paths: [{ path: "/Applications/Foo.app" }] }]
+      expect(artifacts("postflight_steps steps: #{steps.inspect}").any?(&:requires_sudo?)).to be(false)
+    end
   end
 
   it "covers every flight block stanza with Cask::Artifact::AbstractFlightBlock" do
@@ -95,6 +105,13 @@ RSpec.describe "brew internals", type: :system do
       (klass < Cask::Artifact::AbstractFlightBlock) ? [klass.dsl_key, klass.uninstall_dsl_key] : [klass]
     end
     expect(keys).to contain_exactly(:preflight, :postflight, :uninstall_preflight, :uninstall_postflight)
+  end
+
+  it "prefixes the uninstall flight block keys with `uninstall_`, and no other" do
+    prefixed = Cask::DSL::ARTIFACT_BLOCK_CLASSES.to_h do |klass|
+      [klass.name, [klass.dsl_key, klass.uninstall_dsl_key].map { |key| key.start_with?("uninstall_") }]
+    end
+    expect(prefixed).to eq(Cask::DSL::ARTIFACT_BLOCK_CLASSES.to_h { |klass| [klass.name, [false, true]] })
   end
 
   describe "cask file-permission sudo fallbacks" do
@@ -121,6 +138,162 @@ RSpec.describe "brew internals", type: :system do
       helpers = %w[cask/artifact/moved.rb cask/artifact/symlinked.rb extend/os/mac/cask/artifact/symlinked.rb]
                 .flat_map { |path| brew_source(path).scan(/Utils\.(gain_permissions_\w+)/).flatten }
       expect(helpers.uniq).to contain_exactly("gain_permissions_mkpath", "gain_permissions_remove")
+    end
+  end
+
+  describe "`Relocated#add_altname_metadata`" do
+    it "runs `chmod` and `xattr -w` with `sudo: nil`" do
+      expect(sudo_calls("cask/artifact/relocated.rb")).to eq([["chmod", "nil"], ["/usr/bin/xattr", "nil"]])
+    end
+
+    it "has no other `sudo:` arguments" do
+      expect(sudo_values("cask/artifact/relocated.rb")).to eq(["nil", "nil"])
+    end
+
+    it "changes the target of a bundle" do
+      expect(brew_source("cask/artifact/moved.rb")).to include("add_altname_metadata(target, source.basename")
+    end
+
+    it "changes the source of a link on macOS" do
+      expect(brew_source("extend/os/mac/cask/artifact/symlinked.rb"))
+        .to include("add_altname_metadata(source, target.basename")
+    end
+
+    it "does nothing when the names match, ignoring case" do
+      expect(brew_source("cask/artifact/relocated.rb"))
+        .to include("return if altname.to_s.casecmp(file.basename.to_s)&.zero?")
+    end
+
+    it "is a no-op on Linux" do
+      expect(brew_source("extend/os/linux/cask/artifact/relocated.rb")).not_to match(/command\.run|\bsuper\b/)
+    end
+  end
+
+  describe "`sudo: :if_needed` install steps" do
+    it "check `dirname.writable?` of a removed path and of a symlink's target" do
+      checked = brew_source("install_steps.rb").scan(/step\["sudo"\] == "if_needed" && !(\w+)\.dirname\.writable\?/)
+      expect(checked.flatten).to eq(["path", "target", "target"])
+    end
+  end
+
+  describe "optional install steps" do
+    it "count for sudo only when `include_optional` is set, which `requires_sudo?` leaves out" do
+      expect(brew_source("install_steps.rb")).to include(
+        '(include_optional && (step["sudo"] == "if_needed" || step["type"] == "set_ownership"))',
+      )
+      expect(brew_source("cask/artifact/install_steps.rb"))
+        .to include("sudo_required?(steps, include_optional: false)")
+    end
+  end
+
+  describe "`requires_sudo?` of install steps" do
+    it "is false unless the artifact has an `install_phase`, so `Uninstall*Steps` never count" do
+      expect(brew_source("cask/artifact/install_steps.rb")).to include("respond_to?(:install_phase) &&")
+    end
+
+    it "is not defined on `Uninstall*Steps`" do
+      steps = [Cask::Artifact::UninstallPreflightSteps, Cask::Artifact::UninstallPostflightSteps]
+      expect(steps.map { |klass| klass.method_defined?(:install_phase) }).to eq([false, false])
+    end
+  end
+
+  describe "`uninstall signal` on upgrade and reinstall" do
+    it "is skipped unless `on_upgrade` names it" do
+      expect(Cask::Artifact::Uninstall::UPGRADE_REINSTALL_SKIP_DIRECTIVES).to eq([:signal])
+      expect(brew_source("cask/artifact/uninstall.rb")).to include(
+        "(upgrade || reinstall) &&",
+        "UPGRADE_REINSTALL_SKIP_DIRECTIVES.include?(directive_sym) &&",
+        "on_upgrade_set.exclude?(directive_sym)",
+      )
+    end
+
+    it "reads `on_upgrade` from a Symbol or an Array only" do
+      body = brew_source("cask/artifact/uninstall.rb")[/^        on_upgrade_syms =\n.*?^          end$/m]
+      expect(body.gsub(/\s+/, " ").strip).to eq(
+        "on_upgrade_syms = case raw_on_upgrade when Symbol [raw_on_upgrade] when Array " \
+        "raw_on_upgrade.map(&:to_sym) else [] end",
+      )
+    end
+  end
+
+  describe "`uninstall login_item` on upgrade and reinstall" do
+    it "returns early because brew passes a `successor`" do
+      body = brew_source("cask/artifact/abstract_uninstall.rb")[/^      def uninstall_login_item\(.*?^      end$/m]
+      expect(body).to match(/\A[^\n]*\n\s+return if successor\n/)
+      expect(brew_source("cask/upgrade.rb")).to include("old_cask_installer.start_upgrade(successor: new_cask")
+      expect(brew_source("cask/installer.rb")).to include("cask_installer.uninstall(successor: @cask)")
+    end
+  end
+
+  describe "`Cask::Utils` around missing paths" do
+    it "makes a symlink's directory without sudo, and has nothing to remove for a missing path" do
+      expect(brew_source("install_steps.rb"))
+        .to match(/def create_symlink\(source, target, step\)\n\s+target\.dirname\.mkpath\n\s+if step\["sudo"\]/)
+      remove_body = brew_source("cask/utils.rb")[/^    def self\.gain_permissions_remove\(.*?^    end$/m]
+      expect(remove_body).to match(/# Nothing to remove\.\n\s+return\n\s+end\n/)
+      expect(brew_source("cask/utils.rb")).to include("dir = path.ascend.find(&:directory?)")
+    end
+  end
+
+  describe "`SystemCommand.run` with `sudo: nil`" do
+    it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
+      retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]
+      expect(retry_block).to match(/return result\n\s+end\n\s+sudo = true\n/)
+    end
+  end
+
+  describe "uninstalling a cask" do
+    it "runs the `uninstall_phase` of every artifact that has one, on upgrade and on reinstall" do
+      body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
+      expect(body).to include("artifacts.each do |artifact|", "if artifact.respond_to?(:uninstall_phase)",
+                              "artifact.uninstall_phase(")
+      expect(body).not_to include("select", "grep", "reject")
+      expect(body.scan(/\bnext\b.*/)).to eq(["next unless artifact.respond_to?(:post_uninstall_phase)"])
+    end
+
+    it "does so from `uninstall` (reinstall) and `start_upgrade`" do
+      source = brew_source("cask/installer.rb")
+      expect([source[/^    def uninstall\(.*?^    end$/m], source[/^    def start_upgrade\(.*?^    end$/m]])
+        .to match([/uninstall_artifacts\(clear: true, successor:\)/, /uninstall_artifacts\(successor:, quit:\)/])
+    end
+
+    it "runs a flight block's `dsl_key` on install and its `uninstall_dsl_key` on uninstall" do
+      source = brew_source("cask/artifact/abstract_flight_block.rb")
+      expect([source[/^      def install_phase\(.*?^      end$/m][/abstract_phase\(.*\)/],
+              source[/^      def uninstall_phase\(.*?^      end$/m][/abstract_phase\(.*\)/]])
+        .to eq(["abstract_phase(self.class.dsl_key)", "abstract_phase(self.class.uninstall_dsl_key)"])
+    end
+
+    it "removes only `symlink` steps with `uninstall: true` from `preflight_steps` and `postflight_steps`" do
+      body = brew_source("install_steps.rb")[/^      def run_uninstall_step\(step\)\n.*?^      end$/m]
+      expect(body).to match(
+        /\A[^\n]*\n\s+return if step\.fetch\("type"\) != "symlink"\n\s+return if step\["uninstall"\] != true\n/,
+      )
+      expect(body).to include("return unless target.symlink?",
+                              'step["sudo"] == true || (step["sudo"] == "if_needed" && !target.dirname.writable?)')
+    end
+
+    it "loads the installed caskfile to reinstall it" do
+      body = brew_source("cask/installer.rb")[/^    def load_installed_caskfile!.*?^    end$/m]
+      expect(body).to include("CaskLoader.load_from_installed_caskfile(installed_caskfile)")
+    end
+  end
+
+  describe "`brew upgrade` of a cask" do
+    it "uninstalls the installed caskfile's cask and merges its config into the new cask's" do
+      expect(brew_source("cask/upgrade.rb")).to include(
+        "CaskLoader.load_from_installed_caskfile(installed_caskfile)",
+        "Installer.new(old_cask, **old_options)",
+        "new_cask.config = new_cask.default_config.merge(old_config)",
+      )
+    end
+  end
+
+  describe "`set_ownership` install steps" do
+    it "fail without App Management permission, and run `chown` with `sudo: nil`" do
+      body = brew_source("install_steps.rb")[/^      def run_set_ownership\(step\)\n.*?^      end$/m]
+      expect(body).to match(/app_management_permissions_granted\?.*raise ::Cask::CaskError/m)
+      expect(body).to match(/@command\.run!\("chown".*?sudo: nil\)/m)
     end
   end
 
