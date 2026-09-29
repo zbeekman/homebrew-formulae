@@ -4,6 +4,8 @@ Keep the diff as small, DRY and YAGNI as possible.
 Re-read relevant files after each prompt and preserve user edits and comments.
 Before finishing, check your work and point out anything the user may not have considered.
 Update `README.md` when the behaviour it describes changes.
+Follow Homebrew's native behaviour and conventions (paths, flags, output, idioms) wherever possible; when unsure, copy what the nearest built-in command does.
+Write Ruby code (`cmd/`, `lib/`) test-first, red-green-refactor: write a failing spec and see it fail, write the least code to pass it, then refactor with the suite green; only push green commits.
 
 ## Formula Changes
 
