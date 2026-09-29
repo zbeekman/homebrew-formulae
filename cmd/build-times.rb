@@ -33,9 +33,9 @@ module Homebrew
             `brew build-times stats` [<formula> ...]:
             Show build time statistics and estimates for <formula> or every logged formula.
             Builds that poured a bottle and builds from source are never mixed.
-            The estimate of a source build is its mean plus 1.5 standard deviations.
+            The estimate of a source build is its mean plus 1.5 standard deviations, and of a pour its mean.
             A formula with both kinds gets a row for each, with the estimate used to order its next build of that kind.
-            An estimate ending in `?` is a guess: the formula has no usable history of that kind.
+            An estimate ending in `?` is a guess, as the formula has no usable history of that kind.
           EOS
           named_args :formula
         end
