@@ -1,6 +1,7 @@
 # typed: true
 # frozen_string_literal: true
 
+require "bigdecimal"
 require_relative "../../lib/timed/build_log"
 
 RSpec.describe Timed::BuildLog do
@@ -47,6 +48,26 @@ RSpec.describe Timed::BuildLog do
       path.dirname.mkpath
       path.write('{"schema_version": 1}')
       expect { described_class.load(path) }.to raise_error(RuntimeError, /#{Regexp.escape(path.to_s)}.*`packages`/)
+    end
+
+    it "names the file when a value cannot be written back as JSON" do
+      path.dirname.mkpath
+      calls = [-> { described_class.load(path) }, -> { described_class.update(path) { |_log| nil } }]
+      contents = [
+        '{"schema_version": 1, "packages": {"x": {"builds": [{"version": 1e400}]}}}',
+        '{"schema_version": 1, "packages": {}, "x": 1e400}',
+      ]
+      messages = contents.to_h do |content|
+        path.write(content)
+        [content, calls.map do |call|
+          call.call
+          nil
+        rescue RuntimeError => e
+          e.message.sub(path.to_s, "<path>")
+        end]
+      end
+      message = "<path> is not a build log: Infinity not allowed in JSON"
+      expect(messages).to eq(contents.to_h { |content| [content, [message, message]] })
     end
 
     it "names the file, package and build for every malformed package or build" do
@@ -102,6 +123,50 @@ RSpec.describe Timed::BuildLog do
 
   describe ".update" do
     let(:change) { ->(log) { log.record("foo", { "version" => "1" }) } }
+
+    it "refuses to write an invalid record, naming the path, package and build, and leaves the file as it was" do
+      path.dirname.mkpath
+      old_time = Time.utc(2000, 1, 1)
+      original = fixture.read
+      cases = {
+        "problems"        => [{ "problems" => "bad" }, "`problems` of build 0 of package `foo` must be an array."],
+        "install_seconds" => [{ "install_seconds" => "1" },
+                              "`install_seconds` of build 0 of package `foo` must be a number."],
+        "started"         => [{ "started" => 5 }, "`started` of build 0 of package `foo` must be a string."],
+        "Rational"        => [{ "wall_seconds" => Rational(1, 2) },
+                              "`wall_seconds` of build 0 of package `foo` must be a number."],
+        "BigDecimal"      => [{ "build_seconds" => BigDecimal("1.5") },
+                              "`build_seconds` of build 0 of package `foo` must be a number."],
+        "nesting"         => [{ "version" => (1..150).reduce([]) { |inner, _| [inner] } },
+                              "nesting of 100 is too deep. " \
+                              "Did you try to serialize objects with circular references?"],
+        "NaN"             => [{ "install_seconds" => Float::NAN },
+                              "`install_seconds` of build 0 of package `foo` must be a number."],
+      }
+      outcomes = cases.transform_values do |(entry, _message)|
+        FileUtils.cp fixture, path
+        path.chmod(0644)
+        File.utime(old_time, old_time, path)
+        message = begin
+          described_class.update(path) { |log| log.record("foo", entry) }
+          nil
+        rescue RuntimeError => e
+          e.message.sub(path.realpath.to_s, "<path>")
+        end
+        [message, path.read == original, path.stat.mode & 0777, path.mtime]
+      end
+      expected = cases.transform_values do |(_entry, message)|
+        ["<path> is not a build log: #{message}", true, 0644, old_time]
+      end
+      expect(outcomes).to eq(expected)
+    end
+
+    it "names the file when a value that is not a duration cannot be written as JSON" do
+      path.dirname.mkpath
+      FileUtils.cp fixture, path
+      expect { described_class.update(path) { |log| log.record("foo", { "version" => Float::NAN }) } }
+        .to raise_error(RuntimeError, /#{Regexp.escape(path.realpath.to_s)} is not a build log: .*NaN/)
+    end
 
     it "leaves a malformed file alone and names it", :aggregate_failures do
       path.dirname.mkpath

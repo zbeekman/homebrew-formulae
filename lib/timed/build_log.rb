@@ -48,7 +48,19 @@ module Timed
       rescue JSON::ParserError
         raise "#{path} is not valid JSON."
       end
-      raise "#{path} is not a build log: expected a JSON object." unless data.is_a?(Hash)
+      validate!(path, data)
+
+      new(data)
+    end
+
+    # The checks a database must pass to be read, also run on a changed one
+    # before it is written so an invalid change never reaches the file.
+    sig { params(path: Pathname, data: T.anything).void }
+    def self.validate!(path, data)
+      case data
+      when Hash then nil
+      else raise "#{path} is not a build log: expected a JSON object."
+      end
 
       version = data["schema_version"]
       raise "#{path} has schema version #{version.inspect}; only #{SCHEMA_VERSION} is supported." if version != SCHEMA_VERSION
@@ -63,8 +75,12 @@ module Timed
         builds.each_with_index { |build, index| validate_build!(path, name, build, index) }
       end
 
-      new(data)
+      # Everything read must be writable back, so `update` cannot fail on it.
+      JSON.generate(data)
+    rescue JSON::JSONError => e
+      raise "#{path} is not a build log: #{e.message}"
     end
+    private_class_method :validate!
 
     sig { params(path: Pathname, name: String, build: T.anything, index: Integer).void }
     def self.validate_build!(path, name, build, index)
@@ -83,7 +99,8 @@ module Timed
       end
 
       DURATION_KEYS.each do |key|
-        next if build[key].nil? || build[key].is_a?(Numeric)
+        value = build[key]
+        next if value.nil? || (value.is_a?(Numeric) && (!value.is_a?(Float) || value.finite?))
 
         raise "#{prefix} `#{key}` of build #{index} of package `#{name}` must be a number."
       end
@@ -108,8 +125,14 @@ module Timed
         log = load(target)
         before = JSON.generate(log.to_h)
         result = yield log
-        if JSON.generate(log.to_h) != before
-          target.atomic_write("#{JSON.pretty_generate(sort_keys(log.to_h))}\n")
+        validate!(target, log.to_h)
+        after = JSON.generate(log.to_h)
+        if after != before
+          # Validate what will be in the file, not the in-memory values:
+          # `Rational` and `BigDecimal` are numbers here but strings in JSON.
+          written = JSON.parse(after)
+          validate!(target, written)
+          target.atomic_write("#{JSON.pretty_generate(sort_keys(written))}\n")
           target.chmod(0600)
         end
         result
