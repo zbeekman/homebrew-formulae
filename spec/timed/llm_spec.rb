@@ -569,6 +569,20 @@ RSpec.describe Timed::LLM do
       Timed::LLM::Request.new(uri: URI::HTTP.build(host: "127.0.0.1", port:, path: "/"), addresses: ["127.0.0.1"],
                               headers: {}, body: "{}")
     end
+
+    # Answers with an endless chunked body, gzip-encoded if asked, until the
+    # client hangs up.
+    def endless(client, gzip: false)
+      deflate = Zlib::Deflate.new(Zlib::DEFAULT_COMPRESSION, Zlib::MAX_WBITS + 16) if gzip
+      client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n#{"Content-Encoding: gzip\r\n" if gzip}\r\n")
+      loop do
+        chunk = "x" * 65_536
+        chunk = deflate.deflate(chunk, Zlib::SYNC_FLUSH) if deflate
+        client.write("#{chunk.bytesize.to_s(16)}\r\n#{chunk}\r\n")
+      end
+    rescue Errno::EPIPE, Errno::ECONNRESET, IOError
+      nil
+    end
     # rubocop:enable Sorbet/BlockMethodDefinition
 
     it "posts the headers and body and returns the answer" do
@@ -698,7 +712,7 @@ RSpec.describe Timed::LLM do
       posts = 0
       allow(Net::HTTP).to receive(:new).and_wrap_original do |original, *args|
         original.call(*args).tap do |http|
-          allow(http).to receive(:request_post) do
+          allow(http).to receive(:request) do
             posts += 1
             raise Errno::EHOSTUNREACH
           end
@@ -717,6 +731,32 @@ RSpec.describe Timed::LLM do
       times = [0.0, 44.7]
       expect { described_class.estimates(settings, subjects, machine:, clock: -> { times.shift || 45.0 }) }
         .to output(/LLM build time estimates failed .*: (execution expired|Net::ReadTimeout)/).to_stderr
+    end
+
+    it "warns and gives up on an answer over 1 MiB without reading it all" do
+      port = serve { |client| endless(client) }
+      settings = described_class.settings(url: "http://127.0.0.1:#{port}/v1/chat/completions", model: "m")
+      times = [0.0, 42.0]
+      expect { described_class.estimates(settings, subjects, machine:, clock: -> { times.shift || 45.0 }) }
+        .to output(/LLM build time estimates failed .*: the response is larger than 1 MiB$/).to_stderr
+    end
+
+    it "stops reading a gzip-encoded answer once it decodes to over 1 MiB" do
+      port = serve { |client| endless(client, gzip: true) }
+      expect { described_class.post(local_request(port), 3.0) }
+        .to raise_error(Timed::LLM::Error, "the response is larger than 1 MiB")
+    end
+
+    it "gives up at once when a server stalls after passing 1 MiB mid-chunk" do
+      stall = serve do |client|
+        client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n#{"x" * ((1024 * 1024) + 1)}")
+        sleep
+      end
+      stalled = local_request(stall)
+      # Without an exception class, `Timeout` interrupts with one `post`
+      # can't rescue, so it can't pass the wait off as the cap.
+      expect { Timeout.timeout(3) { described_class.post(stalled, 10.0) } }
+        .to raise_error(Timed::LLM::Error, "the response is larger than 1 MiB")
     end
   end
 end

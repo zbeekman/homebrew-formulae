@@ -19,6 +19,12 @@ module Timed
     BUDGET_SECONDS = 45.0
     MAX_SECONDS = T.let(48 * 60 * 60, Integer)
     MAX_ERROR_LENGTH = 200
+    # Decoded; a real answer for hundreds of formulae is a few KB. Only the
+    # body is capped: capping the status, header and chunk-size lines would
+    # mean hooking private `Net::HTTP` internals, the endpoint is one the
+    # user chose, and the worst case is a failed or crashed run, never a
+    # leaked key (see #14).
+    MAX_RESPONSE_BYTES = T.let(1024 * 1024, Integer)
     RESOLVE_TIMEOUT_SECONDS = 5
     # Failures to connect to one address, after which the next may work.
     CONNECT_ERRORS = T.let([Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH, Errno::EADDRNOTAVAIL,
@@ -282,14 +288,34 @@ module Timed
     sig { params(request: Request, timeout: Float).returns(Response) }
     def self.post(request, timeout)
       uri = request.uri
-      Timeout.timeout(timeout) do
-        http = (uri.scheme == "https") ? https_connection(uri, timeout) : http_connection(request, timeout)
-        begin
-          response = http.request_post(uri.request_uri, request.body, request.headers)
-          Response.new(code: response.code.to_i, body: response.body.to_s)
-        ensure
-          http.finish
+      body = +""
+      too_large = "the response is larger than #{MAX_RESPONSE_BYTES / 1024 / 1024} MiB"
+      begin
+        Timeout.timeout(timeout) do
+          http = (uri.scheme == "https") ? https_connection(uri, timeout) : http_connection(request, timeout)
+          begin
+            # Read in chunks, decoded, to stop at the limit rather than after
+            # buffering all of an untrusted answer.
+            response = http.request(Net::HTTP::Post.new(uri.request_uri, request.headers), request.body) do |answer|
+              answer.read_body do |chunk|
+                body << chunk
+                next if body.bytesize <= MAX_RESPONSE_BYTES
+
+                # Hanging up first stops `Net::HTTP` waiting for the rest of
+                # the chunk; the error that causes is reported as this one.
+                http.finish
+                raise Error, too_large
+              end
+            end
+            Response.new(code: response.code.to_i, body:)
+          ensure
+            http.finish if http.started?
+          end
         end
+      rescue
+        raise Error, too_large if body.bytesize > MAX_RESPONSE_BYTES
+
+        raise
       end
     end
 
