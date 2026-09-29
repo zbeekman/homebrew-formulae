@@ -1,6 +1,11 @@
 # typed: true
 # frozen_string_literal: true
 
+# Homebrew's own specs turn this cop off in `Library/Homebrew/test/.rubocop.yml`
+# ("RSpec helper methods typecheck better as regular methods"); the tap's style
+# config does not inherit that override.
+# rubocop:disable Sorbet/BlockMethodDefinition
+
 require "ask"
 require "caveats"
 require "cask/cask"
@@ -15,23 +20,23 @@ require "tab"
 # change fails here instead of during a real upgrade. When one fails, re-check
 # the plan's rule that depends on it before updating the expectation.
 RSpec.describe "brew internals", type: :system do
-  define_method(:brew_source) { |path| (HOMEBREW_LIBRARY_PATH/path).read }
+  def brew_source(path) = (HOMEBREW_LIBRARY_PATH/path).read
 
   # `[command, sudo]` for each `run`/`run!` call with a `sudo:` argument.
-  define_method(:sudo_calls) do |path|
+  def sudo_calls(path)
     brew_source(path)
       .scan(/\.run!?[\s(]+"([^"]+)"(?:(?!\.run!?[\s(]).)*?sudo:\s*(nil|true)/m)
   end
 
   # The value of every `sudo:` keyword in the file, whatever the call looks
   # like; shorthand `sudo:` gives `""`.
-  define_method(:sudo_values) { |path| brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten }
+  def sudo_values(path) = brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten
 
   describe "the `cmd_args` block of the wrapped commands" do
-    [Homebrew::Cmd::UpgradeCmd, Homebrew::Cmd::InstallCmd, Homebrew::Cmd::Reinstall].each do |command|
-      it "is kept by #{command.name} in `@parser_block`" do
-        expect(command.instance_variable_get(:@parser_block)).to be_a(Proc)
-      end
+    it "is kept in `@parser_block`" do
+      commands = [Homebrew::Cmd::UpgradeCmd, Homebrew::Cmd::InstallCmd, Homebrew::Cmd::Reinstall]
+      block_classes = commands.to_h { |command| [command.name, command.instance_variable_get(:@parser_block).class] }
+      expect(block_classes).to eq(commands.to_h { |command| [command.name, Proc] })
     end
   end
 
@@ -59,30 +64,29 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "Cask::Artifact::AbstractArtifact#requires_sudo?" do
-    define_method(:artifacts) do |&stanza|
+    # `stanza` is Cask DSL source: Sorbet cannot see the DSL's generated methods.
+    def artifacts(stanza)
       Cask::Cask.new("timed-canary") do
         version "1.0"
         sha256 :no_check
         url "file:///dev/null"
-        instance_exec(&stanza)
+        instance_eval(stanza, __FILE__, __LINE__)
       end.artifacts
     end
 
-    {
-      "pkg"                  => -> { pkg "Foo.pkg" },
-      "keyboard_layout"      => -> { keyboard_layout "Foo.bundle" },
-      "installer with sudo"  => -> { installer script: { executable: "install.sh", sudo: true } },
-      "install step as root" => lambda {
-        postflight_steps steps: [{ type: "run", executable: "/usr/bin/true", sudo: true }]
-      },
-    }.each do |name, stanza|
-      it "is true for #{name}" do
-        expect(artifacts(&stanza).any?(&:requires_sudo?)).to be(true)
-      end
+    it "is true for the stanzas that need root" do
+      stanzas = {
+        "pkg"                  => 'pkg "Foo.pkg"',
+        "keyboard_layout"      => 'keyboard_layout "Foo.bundle"',
+        "installer with sudo"  => 'installer script: { executable: "install.sh", sudo: true }',
+        "install step as root" => 'postflight_steps steps: [{ type: "run", executable: "/usr/bin/true", sudo: true }]',
+      }
+      requires_sudo = stanzas.transform_values { |stanza| artifacts(stanza).any?(&:requires_sudo?) }
+      expect(requires_sudo).to eq(stanzas.transform_values { true })
     end
 
     it "is false for app" do
-      expect(artifacts { app "Foo.app" }.any?(&:requires_sudo?)).to be(false)
+      expect(artifacts('app "Foo.app"').any?(&:requires_sudo?)).to be(false)
     end
   end
 
@@ -94,20 +98,23 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "cask file-permission sudo fallbacks" do
-    {
-      "cask/artifact/moved.rb"                   => [["/bin/cp", "nil"], ["/bin/cp", "nil"], ["/bin/cp", "nil"]],
-      "cask/artifact/symlinked.rb"               => [["/bin/ln", "nil"]],
-      "extend/os/mac/cask/artifact/symlinked.rb" => [["/bin/ln", "nil"]],
-      "cask/utils.rb"                            => [["mkdir", "nil"], ["rmdir", "nil"], ["/bin/rm", "nil"],
-                                                     ["chown", "true"]],
-    }.each do |path, calls|
-      it "runs the same commands with `sudo:` in `#{path}`" do
-        expect(sudo_calls(path)).to eq(calls)
-      end
+    let(:expected_sudo_calls) do
+      {
+        "cask/artifact/moved.rb"                   => [["/bin/cp", "nil"], ["/bin/cp", "nil"], ["/bin/cp", "nil"]],
+        "cask/artifact/symlinked.rb"               => [["/bin/ln", "nil"]],
+        "extend/os/mac/cask/artifact/symlinked.rb" => [["/bin/ln", "nil"]],
+        "cask/utils.rb"                            => [["mkdir", "nil"], ["rmdir", "nil"], ["/bin/rm", "nil"],
+                                                       ["chown", "true"]],
+      }
+    end
 
-      it "has no other `sudo:` arguments in `#{path}`" do
-        expect(sudo_values(path)).to eq(calls.map(&:last))
-      end
+    it "runs the same commands with `sudo:` in each file" do
+      expect(expected_sudo_calls.to_h { |path, _calls| [path, sudo_calls(path)] }).to eq(expected_sudo_calls)
+    end
+
+    it "has no other `sudo:` arguments in each file" do
+      expect(expected_sudo_calls.to_h { |path, _calls| [path, sudo_values(path)] })
+        .to eq(expected_sudo_calls.transform_values { |calls| calls.map(&:last) })
     end
 
     it "still goes through Cask::Utils.gain_permissions_* in `moved.rb` and `symlinked.rb`" do
@@ -118,13 +125,13 @@ RSpec.describe "brew internals", type: :system do
   end
 
   it "rolls back a failed cask upgrade" do
-    expect(brew_source("cask/upgrade.rb")
-      .match?(/^\s*old_cask_installer\.revert_upgrade\(predecessor: new_cask\) if started_upgrade$/))
-      .to be(true), "`cask/upgrade.rb` no longer always reverts a started upgrade that failed"
+    revert_lines = brew_source("cask/upgrade.rb").lines.grep(/revert_upgrade/).map(&:strip)
+    expect("cask/upgrade.rb" => revert_lines)
+      .to eq("cask/upgrade.rb" => ["old_cask_installer.revert_upgrade(predecessor: new_cask) if started_upgrade"])
   end
 
   describe "Homebrew::Ask.confirm?" do
-    define_method(:confirmed_on_tty?) do |key|
+    def confirmed_on_tty?(key)
       allow($stdin).to receive_messages(tty?: true, getch: key)
       allow($stdout).to receive(:tty?).and_return(true)
       Homebrew::Ask.confirm?(action: "upgrade")
@@ -145,7 +152,7 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`brew update-if-needed`" do
-    define_method(:update_if_needed) do |env|
+    def update_if_needed(env)
       script = <<~SH
         brew() { echo "brew $*"; }
         source "#{HOMEBREW_LIBRARY_PATH}/utils/auto-update.sh"
@@ -167,9 +174,9 @@ RSpec.describe "brew internals", type: :system do
   end
 
   it "upgrades keg-only formulae first" do
-    expect(brew_source("upgrade.rb")
-      .match?(/^\s*formulae_to_install\.replace\(formulae_to_install\.partition\(&:keg_only\?\)\.flatten\(1\)\)$/))
-      .to be(true), "`upgrade.rb` no longer moves keg-only formulae to the front"
+    partition_lines = brew_source("upgrade.rb").lines.grep(/partition\(&:keg_only\?\)/).map(&:strip)
+    expect("upgrade.rb" => partition_lines)
+      .to eq("upgrade.rb" => ["formulae_to_install.replace(formulae_to_install.partition(&:keg_only?).flatten(1))"])
   end
 
   it "prints `Installation times` in a fixed format" do
@@ -179,3 +186,5 @@ RSpec.describe "brew internals", type: :system do
       .to output("==> Installation times\nllvm                   2811.400 s\n").to_stdout
   end
 end
+
+# rubocop:enable Sorbet/BlockMethodDefinition
