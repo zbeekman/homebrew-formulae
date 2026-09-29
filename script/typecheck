@@ -7,27 +7,21 @@
 # Sorbet would also scan `.claude/` (other worktrees) and `.tmp/` (scratch
 # files) in the checkout, and `brew typecheck` accepts only one `--ignore`, so
 # check a copy of just the three directories, with the copy's paths in the
-# output mapped back to the checkout. As the copy is discarded, options that
-# edit files or keep running are refused.
+# output mapped back to the checkout. As the copy is discarded, options such as
+# `--fix` and `--lsp` would act on it, so the script takes no arguments.
 set -euo pipefail
 
-for arg in "$@"; do
-  case "${arg}" in
-    # `brew typecheck` accepts unambiguous abbreviations: `--l` and `--ls` are
-    # `--lsp`; `--f` and `--fi` also match `--file`, so it rejects those itself.
-    --fix | --l | --l=* | --ls | --ls=* | --lsp | --lsp=*)
-      echo "script/typecheck: ${arg} is not supported: it would edit or watch a temporary copy." >&2
-      exit 1
-      ;;
-  esac
-done
+if [[ $# -ne 0 ]]; then
+  echo "Usage: script/typecheck (takes no arguments)" >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 copy="$(mktemp -d)"
 trap 'rm -rf "${copy}"' EXIT
 cp -R "${root}/cmd" "${root}/lib" "${root}/spec" "${copy}"
 status=0
-brew typecheck --dir="${copy}" "$@" &>"${copy}/output.txt" || status=$?
+brew typecheck --dir="${copy}" &>"${copy}/output.txt" || status=$?
 # `mktemp -d` may return a symlinked path (macOS `/var` is `/private/var`), so
 # map the physical path, which contains the logical one, first.
 sed -e "s#$(cd "${copy}" && pwd -P)#${root}#g" -e "s#${copy}#${root}#g" "${copy}/output.txt"
