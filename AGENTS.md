@@ -6,6 +6,7 @@ Before finishing, check your work and point out anything the user may not have c
 Update `README.md` when the behaviour it describes changes.
 Follow Homebrew's native behaviour and conventions (paths, flags, output, idioms) wherever possible; when unsure, copy what the nearest built-in command does.
 Write Ruby code (`cmd/`, `lib/`) test-first, red-green-refactor: write a failing spec and see it fail, write the least code to pass it, then refactor with the suite green; only push green commits.
+Run the specs with `brew ruby -- spec/run.rb [<rspec options>] [<spec files>]` from the root of any checkout (the tapped copy or a worktree); it prints a coverage summary and writes `coverage/index.html`.
 Target 95% line coverage of `cmd/` and `lib/` and strive for it, but prioritise tests that catch bugs and exercise edge cases over tests written to raise the number; coverage is reported, not gated.
 
 ## Formula Changes
