@@ -42,14 +42,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         .to output(/\Aformula.*\nllvm .*\nnope +0 +- +- +- +- +3m15s\? +\?/).to_stdout
     end
 
-    it "uses the median with `--estimator=median`" do
-      expect { described_class.new(%w[stats awscli --estimator=median]).run }
-        .to output(/^awscli +3 +3m11s +3m15s +3m00s +0m09s +3m11s /).to_stdout
-    end
-
-    it "rejects an unknown estimator" do
-      expect { described_class.new(%w[stats --estimator=mode]).run }
-        .to raise_error(UsageError, /estimator/)
+    it "rejects `--estimator=median` as an invalid option" do
+      expect { described_class.new(%w[stats awscli --estimator=median]) }
+        .to raise_error(OptionParser::InvalidOption, /estimator/)
     end
 
     it "marks an estimate that is the fallback with `?`" do

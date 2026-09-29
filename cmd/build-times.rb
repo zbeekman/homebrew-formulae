@@ -30,27 +30,22 @@ module Homebrew
       class StatsSubcommand < Homebrew::AbstractSubcommand
         subcommand_args default: true do
           usage_banner <<~EOS
-            `brew build-times stats` [`--estimator=`(`mean`|`median`)] [<formula> ...]:
+            `brew build-times stats` [<formula> ...]:
             Show build time statistics and estimates for <formula> or every logged formula.
             Builds that poured a bottle and builds from source are never mixed.
+            The estimate of a source build is its mean plus 1.5 standard deviations.
             A formula with both kinds gets a row for each, with the estimate used to order its next build of that kind.
             An estimate ending in `?` is a guess: the formula has no usable history of that kind.
           EOS
           named_args :formula
-          flag "--estimator=",
-               description: "Estimate source builds as the `mean` plus 1.5 standard deviations " \
-                            "(default) or the `median`."
         end
 
         sig { override.void }
         def run
-          estimator = args.value("estimator") || "mean"
-          raise UsageError, "`--estimator` must be `mean` or `median`." unless %w[mean median].include?(estimator)
-
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
           names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
           puts "formula                        n   median     mean     mode    stdev  estimate  last"
-          names.flat_map { |name| rows(log, name, estimator.to_sym) }.each { |line| puts line }
+          names.flat_map { |name| rows(log, name) }.each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
         end
@@ -59,25 +54,25 @@ module Homebrew
 
         # One row per kind of build the formula has (source builds, then
         # pours), each with statistics from that kind only.
-        sig { params(log: Timed::BuildLog, name: String, estimator: Symbol).returns(T::Array[String]) }
-        def rows(log, name, estimator)
+        sig { params(log: Timed::BuildLog, name: String).returns(T::Array[String]) }
+        def rows(log, name)
           builds = log.builds(name)
           kinds = %w[built poured].select { |kind| builds.any? { |build| build["status"] == kind } }
-          return [row(log, name, nil, builds.last, estimator)] if kinds.empty?
-          return [row(log, name, kinds.fetch(0), builds.last, estimator)] if kinds.length == 1
+          return [row(log, name, nil, builds.last)] if kinds.empty?
+          return [row(log, name, kinds.fetch(0), builds.last)] if kinds.length == 1
 
           kinds.map do |kind|
-            row(log, name, kind, builds.rfind { |build| build["status"] == kind }, estimator)
+            row(log, name, kind, builds.rfind { |build| build["status"] == kind })
           end
         end
 
         # A row without usable history (no builds, only failed ones, or zero
         # durations) shows the estimate the planner would use, marked with `?`.
         sig {
-          params(log: Timed::BuildLog, name: String, kind: T.nilable(String), latest: T.nilable(Timed::BuildLog::Build),
-                 estimator: Symbol).returns(String)
+          params(log: Timed::BuildLog, name: String, kind: T.nilable(String),
+                 latest: T.nilable(Timed::BuildLog::Build)).returns(String)
         }
-        def row(log, name, kind, latest, estimator)
+        def row(log, name, kind, latest)
           latest ||= {}
           last_text = [latest.fetch("version", "?"), latest.fetch("status", ""), latest.fetch("started", "")[0, 10]]
                       .join(" ")
@@ -88,7 +83,7 @@ module Homebrew
           else
             [0, "-", "-", "-", "-"]
           end
-          seconds = log.estimate(name, pour: kind == "poured", estimator:) || log.fallback_estimate
+          seconds = log.estimate(name, pour: kind == "poured") || log.fallback_estimate
           estimate = "#{Timed::BuildLog.format_duration(seconds)}#{"?" if summary.nil?}"
           format("%<name>-28s %<n>3s %<median>8s %<mean>8s %<mode>8s %<stdev>8s %<estimate>9s  %<last>s",
                  name:, n: durations[0], median: durations[1], mean: durations[2], mode: durations[3],
