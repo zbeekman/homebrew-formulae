@@ -20,7 +20,7 @@ RSpec.describe Timed::BuildLog do
       expect(described_class.load(path).to_h).to eq("schema_version" => 1, "packages" => {})
     end
 
-    it "reads the schema written by `brewup.py`" do
+    it "reads schema version 1" do
       build_counts = log.package_names.to_h { |name| [name, log.builds(name).length] }
       expect(build_counts).to eq("asciidoc" => 1, "awscli" => 3, "llvm" => 1, "openexr" => 2, "wget" => 2)
     end
@@ -110,7 +110,7 @@ RSpec.describe Timed::BuildLog do
       expect(path.read).to eq("[]")
     end
 
-    it "keeps the format of the file `brewup.py` wrote" do
+    it "keeps the format of a sorted, two-space-indented file" do
       path.dirname.mkpath
       FileUtils.cp fixture, path
       described_class.update(path, &change)
@@ -291,7 +291,7 @@ RSpec.describe Timed::BuildLog do
         .to eq([3, 120.0, 103.333, 120, 37.859])
     end
 
-    it "takes the smallest mode and rounds half minutes to even like `brewup.py`" do
+    it "takes the smallest mode and rounds half minutes to even" do
       expect(described_class.summarise([30.0, 90.0])&.mode).to eq(0)
     end
 
@@ -305,7 +305,7 @@ RSpec.describe Timed::BuildLog do
       expect(described_class.format_duration(nil)).to eq("?")
     end
 
-    it "rounds half seconds to even like `brewup.py`" do
+    it "rounds half seconds to even" do
       expect(described_class.format_duration(90.5)).to eq("1m30s")
     end
 

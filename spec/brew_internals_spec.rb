@@ -18,7 +18,7 @@ require "tab"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
 # change fails here instead of during a real upgrade. When one fails, re-check
-# the plan's rule that depends on it before updating the expectation.
+# the `-timed` behaviour that depends on it before updating the expectation.
 RSpec.describe "brew internals", type: :system do
   def brew_source(path) = (HOMEBREW_LIBRARY_PATH/path).read
 

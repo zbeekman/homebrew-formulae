@@ -28,7 +28,7 @@ formula's latest logged build.
 
 The log is `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME` (`~/.homebrew` by
 default, `$XDG_CONFIG_HOME/homebrew` when that is set), written with mode
-`0600`. A `build-log.json` written by `brewup.py` can be copied there as it is.
+`0600`.
 
 ## Documentation
 `brew help`, `man brew` or check [Homebrew's documentation](https://docs.brew.sh).

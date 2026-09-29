@@ -13,9 +13,8 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
   end
 
   describe "stats" do
-    # Expected values match `brewup.py stats` on the same file for formulae
-    # with one kind of build; `openexr` has built and poured builds, which get
-    # a row each and are never mixed.
+    # `openexr` has built and poured builds, which get a row each and are
+    # never mixed.
     let(:table) do
       <<~EOS
         formula                        n   median     mean     mode    stdev  estimate  last

@@ -4,16 +4,16 @@
 require "json"
 
 module Timed
-  # The build-time database: one JSON file in the user config home, in the
-  # schema `brewup.py` writes (`schema_version: 1`, `packages.<name>.builds[]`).
+  # The build-time database: one JSON file in the user config home, in
+  # schema version 1 (`schema_version: 1`, `packages.<name>.builds[]`).
   #
   # Records are plain JSON hashes so fields this code does not know about
   # survive a read-modify-write.
   class BuildLog
     SCHEMA_VERSION = 1
 
-    # Fields kept from a recorded build, in the order `brewup.py` lists them,
-    # plus `verb` (`install`, `upgrade` or `reinstall`).
+    # Fields kept from a recorded build, plus `verb` (`install`, `upgrade` or
+    # `reinstall`).
     ENTRY_KEYS = %w[version started build_seconds install_seconds wall_seconds status batch problems log verb].freeze
 
     DURATION_KEYS = %w[build_seconds install_seconds wall_seconds].freeze
@@ -205,8 +205,8 @@ module Timed
     end
 
     # Durations in seconds of the formula's builds with `status` (`built` or
-    # `poured`; both when nil). Like `brewup.py`, `install_seconds` wins over
-    # `build_seconds` unless it is zero.
+    # `poured`; both when nil). `install_seconds` wins over `build_seconds`
+    # unless it is zero.
     sig { params(name: String, status: T.nilable(String)).returns(T::Array[Float]) }
     def durations(name, status: nil)
       builds(name).filter_map do |build|

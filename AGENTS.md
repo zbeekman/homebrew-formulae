@@ -4,6 +4,7 @@ Keep the diff as small, DRY and YAGNI as possible.
 Re-read relevant files after each prompt and preserve user edits and comments.
 Before finishing, check your work and point out anything the user may not have considered.
 Update `README.md` when the behaviour it describes changes.
+Do not reference tools or files outside this repository, other than Homebrew and its documentation, in code, specs or docs; describe the behaviour instead.
 Follow Homebrew's native behaviour and conventions (paths, flags, output, idioms) wherever possible; when unsure, copy what the nearest built-in command does.
 Write Ruby code (`cmd/`, `lib/`) test-first, red-green-refactor: write a failing spec and see it fail, write the least code to pass it, then refactor with the suite green; only push green commits.
 Run the specs with `brew ruby -- spec/run.rb [<rspec options>] [<spec files>]` from the root of any checkout (the tapped copy or a worktree); it prints a coverage summary and writes `coverage/index.html`.

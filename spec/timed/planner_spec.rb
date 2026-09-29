@@ -9,7 +9,6 @@
 require_relative "../../lib/timed/planner"
 
 RSpec.describe Timed::Planner do
-  # Scenarios ported from `brewup.py`'s `minimal` batching.
   sig {
     params(
       names:     T::Array[String],
