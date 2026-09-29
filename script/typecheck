@@ -24,5 +24,12 @@ status=0
 brew typecheck --dir="${copy}" &>"${copy}/output.txt" || status=$?
 # `mktemp -d` may return a symlinked path (macOS `/var` is `/private/var`), so
 # map the physical path, which contains the logical one, first.
-sed -e "s#$(cd "${copy}" && pwd -P)#${root}#g" -e "s#${copy}#${root}#g" "${copy}/output.txt"
+# Literal Bash substitution, not `sed`, so `&` or `#` in `root` are not special.
+physical_copy="$(cd "${copy}" && pwd -P)"
+while IFS= read -r line || [[ -n "${line}" ]]; do
+  # Unquoted assignment: inside double quotes, older Bash keeps the inner quotes.
+  line=${line//"${physical_copy}"/"${root}"}
+  line=${line//"${copy}"/"${root}"}
+  printf '%s\n' "${line}"
+done <"${copy}/output.txt"
 exit "${status}"
