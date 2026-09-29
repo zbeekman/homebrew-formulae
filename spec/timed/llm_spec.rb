@@ -17,7 +17,6 @@ RSpec.describe Timed::LLM do
     ]
   end
   let(:machine) { { "cpu" => "Intel Core i9-9980HK", "cores" => 8, "memory_gb" => 32, "os" => "macOS 15.7.5" } }
-  let(:anchors) { { "cmake" => 312.5, "ninja" => 41.0 } }
   let(:anthropic) { described_class.settings(key_file: key_file.to_s) }
   let(:openai) { described_class.settings(key_file: write_key_file(openai_key).to_s) }
   let(:local) { described_class.settings(url: local_url, model: "qwen2.5:7b") }
@@ -75,7 +74,7 @@ RSpec.describe Timed::LLM do
   end
 
   def estimates(settings, *responses, seconds: 1.0)
-    described_class.estimates(settings, subjects, machine:, anchors:, http: fake_http(*responses, seconds:), clock:)
+    described_class.estimates(settings, subjects, machine:, http: fake_http(*responses, seconds:), clock:)
   end
 
   def sent
@@ -179,7 +178,7 @@ RSpec.describe Timed::LLM do
         response("#{"x" * 180}#{key}#{"y" * 100}", code: 500),
       ].each do |failure|
         expect do
-          described_class.estimates(settings, subjects, machine:, anchors:, clock:, http: fake_http(failure, failure))
+          described_class.estimates(settings, subjects, machine:, clock:, http: fake_http(failure, failure))
         end.to output(a_string_including("LLM build time estimates failed").and(exclude(key[0, 16]))).to_stderr
       end
     end
@@ -331,7 +330,7 @@ RSpec.describe Timed::LLM do
 
   describe ".estimates" do
     it "sends nothing when there is nothing to estimate" do
-      described_class.estimates(anthropic, [], machine:, anchors:, http: fake_http, clock:)
+      described_class.estimates(anthropic, [], machine:, http: fake_http, clock:)
       expect(requests).to be_empty
     end
 
@@ -340,24 +339,17 @@ RSpec.describe Timed::LLM do
       expect([requests.fetch(0).uri.to_s, requests.fetch(0).addresses]).to eq([local_url, ["127.0.0.1"]])
     end
 
-    it "describes the machine, each formula and the measured build times" do
+    it "describes only the machine and each formula, not measured build times" do
       estimates(anthropic, anthropic_response([]))
       expect(prompt).to eq(
-        "machine"                => machine,
-        "measured_build_seconds" => anchors,
-        "formulae"               => [
+        "machine"  => machine,
+        "formulae" => [
           { "name" => "llvm", "version" => "21.1.2", "desc" => "Next-gen compiler infrastructure",
             "build_dependencies" => ["cmake", "ninja"] },
           { "name" => "lld", "version" => "21.1.2", "desc" => "LLVM Project Linker",
             "build_dependencies" => ["cmake"] },
         ],
       )
-    end
-
-    it "sends at most 30 measured build times" do
-      anchors.replace((1..40).to_h { |n| ["formula#{n}", n.to_f] })
-      estimates(anthropic, anthropic_response([]))
-      expect(prompt["measured_build_seconds"].size).to eq(30)
     end
 
     it "asks Anthropic for the estimates through a forced tool call" do
@@ -673,7 +665,7 @@ RSpec.describe Timed::LLM do
       answer = openai_response([{ name: "llvm", seconds: 3600 }]).body
       port = serve { |client| client.write("HTTP/1.1 200 OK\r\nContent-Length: #{answer.bytesize}\r\n\r\n#{answer}") }
       settings = described_class.settings(url: "http://127.0.0.1:#{port}/v1/chat/completions", model: "qwen2.5:7b")
-      expect(described_class.estimates(settings, subjects, machine:, anchors:)).to eq("llvm" => 3600.0)
+      expect(described_class.estimates(settings, subjects, machine:)).to eq("llvm" => 3600.0)
     end
 
     it "moves on to the next checked address when one refuses the connection" do
@@ -681,7 +673,7 @@ RSpec.describe Timed::LLM do
       port = serve { |client| client.write("HTTP/1.1 200 OK\r\nContent-Length: #{answer.bytesize}\r\n\r\n#{answer}") }
       settings = described_class.settings(url: "http://localhost:#{port}/v1/chat/completions", model: "qwen2.5:7b",
                                           resolver: resolving("::1", "127.0.0.1"))
-      expect(described_class.estimates(settings, subjects, machine:, anchors:)).to eq("llvm" => 3600.0)
+      expect(described_class.estimates(settings, subjects, machine:)).to eq("llvm" => 3600.0)
     end
 
     it "gives up with the connection error once every address refused" do
@@ -723,7 +715,7 @@ RSpec.describe Timed::LLM do
       port = serve { sleep }
       settings = described_class.settings(url: "http://127.0.0.1:#{port}/v1/chat/completions", model: "m")
       times = [0.0, 44.7]
-      expect { described_class.estimates(settings, subjects, machine:, anchors:, clock: -> { times.shift || 45.0 }) }
+      expect { described_class.estimates(settings, subjects, machine:, clock: -> { times.shift || 45.0 }) }
         .to output(/LLM build time estimates failed .*: (execution expired|Net::ReadTimeout)/).to_stderr
     end
   end

@@ -18,7 +18,6 @@ module Timed
 
     BUDGET_SECONDS = 45.0
     MAX_SECONDS = T.let(48 * 60 * 60, Integer)
-    MAX_ANCHORS = 30
     MAX_ERROR_LENGTH = 200
     RESOLVE_TIMEOUT_SECONDS = 5
     # Failures to connect to one address, after which the next may work.
@@ -26,7 +25,6 @@ module Timed
                             Errno::EAFNOSUPPORT].freeze, T::Array[T.class_of(SystemCallError)])
     TOOL = "build_estimates"
     SYSTEM_PROMPT = "You estimate how long Homebrew takes to build formulae from source on one machine. " \
-                    "Measured build times on that machine are given for calibration. " \
                     "Give every formula asked about an estimated build time in seconds."
 
     # A failure worth a warning; the message is shown, redacted.
@@ -251,19 +249,17 @@ module Timed
     sig {
       params(
         settings: Settings, subjects: T::Array[Subject], machine: T::Hash[String, T.any(String, Integer, Float)],
-        anchors: T::Hash[String, Float], http: T.proc.params(request: Request, timeout: Float).returns(Response),
-        clock: T.proc.returns(Float)
+        http: T.proc.params(request: Request, timeout: Float).returns(Response), clock: T.proc.returns(Float)
       ).returns(T::Hash[String, Float])
     }
-    def self.estimates(settings, subjects, machine:, anchors:, http: ->(request, timeout) { post(request, timeout) },
+    def self.estimates(settings, subjects, machine:, http: ->(request, timeout) { post(request, timeout) },
                        clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f })
       return {} if subjects.empty?
 
       deadline = clock.call + BUDGET_SECONDS
       adapter = PROVIDERS.fetch(settings.provider)
       names = subjects.map(&:name)
-      prompt = JSON.generate(machine:, measured_build_seconds: anchors.first(MAX_ANCHORS).to_h,
-                             formulae: subjects.map(&:serialize))
+      prompt = JSON.generate(machine:, formulae: subjects.map(&:serialize))
       request = Request.new(uri: settings.url, addresses: settings.addresses,
                             headers: { "Content-Type" => "application/json", **adapter.headers(settings.key) },
                             body: JSON.generate(adapter.body(settings.model, prompt, schema(names))))
