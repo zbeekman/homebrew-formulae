@@ -129,7 +129,7 @@ module Timed
         after = JSON.generate(log.to_h)
         if after != before
           # Validate what will be in the file, not the in-memory values:
-          # `Rational` and `BigDecimal` are numbers here but strings in JSON.
+          # a `Rational` is a number here but a string in JSON.
           written = JSON.parse(after)
           validate!(target, written)
           target.atomic_write("#{JSON.pretty_generate(sort_keys(written))}\n")

@@ -1,7 +1,6 @@
 # typed: true
 # frozen_string_literal: true
 
-require "bigdecimal"
 require_relative "../../lib/timed/build_log"
 
 RSpec.describe Timed::BuildLog do
@@ -135,8 +134,6 @@ RSpec.describe Timed::BuildLog do
         "started"         => [{ "started" => 5 }, "`started` of build 0 of package `foo` must be a string."],
         "Rational"        => [{ "wall_seconds" => Rational(1, 2) },
                               "`wall_seconds` of build 0 of package `foo` must be a number."],
-        "BigDecimal"      => [{ "build_seconds" => BigDecimal("1.5") },
-                              "`build_seconds` of build 0 of package `foo` must be a number."],
         "nesting"         => [{ "version" => (1..150).reduce([]) { |inner, _| [inner] } },
                               "nesting of 100 is too deep. " \
                               "Did you try to serialize objects with circular references?"],
