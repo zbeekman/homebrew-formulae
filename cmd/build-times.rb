@@ -44,7 +44,7 @@ module Homebrew
         def run
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
           names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
-          puts "formula                        n   median     mean     mode    stdev  estimate  last"
+          puts "formula                      kind     n   median     mean     mode    stdev  estimate  last"
           names.flat_map { |name| rows(log, name) }.each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
@@ -78,9 +78,9 @@ module Homebrew
           end
           seconds = log.estimate(name, pour: kind == "poured") || log.fallback_estimate
           estimate = "#{Timed::BuildLog.format_duration(seconds)}#{"?" if summary.nil?}"
-          format("%<name>-28s %<n>3s %<median>8s %<mean>8s %<mode>8s %<stdev>8s %<estimate>9s  %<last>s",
-                 name:, n: durations[0], median: durations[1], mean: durations[2], mode: durations[3],
-                 stdev: durations[4], estimate:, last: last_text)
+          format("%<name>-28s %<kind>-6s %<n>3s %<median>8s %<mean>8s %<mode>8s %<stdev>8s %<estimate>9s  %<last>s",
+                 name:, kind: kind || "-", n: durations[0], median: durations[1], mean: durations[2],
+                 mode: durations[3], stdev: durations[4], estimate:, last: last_text)
         end
       end
 

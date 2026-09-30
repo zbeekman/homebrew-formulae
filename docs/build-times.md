@@ -29,6 +29,8 @@ The default subcommand. Print a table with a row for each logged formula, or
 for each *`formula`* named, then the fallback estimate for formulae with no
 history. The columns are:
 
+- `kind`: `built` for source builds or `poured` for pours (`-` if the formula
+  has neither), the kind that the row's statistics and estimate are about;
 - `n`: the number of timed builds of that kind;
 - `median`, `mean`, `mode` and `stdev`: the median, mean, most common whole
   number of minutes and standard deviation of the build times;
