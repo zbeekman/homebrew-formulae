@@ -1,0 +1,38 @@
+Warning: `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set: not checking for outdated
+dependents or dependents with broken linkage!
+==> Fetching downloads for: llvm
+==> Upgrading 1 outdated package:
+llvm 23.1.1_1 -> 23.1.2
+✔︎ Patch 1381ad497b9a6d3da630cbef53cbfa9ddf117bb6...40a8c7c0ff3f688b690e4c74db734de67f0f89e9.diff
+✔︎ Patch b8007a8e4020b8bca2b12e941660e10bf5bf6716.patch?full_index=1
+✔︎ Formula llvm (23.1.2)
+==> Upgrading llvm
+  23.1.1_1 -> 23.1.2
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+[34m==>[0m [1mPatching[0m
+[34m==>[0m [1mApplying 1381ad497b9a6d3da630cbef53cbfa9ddf117bb6...40a8c7c0ff3f688b690e4c74[0m
+[34m==>[0m [1mApplying b8007a8e4020b8bca2b12e941660e10bf5bf6716.patch[0m
+[34m==>[0m [1mcmake -S /private/tmp/s-FWVkbp0l/llvm-20260925-67529-930u91/llvm-project-23.[0m
+[34m==>[0m [1mcmake --build build[0m
+[34m==>[0m [1mcmake --build build --target install[0m
+[34m==>[0m [1m/usr/libexec/PlistBuddy -c Add:CFBundleIdentifier string org.llvm.23.1.2 Inf[0m
+[34m==>[0m [1m/usr/libexec/PlistBuddy -c Add:CompatibilityVersion integer 2 Info.plist[0m
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+🍺  /usr/local/Cellar/llvm/23.1.2: 9,335 files, 1.7GB, built in 1 hour 26 minutes
+==> Caveats
+==> llvm
+CLANG_CONFIG_FILE_SYSTEM_DIR: /usr/local/etc/clang
+CLANG_CONFIG_FILE_USER_DIR:   ~/.config/clang
+==> Installation times
+llvm                   5169.797 s
+==> Upgraded 1 requested outdated package
+llvm 23.1.1_1 -> 23.1.2
+==> 1 homebrew/core formula built from source
+llvm

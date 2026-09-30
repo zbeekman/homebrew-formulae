@@ -1,0 +1,165 @@
+==> Fetching downloads for: gumbo-parser, virtualenv, glances, ccache, hunspell, liquid-dsp, qpdf, tcl-tk and imagemagick
+==> Upgrading 9 outdated packages:
+gumbo-parser  0.14.0   -> 0.14.1
+virtualenv    21.12.1  -> 21.13.0
+glances       4.5.6    -> 4.5.7
+ccache        4.14     -> 4.14.1
+hunspell      1.7.3    -> 1.7.4
+liquid-dsp    1.8.2    -> 1.8.3
+qpdf          12.4.1   -> 12.4.2
+tcl-tk        9.0.4    -> 9.0.4_1
+imagemagick   7.1.2-31 -> 7.1.2-32
+✔︎ Formula gumbo-parser (0.14.1)
+✔︎ Formula virtualenv (21.13.0)
+✔︎ Formula glances (4.5.7)
+✔︎ Bottle Manifest asciidoctor (2.0.26)
+✔︎ Bottle asciidoctor (2.0.26)
+✔︎ Bottle Manifest cpp-httplib (0.58.0)
+✔︎ Bottle cpp-httplib (0.58.0)
+✔︎ Bottle Manifest doctest (2.5.3)
+✔︎ Bottle doctest (2.5.3)
+✔︎ Bottle Manifest span-lite (0.11.0)
+✔︎ Bottle span-lite (0.11.0)
+✔︎ Bottle Manifest tl-expected (1.3.1)
+✔︎ Bottle tl-expected (1.3.1)
+✔︎ Formula ccache (4.14.1)
+✔︎ Formula hunspell (1.7.4)
+✔︎ Formula liquid-dsp (1.8.3)
+✔︎ Formula imagemagick (7.1.2-32)
+✔︎ Formula qpdf (12.4.2)
+✔︎ Formula tcl-tk (9.0.4)
+==> Upgrading gumbo-parser
+  0.14.0 -> 0.14.1
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+[34m==>[0m [1m./autogen.sh[0m
+[34m==>[0m [1m./configure --disable-silent-rules[0m
+[34m==>[0m [1mmake install[0m
+🍺  /usr/local/Cellar/gumbo-parser/0.14.1: 11 files, 728.0KB, built in 40 seconds
+==> Upgrading virtualenv
+  21.12.1 -> 21.13.0
+[34m==>[0m [1mpython3.14 -m venv --system-site-packages --without-pip /usr/local/Cellar/vi[0m
+[34m==>[0m [1mpython3.14 -m pip --python=/usr/local/Cellar/virtualenv/21.13.0/libexec/bin/[0m
+🍺  /usr/local/Cellar/virtualenv/21.13.0: 220 files, 9MB, built in 1 minute 28 seconds
+==> Upgrading glances
+  4.5.6 -> 4.5.7
+[34m==>[0m [1mpython3.14 -m venv --system-site-packages --without-pip /usr/local/Cellar/gl[0m
+[34m==>[0m [1mpython3.14 -m pip --python=/usr/local/Cellar/glances/4.5.7/libexec/bin/pytho[0m
+🍺  /usr/local/Cellar/glances/4.5.7: 1,125 files, 11.9MB, built in 3 minutes 34 seconds
+==> Upgrading ccache
+  4.14 -> 4.14.1
+==> Installing dependencies for ccache: asciidoctor, cpp-httplib, doctest, span-lite and tl-expected
+==> Installing ccache dependency: asciidoctor
+==> Pouring asciidoctor--2.0.26.sonoma.bottle.1.tar.gz
+🍺  /usr/local/Cellar/asciidoctor/2.0.26: 3,416 files, 28.8MB
+==> Installing ccache dependency: cpp-httplib
+==> Pouring cpp-httplib--0.58.0.all.bottle.tar.gz
+🍺  /usr/local/Cellar/cpp-httplib/0.58.0: 12 files, 951.8KB
+==> Installing ccache dependency: doctest
+==> Pouring doctest--2.5.3.all.bottle.tar.gz
+🍺  /usr/local/Cellar/doctest/2.5.3: 17 files, 492.9KB
+==> Installing ccache dependency: span-lite
+==> Pouring span-lite--0.11.0.all.bottle.tar.gz
+🍺  /usr/local/Cellar/span-lite/0.11.0: 9 files, 102.7KB
+==> Installing ccache dependency: tl-expected
+==> Pouring tl-expected--1.3.1.all.bottle.tar.gz
+🍺  /usr/local/Cellar/tl-expected/1.3.1: 9 files, 117.8KB
+==> Installing ccache
+[34m==>[0m [1mcmake -S . -B build -DCMAKE_INSTALL_SYSCONFDIR=/usr/local/etc -DENABLE_IPO=T[0m
+[34m==>[0m [1mcmake --build build[0m
+[34m==>[0m [1mctest -j16 --test-dir build --rerun-failed --output-on-failure[0m
+[34m==>[0m [1mcmake --install build[0m
+🍺  /usr/local/Cellar/ccache/4.14.1: 93 files, 2.6MB, built in 1 minute 29 seconds
+==> Upgrading hunspell
+  1.7.3 -> 1.7.4
+[34m==>[0m [1m./configure --disable-silent-rules --with-ui --with-readline[0m
+[34m==>[0m [1mmake[0m
+[34m==>[0m [1mmake check[0m
+[34m==>[0m [1mmake install[0m
+🍺  /usr/local/Cellar/hunspell/1.7.4: 119 files, 2.4MB, built in 1 minute 8 seconds
+==> Upgrading liquid-dsp
+  1.8.2 -> 1.8.3
+[34m==>[0m [1m./bootstrap.sh[0m
+[34m==>[0m [1m./configure[0m
+[34m==>[0m [1mmake install[0m
+🍺  /usr/local/Cellar/liquid-dsp/1.8.3: 12 files, 2.9MB, built in 38 seconds
+==> Upgrading qpdf
+  12.4.1 -> 12.4.2
+[34m==>[0m [1mcmake -S . -B build -DUSE_IMPLICIT_CRYPTO=0 -DREQUIRE_CRYPTO_OPENSSL=1 -DCMA[0m
+[34m==>[0m [1mcmake --build build[0m
+[34m==>[0m [1mcmake --install build[0m
+🍺  /usr/local/Cellar/qpdf/12.4.2: 122 files, 11.6MB, built in 1 minute 48 seconds
+==> Upgrading tcl-tk
+  9.0.4 -> 9.0.4_1
+[34m==>[0m [1m./configure --includedir=/usr/local/Cellar/tcl-tk/9.0.4_1/include/tcl-tk --m[0m
+[34m==>[0m [1mmake install-binaries[0m
+[34m==>[0m [1mmake install[0m
+[34m==>[0m [1mmake install-private-headers[0m
+[34m==>[0m [1m./configure --includedir=/usr/local/Cellar/tcl-tk/9.0.4_1/include/tcl-tk --m[0m
+[34m==>[0m [1mmake[0m
+[34m==>[0m [1mmake install[0m
+[34m==>[0m [1mmake install-private-headers[0m
+[34m==>[0m [1m/usr/local/Cellar/tcl-tk/9.0.4_1/bin/tclsh build.tcl install[0m
+[34m==>[0m [1m./configure --mandir=/usr/local/Cellar/tcl-tk/9.0.4_1/share/man[0m
+[34m==>[0m [1mmake install[0m
+[34m==>[0m [1mmake critcl[0m
+[34m==>[0m [1m./configure --exec-prefix=/usr/local/Cellar/tcl-tk/9.0.4_1 --with-tcl=/usr/l[0m
+[34m==>[0m [1mmake[0m
+[34m==>[0m [1mmake install[0m
+🍺  /usr/local/Cellar/tcl-tk/9.0.4_1: 3,147 files, 39MB, built in 6 minutes
+==> Upgrading imagemagick
+  7.1.2-31 -> 7.1.2-32
+[34m==>[0m [1m./configure --enable-osx-universal-binary=no --disable-silent-rules --disabl[0m
+[34m==>[0m [1mmake install[0m
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+🍺  /usr/local/Cellar/imagemagick/7.1.2-32: 680 files, 26MB, built in 2 minutes 46 seconds
+==> Cleanup
+Removing: /usr/local/Cellar/liquid-dsp/1.8.2... (11 files, 2.9MB)
+Removing: /usr/local/Cellar/gumbo-parser/0.14.0... (11 files, 722.5KB)
+Disable this behaviour by setting `HOMEBREW_NO_INSTALL_CLEANUP=1`.
+Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
+==> Caveats
+Bash completion has been installed to:
+  /usr/local/etc/bash_completion.d
+==> ccache
+==> Installation times
+gumbo-parser             39.000 s
+virtualenv               87.201 s
+glances                 212.655 s
+asciidoctor               1.411 s
+cpp-httplib               1.091 s
+doctest                   1.233 s
+span-lite                 1.046 s
+tl-expected               1.080 s
+ccache                   96.435 s
+hunspell                 67.421 s
+liquid-dsp               37.721 s
+qpdf                    106.434 s
+tcl-tk                  355.928 s
+imagemagick             164.016 s
+==> Upgraded 9 requested outdated packages
+gumbo-parser  0.14.0   -> 0.14.1
+virtualenv    21.12.1  -> 21.13.0
+glances       4.5.6    -> 4.5.7
+ccache        4.14     -> 4.14.1
+hunspell      1.7.3    -> 1.7.4
+liquid-dsp    1.8.2    -> 1.8.3
+qpdf          12.4.1   -> 12.4.2
+tcl-tk        9.0.4    -> 9.0.4_1
+imagemagick   7.1.2-31 -> 7.1.2-32
+==> 9 homebrew/core formulae built from source
+gumbo-parser
+virtualenv
+glances
+ccache
+hunspell
+liquid-dsp
+qpdf
+tcl-tk
+imagemagick

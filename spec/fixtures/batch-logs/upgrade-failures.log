@@ -1,0 +1,73 @@
+Error: this error comes before any formula is named
+==> Fetching downloads for: lib, short, app, tool and other
+✔︎ Formula lib (2.0)
+✔︎ Formula app (2.0)
+✘ Formula tool (2.0)
+Error: curl: (22) The requested URL returned error: 404
+Failure while executing; `/usr/bin/curl --location https://example.com/tool-2.0.tar.gz` exited with 22. Here's the output:
+curl: (22) The requested URL returned error: 404
+✘ Bottle other (3.0_1)
+Error: Bottle reports different checksum:   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+       SHA-256 checksum of downloaded file: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+==> Upgrading 3 outdated packages:
+lib   1.0 -> 2.0
+short 1.0 -> 2.0
+app   1.0 -> 2.0
+==> Upgrading lib
+  1.0 -> 2.0
+==> ./configure --prefix=/usr/local/Cellar/lib/2.0
+==> make install
+Last 15 lines from /Users/user/Library/Logs/Homebrew/lib/02.make:
+cc -c alloc.c
+cc -c buffer.c
+cc -c config.c
+cc -c error.c
+cc -c hash.c
+cc -c list.c
+cc -c parse.c
+cc -c print.c
+cc -c string.c
+cc -c lib.c
+lib.c:1:10: fatal error: 'missing.h' file not found
+    1 | #include <missing.h>
+      |          ^~~~~~~~~~~
+1 error generated.
+make: *** [lib.o] Error 1
+
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+==> Upgrading short
+  1.0 -> 2.0
+==> make install
+Last 15 lines from /Users/user/Library/Logs/Homebrew/short/01.make:
+2026-09-30 10:00:00 +0000
+
+make
+install
+
+make: *** No rule to make target `install`.  Stop.
+
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+==> Upgrading app
+  1.0 -> 2.0
+🍺  /usr/local/Cellar/app/2.0: 12 files, 1.1MB, built in 2 minutes 5 seconds
+==> Checking for dependents of upgraded formulae...
+Error: Not reinstalling 1 broken and outdated, but pinned dependent:
+pinned 1.0
+==> Installation times
+app                     125.250 s
+==> Upgraded 2 requested outdated packages
+lib   1.0 -> 2.0
+app   1.0 -> 2.0
+==> 2 homebrew/core formulae built from source
+lib
+app

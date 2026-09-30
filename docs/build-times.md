@@ -6,6 +6,8 @@
 
 `brew build-times note` *`formula`* *`text`*
 
+`brew build-times restamp` \[*`formula`* ...\]
+
 ## Description
 
 Show and annotate the log of how long formulae took to build from source or to
@@ -51,6 +53,22 @@ successful builds, it is the median of the per-formula mean build times
 
 Append *`text`* to the problems recorded for the latest logged build of
 *`formula`*. It fails if the formula has no logged builds.
+
+### `restamp` \[*`formula`* ...\]
+
+Add the logged build times to the install receipts of installed formulae that
+lack them. Each installed keg of *`formula`*, or of every logged formula, whose
+`INSTALL_RECEIPT.json` has no `build_times` key gets one from the latest logged
+build of the keg's version of the same kind: a pour for a keg poured from a
+bottle, a source build otherwise. Kegs with no such build and
+receipts that already have the key are left alone, so it can be run again
+safely. It prints each keg it stamps.
+
+The key holds the build's `verb` (when logged), `started`, `install_seconds`,
+`build_seconds` and `wall_seconds`. Homebrew ignores it (`brew info` doesn't
+show it), and drops it whenever it rewrites a receipt, e.g. when a formula
+installed as a dependency is installed on request, with `brew tab` or when a
+formula is renamed; this puts it back. Casks are never stamped.
 
 ## Options
 
