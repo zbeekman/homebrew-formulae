@@ -15,6 +15,7 @@ require "cmd/upgrade"
 require "messages"
 require "open3"
 require "tab"
+require_relative "../lib/timed/command"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
 # change fails here instead of during a real upgrade. When one fails, re-check
@@ -34,7 +35,7 @@ RSpec.describe "brew internals", type: :system do
 
   describe "the `cmd_args` block of the wrapped commands" do
     it "is kept in `@parser_block`" do
-      commands = [Homebrew::Cmd::UpgradeCmd, Homebrew::Cmd::InstallCmd, Homebrew::Cmd::Reinstall]
+      commands = %w[upgrade install reinstall].map { |name| Timed::Command.builtin(name) }
       block_classes = commands.to_h { |command| [command.name, command.instance_variable_get(:@parser_block).class] }
       expect(block_classes).to eq(commands.to_h { |command| [command.name, Proc] })
     end
@@ -258,11 +259,11 @@ RSpec.describe "brew internals", type: :system do
 
   describe "`reinstall --zap`" do
     it "is offered by `reinstall`, not `upgrade`" do
-      commands = [Homebrew::Cmd::Reinstall, Homebrew::Cmd::UpgradeCmd]
-      zap_options = commands.to_h do |command|
-        [command.name, command.parser.processed_options.any? { |_short, long, _desc, _hidden| long == "--zap" }]
+      zap_options = %w[reinstall upgrade].to_h do |name|
+        options = Timed::Command.builtin(name).parser.processed_options
+        [name, options.any? { |_short, long, _desc, _hidden| long == "--zap" }]
       end
-      expect(zap_options).to eq({ Homebrew::Cmd::Reinstall.name => true, Homebrew::Cmd::UpgradeCmd.name => false })
+      expect(zap_options).to eq({ "reinstall" => true, "upgrade" => false })
     end
 
     it "is passed on only by `reinstall`, which calls `Installer#zap` only from `uninstall_existing_cask`" do
@@ -468,6 +469,29 @@ RSpec.describe "brew internals", type: :system do
     it "is a no-op with `HOMEBREW_AUTO_UPDATE_CHECKED` set" do
       expect(update_if_needed("HOMEBREW_AUTO_UPDATE_CHECKED" => "1")).to eq("not exec'd\n")
     end
+  end
+
+  # The lines of brew's `cmd/upgrade.rb` from the one that is `first` on,
+  # stripped and with runs of spaces squeezed.
+  def upgrade_lines(first, count)
+    lines = brew_source("cmd/upgrade.rb").lines.map { |line| line.strip.squeeze(" ") }
+    lines.index(first)&.then { |index| lines[index, count] }
+  end
+
+  it "drops pinned formulae, then upgrades each to its alias's new target unless that is up to date" do
+    expected = ["pinned = outdated.select(&:pinned?)", "outdated -= pinned",
+                "formulae_to_install = outdated.map do |f|", "f_latest = f.latest_formula",
+                "if f_latest.latest_version_installed?", "f", "else", "f_latest", "end", "end"]
+    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
+      .to eq("cmd/upgrade.rb" => expected)
+  end
+
+  it "asks by the named arguments as given, and planned names made full names only for named formulae" do
+    expected = ["planned_names: planned_fetch_names.map do |planned_name|",
+                "formulae.find { |formula| formula.full_specified_name == planned_name }&.full_name || planned_name",
+                "end,", "requested_names: args.named,"]
+    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
+      .to eq("cmd/upgrade.rb" => expected)
   end
 
   it "upgrades keg-only formulae first" do
