@@ -89,6 +89,7 @@ module Homebrew
           `build-times` [<subcommand>]
 
           Show and annotate the log of how long formulae took to build from source or to pour a bottle.
+          `brew upgrade-timed` uses it to order its batches.
           The log is `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME` (`~/.homebrew` by default).
         EOS
 

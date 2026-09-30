@@ -99,7 +99,8 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     it "shows the usual `[subcommand]` usage and the description in `docs/build-times.md`", :aggregate_failures do
       expect(help).to start_with("Usage: brew build-times [subcommand] ")
       expect(help)
-        .to include("Show and annotate the log of how long formulae took to build from source or to pour a bottle.")
+        .to include("Show and annotate the log of how long formulae took to build from source or to pour a bottle. " \
+                    "brew upgrade-timed uses it to order its batches.")
     end
 
     it "lists `stats` first" do
