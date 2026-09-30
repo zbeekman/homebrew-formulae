@@ -28,40 +28,9 @@ module Timed
       const :warnings, T::Array[String]
     end
 
-    # The formulae to plan: for `upgrade` the named (or, with none named, all)
-    # outdated formulae plus their outdated recursive dependencies, minus
-    # pinned; for `install` and `reinstall` the named formulae only, since brew
-    # never reinstalls dependencies and installs them inside each call.
-    sig {
-      params(
-        verb:     Symbol,
-        named:    T::Array[String],
-        outdated: T::Array[String],
-        pinned:   T::Array[String],
-        deps:     T::Hash[String, T::Array[String]],
-      ).returns(T::Array[String])
-    }
-    def self.formulae_to_plan(verb:, named:, outdated:, pinned:, deps:)
-      check_verb(verb)
-      return named.uniq if verb != :upgrade
-
-      queue = (named.empty? ? outdated : named) & outdated
-      blocked = pinned & outdated
-      seen = Set.new
-      while (name = queue.shift)
-        # Brew refuses to upgrade past an outdated pinned formula; an
-        # up-to-date pinned one is skipped but its dependencies are still
-        # walked (`Dependency.expand`).
-        next if blocked.include?(name) || !seen.add?(name)
-
-        queue.concat(deps.fetch(name, []))
-      end
-      seen.select { |name| outdated.include?(name) }.to_a
-    end
-
-    # Batches for `names`, and warnings. `deps` maps a formula to its direct
-    # dependencies over the whole graph, including formulae outside `names`
-    # (chains through them count); `estimates` maps to seconds. Every name
+    # Batches for `names`, and warnings. `deps` maps a formula to formulae it
+    # needs, directly or not; those outside `names` count too, as chains
+    # through them are followed; `estimates` maps to seconds. Every name
     # input (`names`, `deps`, `estimates`, `keg_only`, `last`, `exclude`) must
     # use the caller's resolved form, as edges and flags are matched exactly.
     #
@@ -92,7 +61,8 @@ module Timed
       ).returns(Result)
     }
     def self.plan(verb:, names:, deps:, estimates:, keg_only: [], last: [], exclude: [])
-      check_verb(verb)
+      raise ArgumentError, "unknown verb #{verb.inspect}" unless VERBS.include?(verb)
+
       set = names.uniq - exclude
       missing = set.reject { |name| estimates.key?(name) }
       raise ArgumentError, "no estimate for #{missing.join(", ")}" if missing.any?
@@ -112,12 +82,6 @@ module Timed
       end
       Result.new(batches:, warnings:)
     end
-
-    sig { params(verb: Symbol).void }
-    def self.check_verb(verb)
-      raise ArgumentError, "unknown verb #{verb.inspect}" unless VERBS.include?(verb)
-    end
-    private_class_method :check_verb
 
     # Everything `name` needs, directly or not, over the whole graph; includes
     # `name` itself only when it is on a cycle.
