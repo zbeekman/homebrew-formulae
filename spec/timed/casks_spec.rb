@@ -848,6 +848,55 @@ RSpec.describe Timed::Casks do
     it "doesn't check the terminal when no cask needs sudo" do
       expect { plan(first_cask, dialog_cask, tty: -> { raise "checked" }) }.not_to raise_error
     end
+
+    describe "and a cask depends on a skipped cask" do
+      let(:cask_a) { cask("cask-a") { pkg "Foo.pkg" } }
+      let(:cask_b) { cask("cask-b") { depends_on cask: "homebrew/cask/cask-a" } }
+      let(:cask_c) { cask("cask-c") { depends_on cask: "cask-b" } }
+      let(:cask_d) { cask("cask-d") { depends_on cask: "cask-first" } }
+      let(:cask_first) { cask("cask-first") }
+      let(:casks) { [cask_a, cask_b, cask_c, cask_d, cask_first] }
+
+      sig { params(tty: T::Boolean, env: T::Hash[String, String], verb: Symbol).returns(T::Hash[Symbol, T::Array[String]]) }
+      def placed(tty: false, env: {}, verb: :install)
+        result = plan(*casks, in_run: casks.map(&:token), verb:, tty: -> { tty }, env:)
+        { first: tokens(result.first), last: tokens(result.last), skipped: tokens(result.skipped) }
+      end
+
+      it "skips the dependents too, transitively, and only those" do
+        expect(placed).to eq({ first: ["cask-first"], last: ["cask-d"], skipped: ["cask-a", "cask-b", "cask-c"] })
+      end
+
+      it "keeps the reasons of each dependent and names the skipped dependency" do
+        skipped = plan(*casks, in_run: casks.map(&:token), verb: :install, tty: -> { false }).skipped
+        expect(skipped.to_h { |entry| [entry.cask.token, entry.reasons.map { |r| [r.kind, r.message] }] }).to eq(
+          "cask-a" => [[:sudo, "`pkg` requires sudo"]],
+          "cask-b" => [[:dependency, "depends on `homebrew/cask/cask-a`, which is in this run"],
+                       [:dependency, "depends on `cask-a`, which is skipped"]],
+          "cask-c" => [[:dependency, "depends on `cask-b`, which is in this run"],
+                       [:dependency, "depends on `cask-b`, which is skipped"]],
+        )
+      end
+
+      # Defensive: only when the dependency is missing from `in_run`, which
+      # leaves the dependent first.
+      it "skips a dependent that would have gone first" do
+        cask_e = cask("cask-e") { depends_on cask: "cask-a" }
+        result = plan(cask_a, cask_d, cask_e, cask_first, verb: :install, tty: -> { false })
+        expect({ first: tokens(result.first), skipped: tokens(result.skipped) })
+          .to eq({ first: ["cask-d", "cask-first"], skipped: ["cask-a", "cask-e"] })
+      end
+
+      it "skips nothing with a terminal or with `SUDO_ASKPASS` set" do
+        expect({ tty: placed(tty: true), askpass: placed(env: { "SUDO_ASKPASS" => "/usr/bin/askpass" }) }
+          .transform_values { |result| result[:skipped] }).to eq({ tty: [], askpass: [] })
+      end
+
+      it "skips the dependents on install only, as brew installs a dependency on upgrade and reinstall" do
+        expect([:install, :upgrade, :reinstall].to_h { |verb| [verb, placed(verb:)[:skipped]] })
+          .to eq({ install: ["cask-a", "cask-b", "cask-c"], upgrade: ["cask-a"], reinstall: ["cask-a"] })
+      end
+    end
   end
 
   # rubocop:enable Sorbet/BlockMethodDefinition

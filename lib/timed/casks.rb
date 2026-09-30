@@ -120,8 +120,40 @@ module Timed
       if skipped.empty? || tty.call || !env["SUDO_ASKPASS"].to_s.empty?
         last = entries - first
         skipped = []
+      elsif verb == :install
+        skipped, first, last = skip_dependents(skipped, first, last)
       end
       Plan.new(first:, last:, skipped:)
+    end
+
+    # Brew's cask installer installs a missing cask dependency before the cask,
+    # so a dependent of a skipped cask would run the skipped cask's sudo. Move
+    # every such entry to `skipped` too, and those that depend on them in turn.
+    # Only on `install`: it installs just the missing dependencies, and a
+    # dependency that is in an `upgrade` or `reinstall` run is installed
+    # already, so its dependents are left alone there (the caller classifies
+    # the install of an installed, outdated cask as `:upgrade`).
+    sig {
+      params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry])
+        .returns([T::Array[Entry], T::Array[Entry], T::Array[Entry]])
+    }
+    def self.skip_dependents(skipped, first, last)
+      remaining = first + last
+      queue = skipped.dup
+      while (current = queue.shift)
+        dependency = current.cask.token
+        dependents = remaining.select do |entry|
+          entry.cask.depends_on.cask.any? { |name| Utils.name_from_full_name(name) == dependency }
+        end
+        remaining -= dependents
+        moved = dependents.map do |entry|
+          reason = Reason.new(kind: :dependency, message: "depends on `#{dependency}`, which is skipped")
+          Entry.new(cask: entry.cask, reasons: entry.reasons + [reason])
+        end
+        skipped += moved
+        queue += moved
+      end
+      [skipped, first & remaining, last & remaining]
     end
 
     sig {

@@ -397,6 +397,22 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "the cask installer's dependencies" do
+    it "installs a missing cask dependency before the cask, unless `--skip-cask-deps` is set" do
+      source = brew_source("cask/installer.rb")
+      def_lines = ->(name) { source[/^    def #{name}\b.*?^    end$/m].to_s.lines.map(&:strip) }
+      install_missing = "cask_installers.reject { |installer| installer.cask.installed? }.each(&:install)"
+      wanted = {
+        "fetch"                                 => "satisfy_cask_and_formula_dependencies",
+        "satisfy_cask_and_formula_dependencies" => install_missing,
+        "missing_cask_and_formula_dependencies" => "cask_or_formula.installed?",
+        "dependency_installers"                 => "next if skip_cask_deps?",
+      }
+      expect(wanted.to_h { |name, line| [name, def_lines.call(name).include?(line)] })
+        .to eq(wanted.transform_values { true })
+    end
+  end
+
   describe "`set_ownership` install steps" do
     it "fails without App Management permission, and runs `chown` with `sudo: nil`" do
       body = brew_source("install_steps.rb")[/^      def run_set_ownership\(step\)\n.*?^      end$/m]
