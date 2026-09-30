@@ -6,8 +6,11 @@
 raise "Run the specs with `brew ruby -- spec/run.rb`." unless ENV["HOMEBREW_TESTS"]
 
 require "simplecov"
+require "sorbet-runtime"
+tap_root = File.expand_path("..", __dir__)
 SimpleCov.start do
-  root File.expand_path("..", __dir__)
+  T.bind(self, SimpleCov::Configuration)
+  root tap_root
   enable_coverage :branch
   primary_coverage :line
   cover "{cmd,lib}/**/*.rb"

@@ -51,3 +51,25 @@ jobs:
       # In containers `setup-homebrew` leaves the tap out of the workspace.
       - run: brew ruby -- spec/run.rb
         working-directory: ${{ steps.set-up-homebrew.outputs.repository-path }}
+
+  typecheck:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/homebrew/brew:main # zizmor: ignore[unpinned-images]
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478 # 2026.09.28.1
+
+      - name: Cache Homebrew Bundler RubyGems
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.set-up-homebrew.outputs.gems-path }}
+          key: ubuntu-latest-typecheck-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
+          restore-keys: ubuntu-latest-typecheck-rubygems-
+
+      # Static Sorbet check of the tap's `cmd/`, `lib/` and `spec/`. Keep in
+      # step with `script/typecheck`, the same check for a worktree.
+      - run: brew typecheck zbeekman/tap

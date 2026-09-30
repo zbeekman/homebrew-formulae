@@ -1,0 +1,35 @@
+#!/bin/bash
+# Static Sorbet check of this checkout's `cmd/`, `lib/` and `spec/`, as the
+# `typecheck` job in `.github/workflows/specs.yml` does for the tapped copy.
+# `brew typecheck zbeekman/tap` only sees the tapped copy, so this passes a
+# directory instead; run it from any checkout (the tapped copy or a worktree).
+#
+# Sorbet would also scan `.claude/` (other worktrees) and `.tmp/` (scratch
+# files) in the checkout, and `brew typecheck` accepts only one `--ignore`, so
+# check a copy of just the three directories, with the copy's paths in the
+# output mapped back to the checkout. As the copy is discarded, options such as
+# `--fix` and `--lsp` would act on it, so the script takes no arguments.
+set -euo pipefail
+
+if [[ $# -ne 0 ]]; then
+  echo "Usage: script/typecheck (takes no arguments)" >&2
+  exit 1
+fi
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+copy="$(mktemp -d)"
+trap 'rm -rf "${copy}"' EXIT
+cp -R "${root}/cmd" "${root}/lib" "${root}/spec" "${copy}"
+status=0
+brew typecheck --dir="${copy}" &>"${copy}/output.txt" || status=$?
+# `mktemp -d` may return a symlinked path (macOS `/var` is `/private/var`), so
+# map the physical path, which contains the logical one, first.
+# Literal Bash substitution, not `sed`, so `&` or `#` in `root` are not special.
+physical_copy="$(cd "${copy}" && pwd -P)"
+while IFS= read -r line || [[ -n "${line}" ]]; do
+  # Unquoted assignment: inside double quotes, older Bash keeps the inner quotes.
+  line=${line//"${physical_copy}"/"${root}"}
+  line=${line//"${copy}"/"${root}"}
+  printf '%s\n' "${line}"
+done <"${copy}/output.txt"
+exit "${status}"
