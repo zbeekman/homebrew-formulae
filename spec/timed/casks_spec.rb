@@ -102,6 +102,9 @@ RSpec.describe Timed::Casks do
     facts(entries: { directory.to_s => [0, true], "#{directory}/f" => [0, true] }, unwritable: [directory.to_s])
   end
 
+  sig { returns(T::Array[Symbol]) }
+  def all_verbs = [:install, :upgrade, :reinstall]
+
   describe "dependencies in this run" do
     it "puts a cask with no dependencies first" do
       expect(tokens(plan(cask).first)).to eq(["foo"])
@@ -134,12 +137,14 @@ RSpec.describe Timed::Casks do
 
   describe "flight blocks" do
     it "puts a cask with any flight block last, for sudo" do
-      {
-        Cask::Artifact::PreflightBlock  => [:preflight, :uninstall_preflight],
-        Cask::Artifact::PostflightBlock => [:postflight, :uninstall_postflight],
-      }.each do |klass, keys|
-        keys.each { |key| expect(kinds(plan(cask_with_block(klass, key)).last)).to eq([:sudo]), key.to_s }
-      end
+      blocks = {
+        preflight:            Cask::Artifact::PreflightBlock,
+        uninstall_preflight:  Cask::Artifact::PreflightBlock,
+        postflight:           Cask::Artifact::PostflightBlock,
+        uninstall_postflight: Cask::Artifact::PostflightBlock,
+      }
+      actual = blocks.to_h { |key, klass| [key, kinds(plan(cask_with_block(klass, key)).last)] }
+      expect(actual).to eq(blocks.transform_values { [:sudo] })
     end
   end
 
@@ -171,27 +176,29 @@ RSpec.describe Timed::Casks do
 
     let(:dialog_directives) { { "quit" => { quit: "com.foo" } } }
 
-    it "puts a cask with a root directive last on upgrade and reinstall, for sudo" do
-      sudo_directives.each do |name, directives|
-        upgrading.each do |verb|
-          expect(kinds(plan(cask { uninstall(**directives) }, verb:).last)).to eq([:sudo]), "#{name} on #{verb}"
-        end
+    def expected_kinds(directives_by_name, kind)
+      directives_by_name.transform_values { upgrading.to_h { |verb| [verb, [kind]] } }
+    end
+
+    # `{ name => { verb => kinds } }` of the cask that `uninstall`s each directive.
+    def kinds_by_directive_and_verb(directives_by_name)
+      directives_by_name.transform_values do |directives|
+        upgrading.to_h { |verb| [verb, kinds(plan(cask { uninstall(**directives) }, verb:).last)] }
       end
+    end
+
+    it "puts a cask with a root directive last on upgrade and reinstall, for sudo" do
+      expect(kinds_by_directive_and_verb(sudo_directives)).to eq(expected_kinds(sudo_directives, :sudo))
     end
 
     it "puts a cask with a dialog directive last on upgrade and reinstall, for a dialog" do
-      dialog_directives.each do |name, directives|
-        upgrading.each do |verb|
-          expect(kinds(plan(cask { uninstall(**directives) }, verb:).last)).to eq([:dialog]), "#{name} on #{verb}"
-        end
-      end
+      expect(kinds_by_directive_and_verb(dialog_directives)).to eq(expected_kinds(dialog_directives, :dialog))
     end
 
     it "leaves a cask with `signal` first on upgrade and reinstall, as brew skips it" do
-      upgrading.each do |verb|
-        cask = cask { uninstall signal: ["TERM", "com.foo"] }
-        expect(tokens(plan(cask, verb:).first)).to eq(["foo"]), verb.to_s
-      end
+      cask = cask { uninstall signal: ["TERM", "com.foo"] }
+      expect(upgrading.to_h { |verb| [verb, tokens(plan(cask, verb:).first)] })
+        .to eq(upgrading.to_h { |verb| [verb, ["foo"]] })
     end
 
     it "puts a cask with `signal` last when `on_upgrade` includes it, for a dialog" do
@@ -207,17 +214,18 @@ RSpec.describe Timed::Casks do
     end
 
     it "leaves a cask with `login_item` first on upgrade and reinstall, as brew returns early" do
-      upgrading.each do |verb|
-        expect(tokens(plan(cask { uninstall login_item: "Foo" }, verb:).first)).to eq(["foo"]), verb.to_s
-      end
+      expect(upgrading.to_h { |verb| [verb, tokens(plan(cask { uninstall login_item: "Foo" }, verb:).first)] })
+        .to eq(upgrading.to_h { |verb| [verb, ["foo"]] })
     end
 
     it "leaves a cask with any directive first on install" do
       extra = { "signal"     => { signal: ["TERM", "com.foo"], on_upgrade: :signal },
                 "login_item" => { login_item: "Foo" } }
-      sudo_directives.merge(dialog_directives, extra).each do |name, directives|
-        expect(tokens(plan(cask { uninstall(**directives) }, verb: :install).first)).to eq(["foo"]), name
+      all = sudo_directives.merge(dialog_directives, extra)
+      actual = all.transform_values do |directives|
+        tokens(plan(cask { uninstall(**directives) }, verb: :install).first)
       end
+      expect(actual).to eq(all.transform_values { ["foo"] })
     end
 
     it "leaves a cask with `script` without sudo first" do
@@ -278,16 +286,14 @@ RSpec.describe Timed::Casks do
 
     it "puts an `app` last on every verb when its directory is not writable" do
       world = facts(entries: { "/Applications" => [0, true] }, unwritable: ["/Applications"])
-      [:install, :upgrade, :reinstall].each do |verb|
-        expect(kinds(plan(app, verb:, world:).last)).to eq([:sudo]), verb.to_s
-      end
+      expect(all_verbs.to_h { |verb| [verb, kinds(plan(app, verb:, world:).last)] })
+        .to eq(all_verbs.to_h { |verb| [verb, [:sudo]] })
     end
 
     it "puts a `binary` last on every verb when its directory is not writable" do
       world = facts(entries: { "/opt/bin" => [0, true] }, unwritable: ["/opt/bin"])
-      [:install, :upgrade, :reinstall].each do |verb|
-        expect(kinds(plan(binary, verb:, world:).last)).to eq([:sudo]), verb.to_s
-      end
+      expect(all_verbs.to_h { |verb| [verb, kinds(plan(binary, verb:, world:).last)] })
+        .to eq(all_verbs.to_h { |verb| [verb, [:sudo]] })
     end
 
     it "checks the nearest existing ancestor when the directory is missing" do
@@ -382,10 +388,10 @@ RSpec.describe Timed::Casks do
     end
 
     it "puts a `remove` step last on every verb when its directory is not writable" do
-      [:install, :upgrade, :reinstall].each do |verb|
-        expect(kinds(plan(remove_cask("/opt/x/f"), verb:, world: readonly_world("/opt/x")).last))
-          .to eq([:sudo]), verb.to_s
+      actual = all_verbs.to_h do |verb|
+        [verb, kinds(plan(remove_cask("/opt/x/f"), verb:, world: readonly_world("/opt/x")).last)]
       end
+      expect(actual).to eq(all_verbs.to_h { |verb| [verb, [:sudo]] })
     end
 
     it "leaves a `remove` step first when its path is missing, as brew has nothing to remove" do
@@ -461,10 +467,11 @@ RSpec.describe Timed::Casks do
     end
 
     it "treats a base it can't resolve as unresolved, not as writable" do
-      %w[temp relative search_path formula_opt_prefix formula_pkgetc bogus].each do |base|
-        expect(messages(plan(remove_cask("x/f", base:)).last))
-          .to eq(["`postflight_steps` runs `remove` with sudo when its target is not writable"]), base
-      end
+      bases = %w[temp relative search_path formula_opt_prefix formula_pkgetc bogus]
+      expect(bases.to_h { |base| [base, messages(plan(remove_cask("x/f", base:)).last)] })
+        .to eq(bases.to_h do |base|
+          [base, ["`postflight_steps` runs `remove` with sudo when its target is not writable"]]
+        end)
     end
 
     it "resolves a step path relative to the staged path" do
@@ -560,18 +567,17 @@ RSpec.describe Timed::Casks do
     let(:ownership) { [{ type: "set_ownership", paths: [{ path: "/Applications/Foo.app" }] }] }
 
     it "puts a cask last, for sudo, when a step runs as root" do
-      [:uninstall_preflight_steps, :uninstall_postflight_steps].each do |stanza|
-        upgrading.each do |verb|
-          expect(kinds(plan(cask_with_steps(stanza, root_run), verb:).last)).to eq([:sudo]), "#{stanza} on #{verb}"
-        end
+      stanzas = [:uninstall_preflight_steps, :uninstall_postflight_steps]
+      actual = stanzas.to_h do |stanza|
+        [stanza, upgrading.to_h { |verb| [verb, kinds(plan(cask_with_steps(stanza, root_run), verb:).last)] }]
       end
+      expect(actual).to eq(stanzas.to_h { |stanza| [stanza, upgrading.to_h { |verb| [verb, [:sudo]] }] })
     end
 
     it "puts a cask last, for sudo, when a step deletes a keychain certificate" do
-      upgrading.each do |verb|
-        cask = cask_with_steps(:uninstall_postflight_steps, keychain)
-        expect(kinds(plan(cask, verb:).last)).to eq([:sudo]), verb.to_s
-      end
+      cask = cask_with_steps(:uninstall_postflight_steps, keychain)
+      expect(upgrading.to_h { |verb| [verb, kinds(plan(cask, verb:).last)] })
+        .to eq(upgrading.to_h { |verb| [verb, [:sudo]] })
     end
 
     it "leaves a cask with root steps first on install" do
@@ -659,13 +665,13 @@ RSpec.describe Timed::Casks do
       entries = { "/opt/bin" => [0, true], "/opt/bin/foo" => [501, true] }
       links = { "/opt/bin/foo" => "/opt/src" }
       unwritable = facts(entries:, unwritable: ["/opt/bin"], links:)
-      [true, "if_needed"].each do |sudo|
+      actual = [true, "if_needed"].to_h do |sudo|
         old = cask { postflight_steps steps: [step.merge(sudo:)] }
-        expect([kinds(plan(cask, installed: { "foo" => old }, world: unwritable).last),
+        [sudo, [kinds(plan(cask, installed: { "foo" => old }, world: unwritable).last),
                 tokens(plan(cask, installed: { "foo" => old }, world: facts(entries:, links:)).first),
-                tokens(plan(cask, installed: { "foo" => old }, world: facts).first)])
-          .to eq([[:sudo], ["foo"], ["foo"]]), sudo.inspect
+                tokens(plan(cask, installed: { "foo" => old }, world: facts).first)]]
       end
+      expect(actual).to eq({ true => [[:sudo], ["foo"], ["foo"]], "if_needed" => [[:sudo], ["foo"], ["foo"]] })
     end
 
     it "leaves an installed link removal first when the target isn't a link to the source, as brew leaves it" do
@@ -756,9 +762,8 @@ RSpec.describe Timed::Casks do
   describe "`set_ownership` install steps" do
     it "puts a cask last on every verb, for sudo (`chown` retries with it) and a dialog" do
       cask = cask { postflight_steps { set_ownership "/Applications/Foo.app" } }
-      [:install, :upgrade, :reinstall].each do |verb|
-        expect(kinds(plan(cask, verb:).last)).to eq([:sudo, :dialog]), verb.to_s
-      end
+      expect(all_verbs.to_h { |verb| [verb, kinds(plan(cask, verb:).last)] })
+        .to eq(all_verbs.to_h { |verb| [verb, [:sudo, :dialog]] })
     end
   end
 
