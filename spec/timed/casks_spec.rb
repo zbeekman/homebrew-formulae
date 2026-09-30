@@ -25,6 +25,7 @@ class FakeCaskFacts
   end
 
   def walk(path)
+    walked << path.to_s
     @entries.keys.select { |key| key == path.to_s || key.start_with?("#{path}/") }.filter_map do |key|
       lstat(Pathname(key))
     end
@@ -33,6 +34,9 @@ class FakeCaskFacts
   # Like `Pathname#writable?`: false for anything that isn't there.
   def writable?(path) = (path.root? || !lstat(path).nil?) && @unwritable.exclude?(path.to_s)
   def realpath(path) = @realpaths[path.to_s]
+
+  # Every path handed to `walk`, in order.
+  def walked = @walked ||= []
 
   def readlink(path)
     target = @links[path.to_s]
@@ -651,6 +655,13 @@ RSpec.describe Timed::Casks do
       world = facts(entries: { "/Applications" => [501, true], "/Applications/Old.app" => [0, true] })
       expect(kinds(plan(cask { app "Foo.app", target: "/Applications/Foo.app" },
                         installed: { "foo" => old }, world:).last)).to eq([:sudo])
+    end
+
+    it "walks a bundle once when the old and new casks share its target" do
+      old = cask { app "Foo.app", target: "/Applications/Foo.app" }
+      world = facts(entries: { "/Applications" => [501, true], "/Applications/Foo.app" => [501, true] })
+      plan(cask { app "Foo.app", target: "/Applications/Foo.app" }, installed: { "foo" => old }, world:)
+      expect(world.walked).to eq(["/Applications/Foo.app"])
     end
 
     it "checks the directory of the installed cask's link, which brew unlinks" do

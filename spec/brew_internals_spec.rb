@@ -170,14 +170,14 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`sudo: :if_needed` install steps" do
-    it "check `dirname.writable?` of a removed path and of a symlink's target" do
+    it "checks `dirname.writable?` of a removed path and of a symlink's target" do
       checked = brew_source("install_steps.rb").scan(/step\["sudo"\] == "if_needed" && !(\w+)\.dirname\.writable\?/)
       expect(checked.flatten).to eq(["path", "target", "target"])
     end
   end
 
   describe "optional install steps" do
-    it "count for sudo only when `include_optional` is set, which `requires_sudo?` leaves out" do
+    it "counts for sudo only when `include_optional` is set, which `requires_sudo?` leaves out" do
       expect(brew_source("install_steps.rb")).to include(
         '(include_optional && (step["sudo"] == "if_needed" || step["type"] == "set_ownership"))',
       )
@@ -311,7 +311,7 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`set_ownership` install steps" do
-    it "fail without App Management permission, and run `chown` with `sudo: nil`" do
+    it "fails without App Management permission, and runs `chown` with `sudo: nil`" do
       body = brew_source("install_steps.rb")[/^      def run_set_ownership\(step\)\n.*?^      end$/m]
       expect(body).to match(/app_management_permissions_granted\?.*raise ::Cask::CaskError/m)
       expect(body).to match(/@command\.run!\("chown".*?sudo: nil\)/m)

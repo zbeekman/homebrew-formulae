@@ -127,8 +127,8 @@ module Timed
       if upgrading
         uninstalled = old || cask
         reasons += flight_blocks(uninstalled, uninstall: true) + uninstall_directives(uninstalled) +
-                   uninstall_steps(uninstalled, facts:) + replaced_bundles(cask, facts:)
-        reasons += replaced_bundles(old, facts:) + unwritable_directories(old, facts:) if old
+                   uninstall_steps(uninstalled, facts:) + replaced_bundles([cask, old].compact, facts:)
+        reasons += unwritable_directories(old, facts:) if old
       end
       reasons += unwritable_directories(cask, facts:)
       reasons += altname_metadata(cask, facts:) if macos
@@ -200,9 +200,11 @@ module Timed
     # for an entry that isn't the user's) and moves the new one in (`sudo cp`
     # when the target isn't writable). Typical trigger: root-owned helpers
     # inside an app that updated itself.
-    sig { params(cask: Cask::Cask, facts: Facts).returns(T::Array[Reason]) }
-    def self.replaced_bundles(cask, facts:)
-      cask.artifacts.grep(Cask::Artifact::Moved).filter_map do |artifact|
+    # A target shared by the old and new cask is walked once.
+    sig { params(casks: T::Array[Cask::Cask], facts: Facts).returns(T::Array[Reason]) }
+    def self.replaced_bundles(casks, facts:)
+      moved = casks.flat_map { |cask| cask.artifacts.grep(Cask::Artifact::Moved) }
+      moved.uniq(&:target).filter_map do |artifact|
         target = artifact.target
         next if facts.lstat(target).nil?
 
