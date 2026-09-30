@@ -471,6 +471,29 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  # The lines of brew's `cmd/upgrade.rb` from the one that is `first` on,
+  # stripped and with runs of spaces squeezed.
+  def upgrade_lines(first, count)
+    lines = brew_source("cmd/upgrade.rb").lines.map { |line| line.strip.squeeze(" ") }
+    lines.index(first)&.then { |index| lines[index, count] }
+  end
+
+  it "drops pinned formulae, then upgrades each to its alias's new target unless that is up to date" do
+    expected = ["pinned = outdated.select(&:pinned?)", "outdated -= pinned",
+                "formulae_to_install = outdated.map do |f|", "f_latest = f.latest_formula",
+                "if f_latest.latest_version_installed?", "f", "else", "f_latest", "end", "end"]
+    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
+      .to eq("cmd/upgrade.rb" => expected)
+  end
+
+  it "asks by the named arguments as given, and planned names made full names only for named formulae" do
+    expected = ["planned_names: planned_fetch_names.map do |planned_name|",
+                "formulae.find { |formula| formula.full_specified_name == planned_name }&.full_name || planned_name",
+                "end,", "requested_names: args.named,"]
+    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
+      .to eq("cmd/upgrade.rb" => expected)
+  end
+
   it "upgrades keg-only formulae first" do
     partition_lines = brew_source("upgrade.rb").lines.grep(/partition\(&:keg_only\?\)/).map(&:strip)
     expect("upgrade.rb" => partition_lines)

@@ -59,7 +59,12 @@ module Homebrew
         else
           Formula.installed
         end
-        roots = candidates.select { |formula| outdated?(formula) }
+        # As `brew upgrade` does, unpinned outdated formulae installed through
+        # an alias whose target has changed are upgraded to the new target.
+        roots = candidates.select { |formula| outdated?(formula) }.reject(&:pinned?).map do |formula|
+          latest = formula.latest_formula
+          latest.latest_version_installed? ? formula : latest
+        end
         needs = dependencies(roots)
         formulae = needs.values.flatten.concat(roots).to_h { |formula| [formula.full_name, formula] }
         set = needs.keys
@@ -87,13 +92,14 @@ module Homebrew
         return if args.dry_run? || planned.empty?
 
         # Once for the whole run, by brew's rules: with named formulae, only if
-        # the plan has others too, or brew would install dependencies or
-        # upgrade dependents of the named ones it plans.
+        # the plan has others than the names as given, or brew would install
+        # dependencies of the named ones it plans, or upgrade dependents of
+        # any of them (brew checks those before refusing any).
         upgrading = roots.select { |formula| needs.key?(formula.full_name) }
         force = args.named.present? &&
-                (upgrading.any? { |formula| needs.fetch(formula.full_name).any? } || outdated_dependents?(upgrading))
+                (upgrading.any? { |formula| needs.fetch(formula.full_name).any? } || outdated_dependents?(roots))
         ask = !args.no_ask? && Install.ask_prompt_needed?(
-          planned_names: planned, requested_names: named.map(&:full_name), force:, named: args.named.present?,
+          planned_names: planned, requested_names: args.named, force:, named: args.named.present?,
         )
         # Exits on "n"; returns false without a terminal, where brew carries on
         # unasked.
@@ -125,7 +131,7 @@ module Homebrew
       end
 
       # What brew would install or upgrade before each formula it upgrades,
-      # by full name, from `roots` on: brew's own expansion, so build
+      # by full name, from the unpinned `roots` on: brew's own expansion, so build
       # dependencies only count for formulae built from source that aren't
       # current. Outdated dependencies, other than pinned ones, get their own
       # entry, so the keys are the formulae to upgrade. Formulae brew would
@@ -136,8 +142,6 @@ module Homebrew
       def dependencies(roots)
         needs = T.let({}, T::Hash[String, T::Array[Formula]])
         queue = roots.reject do |root|
-          next true if root.pinned?
-
           installer(root).check_install_sanity
           false
         rescue CannotInstallFormulaError, FormulaUnavailableError

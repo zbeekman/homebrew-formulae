@@ -297,6 +297,20 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect { run_command("--dry-run") }.to output("==> No formulae to upgrade\n").to_stdout
     end
 
+    it "plans the new target of the alias a formula was installed with, as `brew upgrade` does" do
+      stub_formula("lib")
+      target = stub_formula("cmake", nil, deps: %w[lib])
+      allow(stub_formula("old")).to receive(:latest_formula).and_return(target)
+      expect { run_command("--dry-run", "old") }
+        .to output(/\A==> Would upgrade 2 formulae.*^lib .*^cmake +build +3m20s$/m).to_stdout
+    end
+
+    it "keeps a formula whose alias's new target is already installed" do
+      target = stub_formula("cmake", "2.0")
+      allow(stub_formula("old")).to receive(:latest_formula).and_return(target)
+      expect { run_command("--dry-run", "old") }.to output(/\A==> Would upgrade 1 formula.*^old +build /m).to_stdout
+    end
+
     it "doesn't plan a named formula not below `--minimum-version`" do
       stub_formula("cmake", "1.5")
       expect { run_command("--dry-run", "--minimum-version=1.2", "cmake") }
@@ -344,6 +358,19 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         .to raise_error(SystemExit).and output(/Running the batches is not implemented yet/).to_stderr
     end
 
+    it "checks the dependents of a refused named formula too, as `brew upgrade` does, and asks" do
+      allow(stub_formula("lib")).to receive(:pinned?).and_return(true)
+      app = stub_formula("app", deps: %w[lib])
+      other = stub_formula("other")
+      dependent = stub_formula("dependent", bottled: true, deps: %w[app])
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [dependent], pinned: [], skipped: [])
+      expect(Homebrew::Upgrade).to receive(:dependants)
+        .with([app, other], hash_including(dry_run: true))
+        .and_return(dependents)
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      run_to_end("app", "other")
+    end
+
     it "asks when a named formula needs a dependency brew would install, as `brew upgrade` does" do
       stub_formula("new", nil)
       stub_formula("app", deps: %w[new])
@@ -360,6 +387,21 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         .and_return(dependents)
       expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
       run_to_end("app")
+    end
+
+    it "compares the plan with the named arguments as given, as `brew upgrade` does" do
+      stub_formula_loader(stub_formula("app"), "homebrew/core/app")
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      run_to_end("homebrew/core/app")
+    end
+
+    it "checks the dependents of an alias's new target, which brew upgrades instead" do
+      target = stub_formula("cmake", nil)
+      allow(stub_formula("old")).to receive(:latest_formula).and_return(target)
+      expect(Homebrew::Upgrade).to receive(:dependants).with([target], hash_including(dry_run: true))
+                                                       .and_call_original
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      run_to_end("old")
     end
 
     it "doesn't check dependents with `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`, which the preview warns about" do

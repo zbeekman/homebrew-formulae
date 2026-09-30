@@ -9,12 +9,14 @@
 Upgrade outdated, unpinned formulae like `brew upgrade`, in timed batches:
 dependencies first, then the quickest, so quick upgrades finish early and slow
 builds never hold them up. With no *`installed_formula`* named, that is every
-outdated formula; with some named, it is those. Either way it includes the
-outdated dependencies Homebrew would upgrade first, found as Homebrew finds
-them: build dependencies only count for formulae built from source that are
-not current, and a formula that pours a bottle leaves alone any dependency
-installed at least at the version its bottle was built with (when the bottle's
-manifest can be downloaded).
+outdated formula; with some named, it is those. A formula installed through an
+alias whose target has changed is upgraded to the new target, unless that is
+already installed and up to date, as `brew upgrade` does. Either way it
+includes the outdated dependencies Homebrew would upgrade first, found as
+Homebrew finds them: build dependencies only count for formulae built from
+source that are not current, and a formula that pours a bottle leaves alone any
+dependency installed at least at the version its bottle was built with (when
+the bottle's manifest can be downloaded).
 
 The estimates come from the log shown by
 [`brew build-times`](build-times.md). A formula that will pour a bottle is
@@ -26,10 +28,12 @@ is set, and runs again from the start if that fetched anything. Then it prints
 the plan from `brew upgrade --dry-run`, with the same options and named
 arguments, and the batches with their estimates, then asks for confirmation
 once for the whole run under `brew upgrade`'s rules: with named arguments, only
-if the batches include formulae that are not named, or Homebrew would install
-dependencies or upgrade outdated dependents of the named formulae; otherwise,
-if there is anything to upgrade. Without a terminal it carries on without
-asking, as `brew upgrade` does.
+if the batches include formulae other than the names as given (so a new alias
+target, an alias or a name not given exactly as the formula's full name, e.g.
+a core formula with its tap or another tap's formula without it, counts as
+another), or Homebrew would install dependencies or upgrade outdated
+dependents of the named formulae; otherwise, if there is anything to upgrade.
+Without a terminal it carries on without asking, as `brew upgrade` does.
 
 Formulae it won't upgrade (up to date, not installed, pinned, unknown or
 needing a newer version of a pinned dependency) are reported by
