@@ -30,7 +30,7 @@ RSpec.describe Timed::Command do
 
     it "forwards everything but its own and the ask flags to the preview" do
       options = %w[--debug --dry-run --ask --no-ask --formula --build-from-source --guess=llvm=1h --estimator=median
-                   --last=llvm --exclude=go --minimum-version=1.0]
+                   --last=llvm --exclude=go --no-stamp-receipts --minimum-version=1.0]
       expect(described_class.forward(options, conflicts:).preview)
         .to eq(%w[--debug --formula --build-from-source --minimum-version=1.0])
     end

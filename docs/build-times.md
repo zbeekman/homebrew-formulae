@@ -11,8 +11,9 @@
 ## Description
 
 Show and annotate the log of how long formulae took to build from source or to
-pour a bottle. [`brew upgrade-timed`](upgrade-timed.md) uses it to order its
-batches by measured times instead of guesses.
+pour a bottle. [`brew upgrade-timed`](upgrade-timed.md) logs each formula it
+upgrades there, and uses it to order its batches by measured times instead of
+guesses.
 
 The log is `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME` (`~/.homebrew` by
 default, `$XDG_CONFIG_HOME/homebrew` when that is set). It is written with mode
@@ -69,6 +70,11 @@ The key holds the build's `verb` (when logged), `started`, `install_seconds`,
 show it), and drops it whenever it rewrites a receipt, e.g. when a formula
 installed as a dependency is installed on request, with `brew tab` or when a
 formula is renamed; this puts it back. Casks are never stamped.
+
+`restamp` is an explicit request, so it stamps receipts even when
+`$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set; that variable, like
+`brew upgrade-timed --no-stamp-receipts`, only stops `brew upgrade-timed` from
+stamping the kegs it installs.
 
 ## Options
 

@@ -1,12 +1,242 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "formula"
+require "tab"
 require "utils"
+require "utils/output"
 require_relative "build_log"
+require_relative "planner"
+require_relative "receipts"
 
 module Timed
-  # Reads what brew printed while running a batch.
+  # Runs the batches and reads what brew printed while running each.
   module Runner
+    extend Utils::Output::Mixin
+
+    # What `run` logs for a formula brew installed.
+    DONE = %w[built poured].freeze
+
+    # Runs each of `batches` of `formulae` (by full name) with
+    # `brew <verb> --formula --yes --display-times <flags> <names>`, keeping
+    # its output, without colours, in a log in `logs`. With `pour_flags`, a
+    # batch is split into runs of formulae in `pours` or not, in its order,
+    # and each run of `pours` gets `pour_flags` instead of `flags`, one call
+    # per run. Brew's interactive debugger is off, as nobody would see its
+    # prompt. After each batch, a formula whose version isn't installed
+    # failed; each formula brew worked on is logged in `database` with the
+    # verb, the batch's label and its log, and each keg brew installed gets
+    # its times in its receipt unless not `stamp`. A formula that `deps` says
+    # needs one that failed or was skipped is skipped and logged as such.
+    # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
+    # finished in the batch it was running are logged, and `Interrupt` is
+    # raised.
+    sig {
+      params(
+        batches:    T::Array[Planner::Batch],
+        verb:       String,
+        flags:      T::Array[String],
+        formulae:   T::Hash[String, Formula],
+        deps:       T::Hash[String, T::Array[String]],
+        pours:      T::Array[String],
+        pour_flags: T.nilable(T::Array[String]),
+        stamp:      T::Boolean,
+        database:   Pathname,
+        logs:       Pathname,
+        clock:      T.proc.returns(Float),
+        now:        T.proc.returns(Time),
+      ).void
+    }
+    def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
+                 database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
+                 clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
+      prefix = now.call.strftime("%Y%m%d-%H%M%S")
+      logs.mkpath
+      failed = T.let([], T::Array[String])
+      skipped = T.let([], T::Array[String])
+      not_finished = T.let(nil, T.nilable(T::Array[String]))
+      # The child brew is in this process group, so it gets Ctrl-C too.
+      interrupts = T.let([], T::Array[Integer])
+      old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
+      begin
+        batches.each.with_index(1) do |batch, index|
+          if interrupts.any?
+            not_finished = batches.drop(index - 1).flat_map(&:names)
+            break
+          end
+
+          started = now.call
+          entries = T.let({}, T::Hash[String, BuildLog::Build])
+          # Calls in a batch are separate processes, so brew doesn't know
+          # what failed in an earlier one.
+          failed_in_batch = T.let([], T::Array[String])
+          skipped_before = skipped.length
+          skip, names = skips(batch.names, failed + skipped, deps, verb)
+          skipped.concat(skip)
+
+          stopped = T.let(false, T::Boolean)
+          if names.any?
+            oh1 "Running batch #{index} of #{batches.length}: #{names.join(" ")}"
+            log = logs/"#{prefix}-batch#{index}.log"
+            lines = T.let([], T::Array[Line])
+            start = clock.call
+            # In the batch's order, dependencies first, so brew never pours
+            # a formula as a dependency before its call to build it.
+            runs = pour_flags ? names.chunk_while { |a, b| pours.include?(a) == pours.include?(b) } : [names]
+            calls = runs.map do |run_names|
+              env = { "HOMEBREW_DISABLE_DEBREW" => "1" }
+              next [flags, run_names, env] if pour_flags.nil? || pours.exclude?(run_names.fetch(0))
+
+              # Brew's installed-dependents check would pour the run's
+              # outdated dependents, named formulae among them, before their
+              # own call builds them; brew never runs it for these formulae.
+              # The run set the variable, not the user, so no hint about it.
+              [pour_flags, run_names,
+               env.merge("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1")]
+            end
+            results = T.let([], T::Array[T.nilable(T::Boolean)])
+            log.open("w") do |file|
+              calls.each do |call_flags, call_names, env|
+                if interrupts.any?
+                  stopped = true
+                  break
+                end
+
+                skip, kept = skips(call_names, failed + failed_in_batch + skipped, deps, verb)
+                skipped.concat(skip)
+                names -= skip
+                next if kept.empty?
+
+                argv = [verb, "--formula", "--yes", "--display-times", *call_flags].uniq
+                results << stream([*argv, *kept], env:) do |line|
+                  file.write(line.gsub(ANSI, ""))
+                  lines << [line, clock.call - start]
+                end
+                failed_in_batch.concat(kept.reject { |name| formulae.fetch(name).latest_version_installed? })
+              end
+            end
+            success = results.all?
+            # Brew didn't finish the batch, so a formula it didn't get to
+            # hasn't failed.
+            stopped ||= interrupts.any? && !success
+            Homebrew.failed = true unless success
+            builds = parse(lines, started:)
+            names.each do |name|
+              short = Utils.name_from_full_name(name)
+              build = builds.delete(short) || {}
+              formula = formulae.fetch(name)
+              installed = formula.latest_version_installed?
+              if installed && DONE.include?(build["status"])
+                builds[short] = build
+              elsif !installed
+                failed << name
+                builds[short] = build.merge("status"  => "failed",
+                                            "version" => build["version"] || formula.pkg_version.to_s)
+              end
+            end
+            builds.select! { |_, build| DONE.include?(build["status"]) } if stopped
+            entries.merge!(builds.transform_values { |build| build.merge("log" => log.to_s) })
+          end
+          # By short name, as the log keys formulae; what brew did with a
+          # formula it tried anyway is kept instead.
+          skipped.drop(skipped_before).each do |name|
+            entries[Utils.name_from_full_name(name)] ||= {
+              "status" => "skipped", "version" => formulae.fetch(name).pkg_version.to_s, "started" => started.iso8601
+            }
+          end
+
+          entries.transform_values! { |entry| entry.merge("verb" => verb, "batch" => batch.label) }
+          BuildLog.update(database) { |build_log| entries.each { |name, entry| build_log.record(name, entry) } }
+          if stamp
+            entries.each do |name, entry|
+              next unless DONE.include?(entry["status"])
+
+              receipt = HOMEBREW_CELLAR/Utils.name_from_full_name(name)/entry.fetch("version")/AbstractTab::FILENAME
+              next unless receipt.exist?
+
+              begin
+                Receipts.stamp(receipt, entry)
+              rescue => e
+                opoo "Couldn't stamp #{receipt}: #{e}"
+              end
+            end
+          end
+          next unless stopped
+
+          not_finished = batch.names.reject { |name| entries.key?(Utils.name_from_full_name(name)) } +
+                         batches.drop(index).flat_map(&:names)
+          break
+        end
+      ensure
+        Signal.trap(:INT, old_trap)
+      end
+      if not_finished
+        opoo "Interrupted; not finished or logged: #{not_finished.join(" ")}"
+        raise Interrupt
+      end
+      return if failed.empty?
+
+      ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: #{failed.join(" ")}"
+    end
+
+    # `candidates` split into those `deps` says need one of `blocked`, which
+    # are skipped with a warning, and the rest.
+    sig {
+      params(candidates: T::Array[String], blocked: T::Array[String], deps: T::Hash[String, T::Array[String]],
+             verb: String).returns([T::Array[String], T::Array[String]])
+    }
+    def self.skips(candidates, blocked, deps, verb)
+      candidates.partition do |name|
+        missing = deps.fetch(name, []) & blocked
+        next false if missing.empty?
+
+        opoo "Skipping #{name}: #{Utils.pluralize("dependency", missing.length)} #{missing.join(", ")} " \
+             "did not #{verb}"
+        true
+      end
+    end
+    private_class_method :skips
+
+    # Runs `brew` with `argv` from the home directory (source builds that
+    # clone a repository fail from some directories), with its output and
+    # errors through one pipe, not a terminal, and `env` added to its
+    # environment. Asks brew for colours if the output is a terminal (unless
+    # `HOMEBREW_NO_COLOR` is set). Echoes each line as it arrives, with any
+    # bytes that aren't UTF-8 replaced, and yields it. Returns whether brew
+    # succeeded, as `Kernel.system` does.
+    # rubocop:disable Naming/PredicateMethod
+    sig {
+      params(argv: T::Array[String], env: T::Hash[String, String], _block: T.proc.params(line: String).void)
+        .returns(T.nilable(T::Boolean))
+    }
+    def self.stream(argv, env: {}, &_block)
+      env = { "HOMEBREW_COLOR" => "1" }.merge(env) if $stdout.tty?
+      IO.popen(env, [HOMEBREW_BREW_FILE.to_s, *argv], err: [:child, :out], chdir: Dir.home) do |io|
+        io.each_line do |raw|
+          line = raw.scrub
+          $stdout.print line
+          $stdout.flush
+          yield line
+        end
+      end
+      Process.last_status&.success?
+    end
+    # rubocop:enable Naming/PredicateMethod
+
+    # The heading of `brew upgrade --dry-run`'s list of what it would upgrade
+    # when given no names (`UpgradeCmd#show_final_upgrade_summary`).
+    WOULD_UPGRADE = /\A==> Would upgrade \d+ outdated packages?\z/
+
+    # The names listed under `WOULD_UPGRADE` in `brew upgrade --dry-run`'s
+    # output, formulae and casks alike.
+    sig { params(lines: T::Array[String]).returns(T::Array[String]) }
+    def self.would_upgrade(lines)
+      lines.map { |line| line.chomp.gsub(ANSI, "") }
+           .drop_while { |line| !WOULD_UPGRADE.match?(line) }.drop(1)
+           .take_while { |line| line.present? && !line.start_with?("==>") }
+           .map { |line| line.split.fetch(0) }
+    end
+
     # A line of a batch's output and when it arrived, in seconds since the
     # batch started on a monotonic clock; nil when unknown, e.g. in a saved log.
     Line = T.type_alias { [String, T.nilable(Float)] }

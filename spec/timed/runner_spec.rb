@@ -24,6 +24,418 @@ RSpec.describe Timed::Runner do
     { "version" => version, "status" => "poured", "install_seconds" => install_seconds }
   end
 
+  # `HOMEBREW_BREW_FILE` as a shell script running `body`.
+  def brew_script(body)
+    brew = mktmpdir/"brew"
+    brew.write("#!/bin/sh\n#{body}")
+    brew.chmod(0755)
+    stub_const("HOMEBREW_BREW_FILE", brew)
+  end
+
+  describe ".stream" do
+    def stream(argv = [], env: {})
+      lines = []
+      described_class.stream(argv, env:) { |line| lines << line }
+      lines
+    end
+
+    it "runs brew from the home directory, echoing and yielding each line of its output and errors",
+       :aggregate_failures do
+      brew_script(<<~SH)
+        echo "in $(pwd -P)"
+        echo "error: $*" >&2
+        exit 3
+      SH
+      lines = []
+      success = T.let(nil, T.nilable(T::Boolean))
+      output = "in #{File.realpath(Dir.home)}\nerror: upgrade --yes\n"
+      expect { success = described_class.stream(%w[upgrade --yes]) { |line| lines << line } }
+        .to output(output).to_stdout
+      expect([success, lines.join]).to eq([false, output])
+    end
+
+    it "replaces bytes that aren't UTF-8" do
+      brew_script("printf 'caf\\351\\n'\n")
+      expect(stream).to eq(["caf�\n"])
+    end
+
+    it "adds `env` to brew's environment, and asks brew for colour when the output is a terminal" do
+      brew_script("echo \"${HOMEBREW_COLOR-plain} ${HOMEBREW_X-}\"\n")
+      tty = [false, true].to_h do |terminal|
+        allow($stdout).to receive(:tty?).and_return(terminal)
+        [terminal, stream(env: { "HOMEBREW_X" => "x" })]
+      end
+      expect(tty).to eq(false => ["plain x\n"], true => ["1 x\n"])
+    end
+  end
+
+  describe ".run" do
+    let(:database) { mktmpdir/"build-log.json" }
+    let(:logs) { mktmpdir/"logs" }
+    let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
+    let(:calls) { [] }
+    let(:envs) { [] }
+    # A monotonic clock that fake brew moves on.
+    let(:clock) { [100.0] }
+    let(:formulae) { {} }
+
+    # A formula at version 2.0, not yet installed, by full name.
+    def stub_formula(name, tap: nil)
+      stub = formula(name, tap:) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/#{name}-2.0.tgz"
+      end
+      formulae[stub.full_name] = stub
+    end
+
+    def batch(*names, label: "main") = Timed::Planner::Batch.new(label:, reason: nil, names:)
+
+    # Brew as it upgrades each name it is given that isn't installed yet,
+    # taking 10 seconds for each: installs a keg with a receipt and prints its
+    # summary line, except for `failing` names, and `silent` ones, which it
+    # doesn't mention either, then the formulae `alongside` the names it was
+    # given; then prints the installation times. Yields the names before it
+    # returns.
+    def fake_brew(failing: [], silent: [], alongside: {}, &block)
+      allow(described_class).to receive(:stream) do |argv, env: {}, &on_line|
+        calls << argv
+        envs << env
+        names = argv.drop(1).reject { |arg| arg.start_with?("-") }
+        installed = (names + alongside.fetch(names, [])).filter_map do |name|
+          if (HOMEBREW_CELLAR/name/"2.0").exist?
+            on_line.call("Warning: #{name} 2.0 already installed\n")
+            next
+          end
+          next if silent.include?(name)
+
+          on_line.call("\e[34m==>\e[0m \e[1mUpgrading #{name}\e[0m\n")
+          clock[0] += 10
+          if failing.include?(name)
+            on_line.call("Error: #{name}: it failed\n")
+            next
+          end
+
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+          name
+        end
+        on_line.call("==> Installation times\n")
+        installed.each { |name| on_line.call(format("%<name>-20s %<seconds>.3f s\n", name:, seconds: 9.5)) }
+        block&.call(names)
+        !(names + alongside.fetch(names, [])).intersect?(failing + silent)
+      end
+    end
+
+    def run(batches, stamp: true, deps: {}, flags: %w[--verbose --display-times], pours: [], pour_flags: nil)
+      described_class.run(batches, verb: "upgrade", flags:, pours:, pour_flags:, formulae:, deps:, stamp:,
+                                   database:, logs:, clock: -> { clock.fetch(0) },
+                                   now: -> { Time.new(2026, 9, 30, 10, 0, 0, "-04:00") })
+    end
+
+    def builds = JSON.parse(database.read)["packages"].transform_values { |package| package["builds"] }
+
+    def log(index) = (logs/"20260930-100000-batch#{index}.log").to_s
+
+    it "runs `brew upgrade --formula --yes --display-times` with the flags for each batch, and nothing else" do
+      %w[lib app tool].each { |name| stub_formula(name) }
+      fake_brew
+      run([batch("lib", "tool"), batch("app", label: "last")])
+      expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib tool],
+                           %w[upgrade --formula --yes --display-times --verbose app]])
+    end
+
+    it "turns off brew's interactive debugger, which would wait on a prompt nobody sees" do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")])
+      expect(envs).to eq([{ "HOMEBREW_DISABLE_DEBREW" => "1" }])
+    end
+
+    describe "with `pour_flags`" do
+      let(:source) { %w[--build-from-source --debug-symbols] }
+
+      it "upgrades the batch's `pours` first, with `pour_flags`, then the rest, into one log", :aggregate_failures do
+        %w[dep app tool].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("dep", "app", "tool")], flags: source, pours: %w[dep], pour_flags: [])
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times dep],
+                             %w[upgrade --formula --yes --display-times --build-from-source --debug-symbols app
+                                tool]])
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["log"] } })
+          .to eq("dep" => [log(1)], "app" => [log(1)], "tool" => [log(1)])
+      end
+
+      it "keeps the batch's order, one call for each run of pours or source builds" do
+        %w[lib dep app].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("lib", "dep", "app")], flags: source, pours: %w[dep], pour_flags: [])
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --build-from-source --debug-symbols lib],
+                             %w[upgrade --formula --yes --display-times dep],
+                             %w[upgrade --formula --yes --display-times --build-from-source --debug-symbols app]])
+      end
+
+      it "turns off brew's installed-dependents check, and its hint, for runs of pours only" do
+        %w[lib dep app].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("lib", "dep", "app")], flags: source, pours: %w[dep], pour_flags: [])
+        debrew = { "HOMEBREW_DISABLE_DEBREW" => "1" }
+        no_check = { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }
+        expect(envs).to eq([debrew, debrew.merge(no_check), debrew])
+      end
+
+      it "skips a run's formulae that need one that failed in an earlier run of the batch", :aggregate_failures do
+        %w[b p].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[b])
+        expect { run([batch("b", "p")], flags: source, pours: %w[p], pour_flags: [], deps: { "p" => %w[b] }) }
+          .to output(<<~EOS).to_stderr
+            Warning: Skipping p: dependency b did not upgrade
+            Error: 1 formula did not upgrade: b
+          EOS
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --build-from-source --debug-symbols b]])
+        expect(builds["p"]).to eq([{ "version" => "2.0", "status" => "skipped",
+                                     "started" => "2026-09-30T10:00:00-04:00", "verb" => "upgrade",
+                                     "batch" => "main" }])
+      end
+
+      it "keeps only the failed record of a skipped formula brew tried alongside an earlier run",
+         :aggregate_failures do
+        stub_formula("b")
+        stub_formula("p", tap: Tap.fetch("user", "tap"))
+        fake_brew(failing: %w[b user/tap/p], alongside: { %w[b] => %w[user/tap/p] })
+        expect do
+          run([batch("b", "user/tap/p")], flags: source, pours: %w[user/tap/p], pour_flags: [],
+                                          deps: { "user/tap/p" => %w[b] })
+        end.to output(%r{Skipping user/tap/p:}).to_stderr
+        expect(builds["p"].map { |entry| entry["status"] }).to eq(%w[failed])
+      end
+
+      it "still runs the other formulae of a later run", :aggregate_failures do
+        %w[b p q].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[b])
+        expect { run([batch("b", "p", "q")], flags: source, pours: %w[p q], pour_flags: [], deps: { "p" => %w[b] }) }
+          .to output(/Skipping p:/).to_stderr
+        expect(calls.map(&:last)).to eq(%w[b q])
+      end
+
+      it "makes one call for a batch without `pours`" do
+        %w[app tool].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("app", "tool")], flags: source, pours: %w[dep], pour_flags: [])
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --build-from-source --debug-symbols app
+                                tool]])
+      end
+
+      it "doesn't split without `pour_flags`" do
+        %w[dep app].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("dep", "app")], pours: %w[dep])
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose dep app]])
+      end
+    end
+
+    it "keeps going after output that isn't UTF-8" do
+      %w[lib app].each { |name| stub_formula(name) }
+      brew_script(<<~SH)
+        shift
+        for name in "$@"; do
+          case "$name" in -*) continue;; esac
+          mkdir -p "#{HOMEBREW_CELLAR}/$name/2.0"
+          cp "#{receipt}" "#{HOMEBREW_CELLAR}/$name/2.0/INSTALL_RECEIPT.json"
+          printf '==> Upgrading %s\\ncaf\\351\\n🍺  #{HOMEBREW_CELLAR}/%s/2.0: 3 files, 12KB\\n' "$name" "$name"
+        done
+      SH
+      run([batch("lib"), batch("app")])
+      expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+        .to eq("lib" => ["poured"], "app" => ["poured"])
+    end
+
+    it "keeps each batch's output in a log, without colours" do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")])
+      expect(Pathname(log(1)).read).to eq(<<~EOS)
+        ==> Upgrading lib
+        🍺  #{HOMEBREW_CELLAR}/lib/2.0: 3 files, 12KB, built in 9 seconds
+        ==> Installation times
+        lib                  9.500 s
+      EOS
+    end
+
+    it "logs each build with the verb, the batch and its log, timed from each line" do
+      %w[lib app].each { |name| stub_formula(name) }
+      fake_brew
+      run([batch("lib"), batch("app", label: "last")])
+      build = { "version" => "2.0", "status" => "built", "install_seconds" => 9.5, "build_seconds" => 9.0,
+                "started" => "2026-09-30T10:00:00-04:00", "wall_seconds" => 10.0, "verb" => "upgrade" }
+      expect(builds).to eq("lib" => [build.merge("batch" => "main", "log" => log(1))],
+                           "app" => [build.merge("batch" => "last", "log" => log(2))])
+    end
+
+    it "logs formulae brew upgraded alongside a batch" do
+      stub_formula("lib")
+      fake_brew(alongside: { %w[lib] => %w[dependent] })
+      run([batch("lib")])
+      expect(builds.keys).to eq(%w[dependent lib])
+    end
+
+    it "adds the build times to the receipts of the kegs it installed" do
+      stub_formula("lib")
+      fake_brew(alongside: { %w[lib] => %w[dependent] })
+      run([batch("lib")])
+      stamped = %w[lib dependent].to_h do |name|
+        [name, JSON.parse((HOMEBREW_CELLAR/name/"2.0/INSTALL_RECEIPT.json").read)["build_times"]]
+      end
+      times = { "verb" => "upgrade", "started" => "2026-09-30T10:00:00-04:00", "install_seconds" => 9.5,
+                "build_seconds" => 9.0, "wall_seconds" => 10.0 }
+      expect(stamped).to eq("lib" => times, "dependent" => times.merge("started" => "2026-09-30T10:00:10-04:00"))
+    end
+
+    it "leaves every receipt as it is without stamping, but still logs the builds", :aggregate_failures do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")], stamp: false)
+      expect((HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json").read).to eq(receipt.read)
+      expect(builds.keys).to eq(%w[lib])
+    end
+
+    it "warns about a receipt it can't stamp and carries on", :aggregate_failures do
+      %w[lib app].each { |name| stub_formula(name) }
+      broken = HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json"
+      fake_brew { |names| broken.write("{") if names == %w[lib] }
+      expect { run([batch("lib"), batch("app")]) }
+        .to output(a_string_starting_with("Warning: Couldn't stamp #{broken}: ")).to_stderr
+      expect(calls.length).to eq(2)
+    end
+
+    it "logs a formula whose version isn't installed after its batch as failed, with its planned version, " \
+       "and fails the run", :aggregate_failures do
+      %w[lib tool].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      expect { run([batch("lib", "tool")]) }.to output("Error: 1 formula did not upgrade: lib\n").to_stderr
+      expect([builds["lib"], Homebrew.failed?])
+        .to eq([[{ "version" => "2.0", "status" => "failed", "problems" => ["Error: lib: it failed"],
+                   "started" => "2026-09-30T10:00:00-04:00", "verb" => "upgrade", "batch" => "main",
+                   "log" => log(1) }], true])
+    end
+
+    it "fails the run when brew fails, even if every formula upgraded" do
+      stub_formula("lib")
+      allow(described_class).to receive(:stream) do
+        (HOMEBREW_CELLAR/"lib/2.0").mkpath
+        FileUtils.cp receipt, HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json"
+        false
+      end
+      run([batch("lib")])
+      expect(Homebrew).to be_failed
+    end
+
+    it "doesn't log a formula brew printed nothing for, e.g. one upgraded in an earlier batch" do
+      %w[lib app].each { |name| stub_formula(name) }
+      fake_brew(alongside: { %w[lib] => %w[app] })
+      run([batch("lib"), batch("app")])
+      expect(builds.transform_values(&:length)).to eq("lib" => 1, "app" => 1)
+    end
+
+    it "skips formulae in later batches that need a failed one, logging them, and runs the rest",
+       :aggregate_failures do
+      %w[lib app top other].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      deps = { "app" => %w[lib], "top" => %w[app] }
+      expect { run([batch("lib"), batch("app", "other"), batch("top")], deps:) }.to output(<<~EOS).to_stderr
+        Warning: Skipping app: dependency lib did not upgrade
+        Warning: Skipping top: dependency app did not upgrade
+        Error: 1 formula did not upgrade: lib
+      EOS
+      expect(calls.map(&:last)).to eq(%w[lib other])
+      skipped = { "version" => "2.0", "status" => "skipped", "started" => "2026-09-30T10:00:00-04:00",
+                  "verb" => "upgrade", "batch" => "main" }
+      expect(builds.slice("app", "top")).to eq("app" => [skipped], "top" => [skipped])
+    end
+
+    it "takes a formula brew didn't get to, e.g. after one it needs failed in the same call, as failed",
+       :aggregate_failures do
+      %w[lib app top].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib], silent: %w[app])
+      expect { run([batch("lib", "app"), batch("top")], deps: { "app" => %w[lib], "top" => %w[app] }) }
+        .to output(/Skipping top: dependency app did not upgrade\n.*did not upgrade: lib app\n/m).to_stderr
+      expect(builds["app"].map { |entry| entry.slice("status", "version") })
+        .to eq([{ "status" => "failed", "version" => "2.0" }])
+    end
+
+    describe "Ctrl-C" do
+      def interrupt = Process.kill("INT", Process.pid)
+
+      it "waits for brew, logs the finished batches, says what didn't run and raises `Interrupt`",
+         :aggregate_failures do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[app]) { |names| interrupt if names == %w[app] }
+        expect { run([batch("lib"), batch("app"), batch("tool")]) }
+          .to raise_error(Interrupt).and output("Warning: Interrupted; not finished or logged: app tool\n").to_stderr
+        expect(builds.keys).to eq(%w[lib])
+        File.open("#{database}.lock") { |lock| expect(lock.flock(File::LOCK_EX | File::LOCK_NB)).to eq(0) }
+      end
+
+      it "logs and stamps the formulae of the stopped batch that brew finished", :aggregate_failures do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[app]) { interrupt }
+        expect { run([batch("lib", "app"), batch("tool")]) }
+          .to raise_error(Interrupt).and output(/not finished or logged: app tool$/).to_stderr
+        expect(builds.keys).to eq(%w[lib])
+        expect(JSON.parse((HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json").read)).to have_key("build_times")
+      end
+
+      it "doesn't log a formula brew was upgrading alongside the stopped batch" do
+        stub_formula("lib")
+        fake_brew(failing: %w[dependent], alongside: { %w[lib] => %w[dependent] }) { interrupt }
+        expect { run([batch("lib")]) }.to raise_error(Interrupt).and output(/Interrupted/).to_stderr
+        expect(builds.keys).to eq(%w[lib])
+      end
+
+      it "doesn't make a batch's next call once stopped" do
+        %w[dep app].each { |name| stub_formula(name) }
+        fake_brew { interrupt }
+        expect { run([batch("dep", "app")], pours: %w[dep], pour_flags: []) }
+          .to raise_error(Interrupt).and output(/not finished or logged: app$/).to_stderr
+        expect([calls.length, builds.keys]).to eq([1, %w[dep]])
+      end
+
+      it "logs a batch that finished anyway and runs no more" do
+        %w[lib app].each { |name| stub_formula(name) }
+        fake_brew { interrupt }
+        expect { run([batch("lib"), batch("app")]) }
+          .to raise_error(Interrupt).and output(/not finished or logged: app$/).to_stderr
+        expect([calls.length, builds.keys]).to eq([1, %w[lib]])
+      end
+
+      it "restores the interrupt handler" do
+        stub_formula("lib")
+        fake_brew
+        handler = proc {}
+        previous = Signal.trap(:INT, handler)
+        run([batch("lib")])
+        expect(Signal.trap(:INT, previous)).to be(handler)
+      end
+    end
+  end
+
+  describe ".would_upgrade" do
+    it "reads the packages in `brew upgrade --dry-run`'s summary without named arguments" do
+      previews = {
+        "several" => ["Warning: Not upgrading 1 pinned package:", "pinned 1.0",
+                      "==> Would upgrade 3 outdated packages", "cmake              3.0 -> 3.1",
+                      "zbeekman/tap/cgns  4.4 -> 4.5_1", "firefox            1 -> 2",
+                      "==> 1 Pinned formula", "pinned 1.0"],
+        "one"     => ["\e[1;32m==>\e[0m \e[1mWould upgrade 1 outdated package\e[0m", "cmake 3.0 -> 3.1"],
+        "none"    => ["==> No packages to upgrade"],
+        "named"   => ["==> Would upgrade 1 requested outdated package", "cmake 3.0 -> 3.1"],
+      }
+      expect(previews.transform_values { |lines| described_class.would_upgrade(lines.map { |line| "#{line}\n" }) })
+        .to eq("several" => %w[cmake zbeekman/tap/cgns firefox], "one" => %w[cmake], "none" => [], "named" => [])
+    end
+  end
+
   describe ".parse" do
     it "reads a source build's install time, `built in` time and version" do
       expect(described_class.parse(fixture_lines("upgrade-llvm.log"))).to eq(
