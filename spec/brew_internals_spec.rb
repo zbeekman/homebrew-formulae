@@ -16,6 +16,7 @@ require "messages"
 require "open3"
 require "tab"
 require_relative "../lib/timed/command"
+require_relative "../lib/timed/runner"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
 # change fails here instead of during a real upgrade. When one fails, re-check
@@ -505,6 +506,47 @@ RSpec.describe "brew internals", type: :system do
     messages.package_installed("llvm", 2811.4)
     expect { messages.display_install_times }
       .to output("==> Installation times\nllvm                   2811.400 s\n").to_stdout
+  end
+
+  it "prints `Installation times` as `Timed::Runner.parse` reads them, even with one space between the columns" do
+    messages = Messages.new
+    messages.package_installed("llvm", 2811.4)
+    messages.package_installed("a-formula-with-a-long-name", 123456.789)
+    lines = []
+    allow(messages).to receive(:puts) { |line| lines << [line, nil] }
+    messages.display_install_times
+    expect(Timed::Runner.parse(lines).transform_values { |build| build["install_seconds"] })
+      .to eq("llvm" => 2811.4, "a-formula-with-a-long-name" => 123456.789)
+  end
+
+  describe "the summary `FormulaInstaller` prints for each formula it installs" do
+    let(:installer) do
+      formula = formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-1.0.tgz"
+      end
+      (formula.prefix/"bin").mkpath
+      FileUtils.touch [formula.prefix/"bin/foo", formula.prefix/"README"]
+      FormulaInstaller.new(formula)
+    end
+
+    def parsed_summary(build_time)
+      allow(installer).to receive(:build_time).and_return(build_time)
+      Timed::Runner.parse([[installer.summary, nil]]).fetch("foo").slice("version", "status", "build_seconds")
+    end
+
+    it "ends in `built in` and the build time as `pretty_duration` prints it, which `Timed::Runner.parse` reads" do
+      expect(parsed_summary(5190.0)).to eq("version" => "1.0", "status" => "built", "build_seconds" => 5160.0)
+    end
+
+    it "has no build time for a pour" do
+      expect(parsed_summary(nil)).to eq("version" => "1.0", "status" => "poured")
+    end
+
+    it "can be read without the install badge" do
+      ENV["HOMEBREW_NO_EMOJI"] = "1"
+      expect(parsed_summary(61.0)).to eq("version" => "1.0", "status" => "built", "build_seconds" => 61.0)
+    end
   end
 end
 

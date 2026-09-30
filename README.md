@@ -9,7 +9,8 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 ## Commands
 - [`brew build-times`](docs/build-times.md): show and annotate the log of how
-  long formulae took to build from source or pour.
+  long formulae took to build from source or pour, and restore those times in
+  install receipts.
 - [`brew upgrade-timed`](docs/upgrade-timed.md): upgrade outdated formulae in
   batches ordered by estimated build time, quickest first.
 

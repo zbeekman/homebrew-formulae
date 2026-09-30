@@ -1,0 +1,27 @@
+==> Upgrading lib
+  1.0 -> 2.0
+==> ./configure --prefix=/usr/local/Cellar/lib/2.0
+checking for cc... cc
+==> make install
+cc -c lib.c
+lib.c:1:10: fatal error: 'missing.h' file not found
+make: *** [lib.o] Error 1
+
+==> Formula
+Tap: homebrew/core
+Path: /usr/local/Homebrew/Library/Taps/homebrew/homebrew-core/Formula/l/lib.rb
+==> Configuration
+HOMEBREW_VERSION: 5.0.0
+==> ENV
+HOMEBREW_CC: clang
+
+Error: lib 2.0 did not build
+Logs:
+     /Users/user/Library/Logs/Homebrew/lib/00.options.out
+     /Users/user/Library/Logs/Homebrew/lib/01.configure
+     /Users/user/Library/Logs/Homebrew/lib/01.configure.cc
+     /Users/user/Library/Logs/Homebrew/lib/02.make
+     /Users/user/Library/Logs/Homebrew/lib/02.make.cc
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3

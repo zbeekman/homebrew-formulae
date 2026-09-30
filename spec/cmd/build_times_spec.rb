@@ -89,8 +89,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
 
     it "gives each subcommand a complete one-line summary" do
       summaries = {
-        "stats" => "Show build time statistics and estimates for formula or every logged formula.",
-        "note"  => "Append text to the problems recorded for the latest logged build of formula.",
+        "stats"   => "Show build time statistics and estimates for formula or every logged formula.",
+        "note"    => "Append text to the problems recorded for the latest logged build of formula.",
+        "restamp" => "Add the logged build times to the install receipts of installed formulae that lack them.",
       }
       found = summaries.to_h { |subcommand, summary| [subcommand, help[/#{subcommand}: #{Regexp.escape(summary)}/]] }
       expect(found).to eq(summaries.to_h { |subcommand, summary| [subcommand, "#{subcommand}: #{summary}"] })
@@ -128,6 +129,42 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
 
     it "requires a formula and text" do
       expect { described_class.new(%w[note wget]) }.to raise_error(Homebrew::CLI::NumberOfNamedArgumentsError)
+    end
+  end
+
+  describe "restamp" do
+    let(:receipts) { Pathname(__FILE__).dirname.parent/"fixtures/receipts" }
+    let(:llvm) { HOMEBREW_CELLAR/"llvm/23.1.2/INSTALL_RECEIPT.json" }
+    # Logged as poured.
+    let(:openexr) { HOMEBREW_CELLAR/"openexr/3.5.1/INSTALL_RECEIPT.json" }
+
+    before do
+      { llvm => "built.json", openexr => "poured.json" }.each do |receipt, fixture|
+        receipt.dirname.mkpath
+        FileUtils.cp receipts/fixture, receipt
+      end
+    end
+
+    it "stamps the build times of every logged formula's installed kegs that have none, naming each keg" do
+      expect { described_class.new(%w[restamp]).run }
+        .to output("==> Restamped #{llvm.dirname}\n==> Restamped #{openexr.dirname}\n").to_stdout
+    end
+
+    it "stamps only the named formulae" do
+      described_class.new(%w[restamp openexr]).run
+      expect([llvm, openexr].map { |receipt| JSON.parse(receipt.read)["build_times"] })
+        .to eq([nil, { "started" => "2026-09-27", "install_seconds" => 3.0 }])
+    end
+
+    it "says when there is nothing to restamp" do
+      described_class.new(%w[restamp]).run
+      expect { described_class.new(%w[restamp]).run }.to output("==> No receipts to restamp\n").to_stdout
+    end
+
+    it "stamps even with `HOMEBREW_TIMED_NO_STAMP_RECEIPTS`, as it is asked for explicitly" do
+      ENV["HOMEBREW_TIMED_NO_STAMP_RECEIPTS"] = "1"
+      described_class.new(%w[restamp llvm]).run
+      expect(JSON.parse(llvm.read)).to have_key("build_times")
     end
   end
 end

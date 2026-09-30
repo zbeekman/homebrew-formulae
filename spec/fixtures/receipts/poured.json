@@ -1,0 +1,103 @@
+{
+  "homebrew_version": "7.0.6-66-gc1a9121",
+  "used_options": [],
+  "unused_options": [],
+  "built_as_bottle": true,
+  "poured_from_bottle": true,
+  "loaded_from_api": true,
+  "loaded_from_internal_api": true,
+  "installed_on_request": true,
+  "changed_files": [
+    "libexec/bin/markdown_py",
+    "libexec/pyvenv.cfg"
+  ],
+  "linkage_files": [],
+  "binary_relocation_files": [],
+  "time": 1790444481,
+  "source_modified_time": 1790343984,
+  "compiler": "clang",
+  "aliases": [],
+  "runtime_dependencies": [
+    {
+      "full_name": "mpdecimal",
+      "version": "4.0.1",
+      "revision": 0,
+      "pkg_version": "4.0.1",
+      "declared_directly": false
+    },
+    {
+      "full_name": "ca-certificates",
+      "version": "2026-09-25",
+      "revision": 0,
+      "bottle_rebuild": 0,
+      "pkg_version": "2026-09-25",
+      "declared_directly": false
+    },
+    {
+      "full_name": "openssl@3",
+      "version": "3.6.4",
+      "revision": 0,
+      "pkg_version": "3.6.4",
+      "declared_directly": false
+    },
+    {
+      "full_name": "readline",
+      "version": "8.3.6",
+      "revision": 0,
+      "pkg_version": "8.3.6",
+      "declared_directly": false
+    },
+    {
+      "full_name": "sqlite",
+      "version": "3.53.4",
+      "revision": 0,
+      "bottle_rebuild": 1,
+      "pkg_version": "3.53.4",
+      "declared_directly": false
+    },
+    {
+      "full_name": "xz",
+      "version": "5.8.4",
+      "revision": 0,
+      "pkg_version": "5.8.4",
+      "declared_directly": false
+    },
+    {
+      "full_name": "lz4",
+      "version": "1.10.0",
+      "revision": 0,
+      "pkg_version": "1.10.0",
+      "declared_directly": false
+    },
+    {
+      "full_name": "zstd",
+      "version": "1.5.7",
+      "revision": 1,
+      "bottle_rebuild": 0,
+      "pkg_version": "1.5.7_1",
+      "declared_directly": false
+    },
+    {
+      "full_name": "python@3.14",
+      "version": "3.14.7",
+      "revision": 0,
+      "bottle_rebuild": 0,
+      "pkg_version": "3.14.7",
+      "declared_directly": true
+    }
+  ],
+  "source": {
+    "spec": "stable",
+    "versions": {
+      "stable": "3.11",
+      "head": null,
+      "version_scheme": 0,
+      "compatibility_version": null
+    },
+    "path": "/Users/user/Library/Caches/Homebrew/api/internal/packages.tahoe.jws.json",
+    "tap_git_head": "59bca3968ea78ef0162fdaf23b69df402f19d107",
+    "tap": "homebrew/core"
+  },
+  "arch": "x86_64",
+  "built_on": null
+}
