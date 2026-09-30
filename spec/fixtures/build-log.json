@@ -1,0 +1,89 @@
+{
+  "packages": {
+    "asciidoc": {
+      "builds": [
+        {
+          "install_seconds": 1.408,
+          "log": "/tmp/old.output",
+          "started": "2026-09-24",
+          "status": "poured",
+          "version": "10.2.1_1"
+        }
+      ]
+    },
+    "awscli": {
+      "builds": [
+        {
+          "build_seconds": 198.0,
+          "install_seconds": 189.52,
+          "started": "2026-09-24",
+          "status": "built",
+          "version": "2.37.1"
+        },
+        {
+          "batch": "main",
+          "build_seconds": 199.0,
+          "install_seconds": 190.868,
+          "problems": [
+            "note with é"
+          ],
+          "started": "2026-09-25T11:23:00-04:00",
+          "status": "built",
+          "version": "2.37.2",
+          "wall_seconds": 200.5
+        },
+        {
+          "build_seconds": 205.0,
+          "install_seconds": 0.0,
+          "started": "2026-09-26",
+          "status": "built",
+          "version": "2.37.3"
+        }
+      ]
+    },
+    "llvm": {
+      "builds": [
+        {
+          "build_seconds": 5160.0,
+          "install_seconds": 5163.1,
+          "started": "2026-09-25",
+          "status": "built",
+          "version": "23.1.2"
+        }
+      ]
+    },
+    "openexr": {
+      "builds": [
+        {
+          "build_seconds": 66.0,
+          "install_seconds": 66.5,
+          "started": "2026-09-26",
+          "status": "built",
+          "version": "3.5.0"
+        },
+        {
+          "install_seconds": 3.0,
+          "started": "2026-09-27",
+          "status": "poured",
+          "version": "3.5.1"
+        }
+      ]
+    },
+    "wget": {
+      "builds": [
+        {
+          "install_seconds": 20.0,
+          "started": "2026-09-27",
+          "status": "poured",
+          "version": "1.25.0"
+        },
+        {
+          "started": "2026-09-27",
+          "status": "failed",
+          "version": "1.25.1"
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}
