@@ -81,6 +81,9 @@ module Timed
     # new cask when it is missing), and brew merges its config into the new
     # cask's, as `Cask::Upgrade` does: this assigns `Cask#config` of the new
     # casks.
+    #
+    # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
+    # installed cask without a successor and dispatches its `zap` stanza.
     sig {
       params(
         casks:     T::Array[Cask::Cask],
@@ -91,13 +94,15 @@ module Timed
         macos:     T::Boolean,
         env:       T::Hash[String, String],
         installed: T::Hash[String, Cask::Cask],
+        zap:       T::Boolean,
       ).returns(Plan)
     }
-    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {})
+    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false)
       upgrading = [:upgrade, :reinstall].include?(verb)
+      zap &&= verb == :reinstall
       entries = casks.map do |cask|
         old = installed[cask.token] if upgrading
-        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, in_run:, facts:, macos:))
+        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, in_run:, facts:, macos:))
       end
       first, last = entries.partition { |entry| entry.reasons.empty? }
       # A cask upgrade that fails partway is rolled back, and the rollback may
@@ -115,18 +120,19 @@ module Timed
         cask:      Cask::Cask,
         old:       T.nilable(Cask::Cask),
         upgrading: T::Boolean,
+        zap:       T::Boolean,
         in_run:    T::Array[String],
         facts:     Facts,
         macos:     T::Boolean,
       ).returns(T::Array[Reason])
     }
-    def self.reasons(cask, old:, upgrading:, in_run:, facts:, macos:)
+    def self.reasons(cask, old:, upgrading:, zap:, in_run:, facts:, macos:)
       cask.config = cask.default_config.merge(old.config) if old
       reasons = depends_on_run(cask, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
       # Upgrade and reinstall uninstall the old version first.
       if upgrading
         uninstalled = old || cask
-        reasons += flight_blocks(uninstalled, uninstall: true) + uninstall_directives(uninstalled) +
+        reasons += flight_blocks(uninstalled, uninstall: true) + uninstall_directives(uninstalled, zap:) +
                    uninstall_steps(uninstalled, facts:) + replaced_bundles([cask, old].compact, facts:)
         reasons += unwritable_directories(old, facts:) if old
       end
@@ -171,9 +177,12 @@ module Timed
     # Run as root only with `sudo: true`.
     SCRIPT_UNINSTALL_DIRECTIVES = [:script, :early_script].freeze
 
-    sig { params(cask: Cask::Cask).returns(T::Array[Reason]) }
-    def self.uninstall_directives(cask)
-      cask.artifacts.grep(Cask::Artifact::Uninstall).flat_map do |artifact|
+    # With `reinstall --zap` brew passes no `successor`, so `login_item` runs,
+    # and after the `uninstall` stanza it dispatches every directive of the
+    # `zap` stanza, unfiltered (`Installer#zap`).
+    sig { params(cask: Cask::Cask, zap: T::Boolean).returns(T::Array[Reason]) }
+    def self.uninstall_directives(cask, zap:)
+      reasons = cask.artifacts.grep(Cask::Artifact::Uninstall).flat_map do |artifact|
         # Brew skips `signal` on upgrade and reinstall unless `on_upgrade` names it.
         raw_on_upgrade = artifact.directives[:on_upgrade]
         on_upgrade = case raw_on_upgrade
@@ -181,16 +190,27 @@ module Timed
         when Array then raw_on_upgrade.map(&:to_sym)
         else []
         end
-        # `signal` is always present, empty when unused.
-        artifact.directives.reject { |_, value| value.respond_to?(:empty?) && value.empty? }
-                .filter_map do |directive, value|
-          if ROOT_UNINSTALL_DIRECTIVES.include?(directive) ||
-             (SCRIPT_UNINSTALL_DIRECTIVES.include?(directive) && value.is_a?(Hash) && value[:sudo] == true)
-            Reason.new(kind: :sudo, message: "`uninstall #{directive}` runs as root")
-          elsif directive == :quit || (directive == :signal && on_upgrade.include?(:signal))
-            # `login_item` returns early when brew upgrades or reinstalls (it has a `successor`).
-            Reason.new(kind: :dialog, message: "`uninstall #{directive}` may raise a dialog")
-          end
+        directive_reasons(artifact, "uninstall", signal: on_upgrade.include?(:signal), login_item: zap)
+      end
+      return reasons unless zap
+
+      reasons + cask.artifacts.grep(Cask::Artifact::Zap).flat_map do |artifact|
+        directive_reasons(artifact, "zap", signal: true, login_item: true)
+      end
+    end
+
+    # `signal` is always present in the directives, empty when unused.
+    sig {
+      params(artifact: Cask::Artifact::AbstractUninstall, stanza: String, signal: T::Boolean, login_item: T::Boolean)
+        .returns(T::Array[Reason])
+    }
+    def self.directive_reasons(artifact, stanza, signal:, login_item:)
+      artifact.directives.compact_blank.filter_map do |directive, value|
+        if ROOT_UNINSTALL_DIRECTIVES.include?(directive) ||
+           (SCRIPT_UNINSTALL_DIRECTIVES.include?(directive) && value.is_a?(Hash) && value[:sudo] == true)
+          Reason.new(kind: :sudo, message: "`#{stanza} #{directive}` runs as root")
+        elsif directive == :quit || (directive == :signal && signal) || (directive == :login_item && login_item)
+          Reason.new(kind: :dialog, message: "`#{stanza} #{directive}` may raise a dialog")
         end
       end
     end

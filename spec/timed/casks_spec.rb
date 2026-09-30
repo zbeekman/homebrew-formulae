@@ -72,10 +72,12 @@ RSpec.describe Timed::Casks do
       tty:       T.proc.returns(T::Boolean),
       env:       T::Hash[String, String],
       installed: T::Hash[String, Cask::Cask],
+      zap:       T::Boolean,
     ).returns(Timed::Casks::Plan)
   }
-  def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {})
-    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:)
+  def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {},
+           zap: false)
+    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:)
   end
 
   sig { params(entries: T::Array[Timed::Casks::Entry]).returns(T::Array[String]) }
@@ -469,6 +471,79 @@ RSpec.describe Timed::Casks do
       cask = remove_cask("x/f", base: "staged_path")
       result = plan(cask, world: readonly_world("#{cask.staged_path}/x"))
       expect(messages(result.last)).to eq([unwritable_message("#{cask.staged_path}/x")])
+    end
+  end
+
+  describe "`reinstall --zap`" do
+    let(:root_directives) do
+      {
+        "pkgutil"                => { pkgutil: "com.foo" },
+        "launchctl"              => { launchctl: "com.foo" },
+        "kext"                   => { kext: "com.foo" },
+        "delete"                 => { delete: "/Library/Foo" },
+        "script with sudo"       => { script: { executable: "x.sh", sudo: true } },
+        "early_script with sudo" => { early_script: { executable: "x.sh", sudo: true } },
+      }
+    end
+
+    let(:dialog_directives) do
+      {
+        "quit"       => { quit: "com.foo" },
+        "signal"     => { signal: ["TERM", "com.foo"] },
+        "login_item" => { login_item: "Foo" },
+      }
+    end
+
+    it "puts a cask with an `uninstall login_item` last, for a dialog, as brew passes no successor" do
+      old = cask { uninstall login_item: "Foo" }
+      results = { "reinstall --zap" => plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true),
+                  "reinstall"       => plan(cask, verb: :reinstall, installed: { "foo" => old }),
+                  "upgrade --zap"   => plan(cask, verb: :upgrade, installed: { "foo" => old }, zap: true) }
+      expect(results.transform_values { |result| kinds(result.last) })
+        .to eq({ "reinstall --zap" => [:dialog], "reinstall" => [], "upgrade --zap" => [] })
+    end
+
+    it "still skips `uninstall signal` unless `on_upgrade` names it" do
+      old = cask { uninstall signal: ["TERM", "com.foo"] }
+      expect(tokens(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).first)).to eq(["foo"])
+    end
+
+    it "classifies every directive of the installed cask's `zap` stanza, unfiltered" do
+      kinds_by_name = root_directives.merge(dialog_directives).to_h do |name, directives|
+        old = cask { zap(**directives) }
+        [name, kinds(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).last)]
+      end
+      expect(kinds_by_name).to eq(root_directives.transform_values { [:sudo] }
+                                    .merge(dialog_directives.transform_values { [:dialog] }))
+    end
+
+    it "words the reasons with `zap`" do
+      old = cask { zap quit: "com.foo", delete: "/Library/Foo" }
+      expect(messages(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).last))
+        .to eq(["`zap quit` may raise a dialog", "`zap delete` runs as root"])
+    end
+
+    it "leaves a cask with a `script` without sudo first" do
+      old = cask { zap script: { executable: "x.sh" } }
+      expect(tokens(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).first)).to eq(["foo"])
+    end
+
+    it "ignores the `zap` stanza unless reinstalling with zap" do
+      old = cask { zap delete: "/Library/Foo" }
+      results = { "reinstall"     => plan(cask, verb: :reinstall, installed: { "foo" => old }),
+                  "upgrade --zap" => plan(cask, verb: :upgrade, installed: { "foo" => old }, zap: true),
+                  "install --zap" => plan(cask { zap delete: "/Library/Foo" }, verb: :install, zap: true) }
+      expect(results.transform_values { |result| tokens(result.first) })
+        .to eq({ "reinstall" => ["foo"], "upgrade --zap" => ["foo"], "install --zap" => ["foo"] })
+    end
+
+    it "takes the installed cask's `zap` stanza, or the new cask's when there is none installed" do
+      old = cask { zap quit: "com.foo" }
+      new = cask { zap delete: "/Library/Foo" }
+      results = { "installed" => plan(new, verb: :reinstall, installed: { "foo" => old }, zap: true),
+                  "missing"   => plan(new, verb: :reinstall, zap: true) }
+      expect(results.transform_values { |result| kinds(result.last) })
+        .to eq({ "installed" => [:dialog], "missing" => [:sudo] })
     end
   end
 

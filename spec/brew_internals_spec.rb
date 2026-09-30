@@ -256,6 +256,58 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "`reinstall --zap`" do
+    it "is offered by `reinstall`, not `upgrade`" do
+      commands = [Homebrew::Cmd::Reinstall, Homebrew::Cmd::UpgradeCmd]
+      zap_options = commands.to_h do |command|
+        [command.name, command.parser.processed_options.any? { |_short, long, _desc, _hidden| long == "--zap" }]
+      end
+      expect(zap_options).to eq({ Homebrew::Cmd::Reinstall.name => true, Homebrew::Cmd::UpgradeCmd.name => false })
+    end
+
+    it "is passed on only by `reinstall`, which calls `Installer#zap` only from `uninstall_existing_cask`" do
+      passed_on = %w[cmd/install.rb cmd/upgrade.rb cmd/reinstall.rb].to_h do |path|
+        [path, brew_source(path).scan(/zap:\s*args\.zap\?/).length]
+      end
+      zap_calls = %w[cask/installer.rb cask/upgrade.rb cask/reinstall.rb].flat_map do |path|
+        brew_source(path).scan(/\.zap\b/).map { |call| [path, call] }
+      end
+      expect([passed_on, zap_calls.map(&:first)])
+        .to eq([{ "cmd/install.rb" => 0, "cmd/upgrade.rb" => 0, "cmd/reinstall.rb" => 2 }, ["cask/installer.rb"]])
+    end
+
+    it "replaces `uninstall(successor:)` with `Installer#zap` for a reinstall of the installed cask" do
+      body = brew_source("cask/installer.rb")[/^    def uninstall_existing_cask\n.*?^    end$/m]
+      expect(body).to include("zap? ? cask_installer.zap : cask_installer.uninstall(successor: @cask)")
+      expect(body).to match(/Installer\.new\(@cask, .*reinstall: true\)/)
+    end
+
+    it "uninstalls the installed cask without a successor, then dispatches its `zap` stanzas" do
+      body = brew_source("cask/installer.rb")[/^    def zap\n.*?^    end$/m]
+      expect(body.lines.map(&:strip).grep(/uninstall_artifacts|zap_phase|load_installed_caskfile/))
+        .to eq(["load_installed_caskfile!", "uninstall_artifacts",
+                "stanza.zap_phase(command: @command, verbose: verbose?, force: force?)"])
+    end
+
+    it "dispatches every directive of a `zap` stanza, with no `successor` or `upgrade`" do
+      body = brew_source("cask/artifact/zap.rb")[/^      def zap_phase\(.*?^      end$/m]
+      expect(body.lines.map(&:strip).drop(1)).to eq(["dispatch_uninstall_directives(command:, force:)", "end"])
+    end
+
+    it "dispatches every ordered directive in `dispatch_uninstall_directives`" do
+      source = brew_source("cask/artifact/abstract_uninstall.rb")
+      body = source[/^      def dispatch_uninstall_directives\(.*?^      end$/m]
+      expect(body.lines.map(&:strip).drop(1))
+        .to eq(["ORDERED_DIRECTIVES.each do |directive_sym|",
+                "dispatch_uninstall_directive(directive_sym, command:, force:, successor:, upgrade:)", "end", "end"])
+    end
+
+    it "runs `uninstall_login_item` unless brew passes a `successor`" do
+      body = brew_source("cask/artifact/abstract_uninstall.rb")[/^      def uninstall_login_item\(.*?^      end$/m]
+      expect(body.scan(/\breturn\b.*/)).to eq(["return if successor"])
+    end
+  end
+
   describe "`SystemCommand.run` with `sudo: nil`" do
     it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
       retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]
