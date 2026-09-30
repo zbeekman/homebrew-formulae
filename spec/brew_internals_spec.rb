@@ -332,6 +332,17 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "`symlink` install step with `source_glob`" do
+    it "links into a target directory, so `if_needed` checks that directory" do
+      body = brew_source("install_steps.rb")[/^        when "symlink"\n.*?^        when "write"/m]
+      expect(body.lines.map(&:strip).grep(/sources\.length|mkpath|create_symlink/))
+        .to eq(["if sources.length > 1 || target.directory?", "target.mkpath",
+                "sources.each { |source| create_symlink(source, target/source.basename, step) }",
+                "create_symlink(source, target, step) if source",
+                "create_symlink(link_source(step_path(step, \"source\")), target, step)"])
+    end
+  end
+
   describe "`SystemCommand.run` with `sudo: nil`" do
     it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
       retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]

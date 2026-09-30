@@ -8,12 +8,15 @@ module Timed
   # after them ("last"), and says why. Pure Ruby over cask objects: what is on
   # disk and whether sudo can prompt come in through seams; no brew calls.
   module Casks
-    # One file as `lstat` sees it (symlinks not followed).
+    # One file as `lstat` sees it (symlinks not followed), except `directory`,
+    # which follows symlinks like `Pathname#directory?`.
     class FileEntry < T::Struct
       const :path, Pathname
       const :uid, Integer
       # Readable by the current user.
       const :readable, T::Boolean
+      # A directory, or a symlink to one, as `Pathname#directory?` says.
+      const :directory, T::Boolean, default: false
     end
 
     # What the classifier needs to know about the disk. Real implementation
@@ -374,7 +377,13 @@ module Timed
       end
       specs.flatten.grep(Hash).filter_map do |spec|
         path = resolve_path(cask, spec)
-        directory = path&.dirname
+        # With `source_glob`, brew links into a target that is a directory
+        # (`target/source.basename`), and so checks that directory. The number
+        # of matches is unknown until staging; an existing directory is the case
+        # that matters, a missing one is made without sudo.
+        into_directory = path && step["type"] == "symlink" && step["source_glob"] == true &&
+                         facts.lstat(path)&.directory
+        directory = into_directory ? path : path&.dirname
         if path && directory
           # A glob is expanded by brew, so the directory stands in for its matches.
           present = (step["type"] == "remove" && !glob?(path.basename.to_s)) ? path : directory

@@ -10,8 +10,9 @@ require_relative "../../lib/timed/casks"
 class FakeCaskFacts
   include Timed::Casks::Facts
 
-  def initialize(entries: {}, unwritable: [], realpaths: {}, links: {})
+  def initialize(entries: {}, unwritable: [], realpaths: {}, links: {}, directories: [])
     @entries = entries
+    @directories = directories
     @links = links
     @unwritable = unwritable
     @realpaths = realpaths
@@ -21,7 +22,7 @@ class FakeCaskFacts
 
   def lstat(path)
     uid, readable = @entries[path.to_s]
-    Timed::Casks::FileEntry.new(path:, uid:, readable:) if uid
+    Timed::Casks::FileEntry.new(path:, uid:, readable:, directory: @directories.include?(path.to_s)) if uid
   end
 
   def walk(path)
@@ -419,6 +420,30 @@ RSpec.describe Timed::Casks do
       cask = cask { postflight_steps { symlink "src", "/opt/bin/foo", sudo: :if_needed } }
       world = facts(entries: { "/opt/bin" => [0, true] }, unwritable: ["/opt/bin"])
       expect(kinds(plan(cask, world:).last)).to eq([:sudo])
+    end
+
+    it "checks an existing target directory itself for a `symlink` with `source_glob`, into which brew links" do
+      step = { type: "symlink", source: { path: "/opt/src/*" }, target: { path: "/opt/bin" }, sudo: "if_needed" }
+      entries = { "/opt" => [501, true], "/opt/bin" => [0, true] }
+      world = facts(entries:, unwritable: ["/opt/bin"], directories: ["/opt/bin"])
+      globbed = cask { postflight_steps steps: [step.merge(source_glob: true)] }
+      plain = cask { postflight_steps steps: [step] }
+      missing = facts(entries: { "/opt" => [501, true] }, directories: [])
+      unlisted = facts(entries:, unwritable: ["/opt/bin"])
+      read_only_parent = facts(entries: { "/opt" => [0, true], "/opt/bin" => [501, true] },
+                               unwritable: ["/opt"], directories: ["/opt/bin"])
+      results = {
+        "source_glob"                   => kinds(plan(globbed, world:).last),
+        "no source_glob"                => tokens(plan(plain, world:).first),
+        "source_glob, missing"          => tokens(plan(globbed, world: missing).first),
+        "source_glob, not directory"    => tokens(plan(globbed, world: unlisted).first),
+        "source_glob, parent read-only" => tokens(plan(globbed, world: read_only_parent).first),
+      }
+      expect(results).to eq({ "source_glob"                   => [:sudo],
+                              "no source_glob"                => ["foo"],
+                              "source_glob, missing"          => ["foo"],
+                              "source_glob, not directory"    => ["foo"],
+                              "source_glob, parent read-only" => ["foo"] })
     end
 
     it "leaves a `symlink` step first when its target's directory is missing, as brew makes it" do
