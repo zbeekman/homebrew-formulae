@@ -53,27 +53,20 @@ module Homebrew
         private
 
         # One row per kind of build the formula has (source builds, then
-        # pours), each with statistics from that kind only.
+        # pours), each with statistics from that kind only. `last` is always
+        # the formula's latest build, whatever its kind or outcome.
         sig { params(log: Timed::BuildLog, name: String).returns(T::Array[String]) }
         def rows(log, name)
           builds = log.builds(name)
           kinds = %w[built poured].select { |kind| builds.any? { |build| build["status"] == kind } }
-          return [row(log, name, nil, builds.last)] if kinds.empty?
-          return [row(log, name, kinds.fetch(0), builds.last)] if kinds.length == 1
-
-          kinds.map do |kind|
-            row(log, name, kind, builds.rfind { |build| build["status"] == kind })
-          end
+          (kinds.empty? ? [nil] : kinds).map { |kind| row(log, name, kind) }
         end
 
         # A row without usable history (no builds, only failed ones, or zero
         # durations) shows the estimate the planner would use, marked with `?`.
-        sig {
-          params(log: Timed::BuildLog, name: String, kind: T.nilable(String),
-                 latest: T.nilable(Timed::BuildLog::Build)).returns(String)
-        }
-        def row(log, name, kind, latest)
-          latest ||= {}
+        sig { params(log: Timed::BuildLog, name: String, kind: T.nilable(String)).returns(String) }
+        def row(log, name, kind)
+          latest = log.builds(name).last || {}
           last_text = [latest.fetch("version", "?"), latest.fetch("status", ""), latest.fetch("started", "")[0, 10]]
                       .join(" ")
           summary = Timed::BuildLog.summarise(log.durations(name, status: kind))
@@ -95,7 +88,7 @@ module Homebrew
         usage_banner <<~EOS
           `build-times` [<subcommand>]
 
-          Show and annotate the log of formula build times kept by the `install-timed`, `upgrade-timed` and `reinstall-timed` commands.
+          Show and annotate the log of how long formulae took to build from source or to pour a bottle.
           The log is `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME` (`~/.homebrew` by default).
         EOS
 

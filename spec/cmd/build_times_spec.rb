@@ -21,7 +21,7 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         asciidoc                       1    0m01s    0m01s    0m00s    0m00s     0m01s  10.2.1_1 poured 2026-09-24
         awscli                         3    3m11s    3m15s    3m00s    0m09s     3m28s  2.37.3 built 2026-09-26
         llvm                           1    1h26m    1h26m    1h26m    0m00s     1h26m  23.1.2 built 2026-09-25
-        openexr                        1    1m06s    1m06s    1m00s    0m00s     1m06s  3.5.0 built 2026-09-26
+        openexr                        1    1m06s    1m06s    1m00s    0m00s     1m06s  3.5.1 poured 2026-09-27
         openexr                        1    0m03s    0m03s    0m00s    0m00s     0m03s  3.5.1 poured 2026-09-27
         wget                           1    0m20s    0m20s    0m00s    0m00s     0m20s  1.25.1 failed 2026-09-27
       EOS
@@ -56,6 +56,15 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       expect { described_class.new(%w[stats]).run }.to output(/^zero +0 +- +- +- +- +10m00s\? +1 built/).to_stdout
     end
 
+    it "shows the latest build, even a failed one, on the row of each kind" do
+      builds = [["built", 60.0, "1"], ["poured", 2.0, "2"], ["failed", nil, "3"]].map do |status, seconds, version|
+        { "status" => status, "install_seconds" => seconds, "started" => "2026-09-29", "version" => version }.compact
+      end
+      database.write(JSON.generate("schema_version" => 1, "packages" => { "mixed" => { "builds" => builds } }))
+      expect { described_class.new(%w[stats mixed]).run }
+        .to output(/^mixed .*  3 failed 2026-09-29\nmixed .*  3 failed 2026-09-29\n/).to_stdout
+    end
+
     it "marks the estimate of a formula with only failed builds as the fallback" do
       database.write(JSON.generate(
                        "schema_version" => 1,
@@ -86,8 +95,10 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       expect(found).to eq(summaries.to_h { |subcommand, summary| [subcommand, "#{subcommand}: #{summary}"] })
     end
 
-    it "shows the usual `[subcommand]` usage" do
+    it "shows the usual `[subcommand]` usage and the description in `docs/build-times.md`", :aggregate_failures do
       expect(help).to start_with("Usage: brew build-times [subcommand] ")
+      expect(help)
+        .to include("Show and annotate the log of how long formulae took to build from source or to pour a bottle.")
     end
 
     it "lists `stats` first" do
