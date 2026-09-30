@@ -43,6 +43,10 @@ module Timed
       # Like `Pathname#realpath`, `nil` when missing.
       sig { abstract.params(path: Pathname).returns(T.nilable(Pathname)) }
       def realpath(path); end
+
+      # Like `Pathname#readlink`, `nil` when `path` isn't a symlink.
+      sig { abstract.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def readlink(path); end
     end
 
     # Why a cask goes last. `kind` is `:dependency` (waits for the run),
@@ -296,8 +300,11 @@ module Timed
         target = step["target"]
         # A `symlink` step always has a hash target; the guard is for Sorbet.
         path = resolve_path(cask, target) if target.is_a?(Hash)
-        # Brew returns early unless the link is there, and only escalates when its directory isn't writable.
-        next if path && (facts.lstat(path).nil? || facts.writable?(path.dirname))
+        source_spec = step["source"]
+        source = link_source(cask, source_spec) if source_spec.is_a?(Hash)
+        # Brew returns early unless the target is a symlink to the source, and
+        # only escalates when its directory isn't writable.
+        next if path && source && (facts.readlink(path) != source || facts.writable?(path.dirname))
 
         Reason.new(kind: :sudo, message: "`#{stanza}` removes its `symlink` on uninstall with sudo")
       end
@@ -345,6 +352,16 @@ module Timed
         Reason.new(kind: :sudo, message: "`#{stanza}` runs `#{step["type"]}` with sudo when " \
                                          "#{directory || "its target"} is not writable")
       end
+    end
+
+    # What brew compares `readlink` with: a `relative` source as written,
+    # anything else resolved. `nil` when it can't be resolved here.
+    sig { params(cask: Cask::Cask, spec: Homebrew::InstallSteps::PathSpec).returns(T.nilable(Pathname)) }
+    def self.link_source(cask, spec)
+      path = spec.fetch("path")
+      return if path.include?("{{")
+
+      (spec["base"] == "relative") ? Pathname(path) : resolve_path(cask, spec)
     end
 
     sig { params(string: String).returns(T::Boolean) }

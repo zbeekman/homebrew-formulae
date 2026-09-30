@@ -5,12 +5,14 @@ require "cask/cask"
 require_relative "../../lib/timed/casks"
 
 # A world of files: `entries` maps a path to `[uid, readable]`. Only entries
-# (and the root) exist to be written; `unwritable` paths are read-only.
+# (and the root) exist to be written; `unwritable` paths are read-only, and
+# `links` maps a symlink's path to what it points to.
 class FakeCaskFacts
   include Timed::Casks::Facts
 
-  def initialize(entries: {}, unwritable: [], realpaths: {})
+  def initialize(entries: {}, unwritable: [], realpaths: {}, links: {})
     @entries = entries
+    @links = links
     @unwritable = unwritable
     @realpaths = realpaths
   end
@@ -31,6 +33,11 @@ class FakeCaskFacts
   # Like `Pathname#writable?`: false for anything that isn't there.
   def writable?(path) = (path.root? || !lstat(path).nil?) && @unwritable.exclude?(path.to_s)
   def realpath(path) = @realpaths[path.to_s]
+
+  def readlink(path)
+    target = @links[path.to_s]
+    Pathname(target) if target
+  end
 end
 
 RSpec.describe Timed::Casks do
@@ -569,16 +576,51 @@ RSpec.describe Timed::Casks do
     end
 
     it "takes the uninstall phase of the installed cask's `symlink … uninstall: true` steps" do
-      step = { type: "symlink", source: { path: "src" }, target: { path: "/opt/bin/foo" }, uninstall: true }
+      step = { type: "symlink", source: { path: "/opt/src" }, target: { path: "/opt/bin/foo" }, uninstall: true }
       entries = { "/opt/bin" => [0, true], "/opt/bin/foo" => [501, true] }
-      unwritable = facts(entries:, unwritable: ["/opt/bin"])
+      links = { "/opt/bin/foo" => "/opt/src" }
+      unwritable = facts(entries:, unwritable: ["/opt/bin"], links:)
       [true, "if_needed"].each do |sudo|
         old = cask { postflight_steps steps: [step.merge(sudo:)] }
         expect([kinds(plan(cask, installed: { "foo" => old }, world: unwritable).last),
-                tokens(plan(cask, installed: { "foo" => old }, world: facts(entries:)).first),
+                tokens(plan(cask, installed: { "foo" => old }, world: facts(entries:, links:)).first),
                 tokens(plan(cask, installed: { "foo" => old }, world: facts).first)])
           .to eq([[:sudo], ["foo"], ["foo"]]), sudo.inspect
       end
+    end
+
+    it "leaves an installed link removal first when the target isn't a link to the source, as brew leaves it" do
+      step = { type: "symlink", source: { path: "/opt/src" }, target: { path: "/opt/bin/foo" }, uninstall: true,
+               sudo: true }
+      old = cask { postflight_steps steps: [step] }
+      entries = { "/opt/bin" => [0, true], "/opt/bin/foo" => [501, true] }
+      worlds = {
+        "regular file"     => facts(entries:, unwritable: ["/opt/bin"]),
+        "unrelated link"   => facts(entries:, unwritable: ["/opt/bin"], links: { "/opt/bin/foo" => "/elsewhere" }),
+        "link to the file" => facts(entries:, unwritable: ["/opt/bin"], links: { "/opt/bin/foo" => "/opt/src" }),
+      }
+      firsts = worlds.transform_values { |world| tokens(plan(cask, installed: { "foo" => old }, world:).first) }
+      expect(firsts).to eq({ "regular file" => ["foo"], "unrelated link" => ["foo"], "link to the file" => [] })
+    end
+
+    it "compares a `relative` source with the link as written, and counts a source it can't resolve" do
+      step = { type: "symlink", target: { path: "/opt/bin/foo" }, uninstall: true, sudo: true }
+      entries = { "/opt/bin" => [0, true], "/opt/bin/foo" => [501, true] }
+      relative = cask { postflight_steps steps: [step.merge(source: { path: "../src", base: "relative" })] }
+      templated = cask { postflight_steps steps: [step.merge(source: { path: "{{version}}/src" })] }
+      templated_relative = cask do
+        postflight_steps steps: [step.merge(source: { path: "{{version}}/src", base: "relative" })]
+      end
+      world = ->(link) { facts(entries:, unwritable: ["/opt/bin"], links: { "/opt/bin/foo" => link }) }
+      results = {
+        "matching relative"  => plan(cask, installed: { "foo" => relative }, world: world.call("../src")),
+        "different relative" => plan(cask, installed: { "foo" => relative }, world: world.call("/opt/src")),
+        "unresolved source"  => plan(cask, installed: { "foo" => templated }, world: world.call("/opt/src")),
+        "templated relative" => plan(cask, installed: { "foo" => templated_relative }, world: world.call("/opt/src")),
+      }
+      expect(results.transform_values { |result| kinds(result.last) })
+        .to eq({ "matching relative" => [:sudo], "different relative" => [], "unresolved source" => [:sudo],
+                 "templated relative" => [:sudo] })
     end
 
     it "treats an installed link removal it can't resolve, or that needs no sudo, accordingly" do

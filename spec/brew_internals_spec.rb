@@ -235,6 +235,27 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "removing an install-step link on uninstall" do
+    it "removes a link to the source, absolute or `relative`, and leaves any other link" do
+      dir = mktmpdir
+      (dir/"bin").mkpath
+      (dir/"bin/mine").make_symlink(dir/"src")
+      (dir/"bin/other").make_symlink("/elsewhere")
+      (dir/"bin/rel").make_symlink("../src")
+      steps = [
+        ["mine", { "path" => (dir/"src").to_s }],
+        ["other", { "path" => (dir/"src").to_s }],
+        ["rel", { "path" => "../src", "base" => "relative" }],
+      ].map do |name, source|
+        { "type" => "symlink", "source" => source, "target" => { "path" => (dir/"bin"/name).to_s },
+          "uninstall" => true }
+      end
+      Homebrew::InstallSteps::Runner.new(context: Object.new).run(steps, phase: :uninstall)
+      expect(%w[mine other rel].to_h { |name| [name, (dir/"bin"/name).symlink?] })
+        .to eq({ "mine" => false, "other" => true, "rel" => false })
+    end
+  end
+
   describe "`SystemCommand.run` with `sudo: nil`" do
     it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
       retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]
