@@ -18,6 +18,9 @@ module Timed
 
     DURATION_KEYS = %w[build_seconds install_seconds wall_seconds].freeze
 
+    # One week: far beyond any build, and small enough that statistics cannot overflow.
+    MAX_DURATION_SECONDS = 604_800
+
     POURED_ESTIMATE = 15.0
     NO_HISTORY_ESTIMATE = 600.0
 
@@ -100,9 +103,11 @@ module Timed
 
       DURATION_KEYS.each do |key|
         value = build[key]
-        next if value.nil? || (value.is_a?(Numeric) && (!value.is_a?(Float) || value.finite?))
+        in_range = (value.is_a?(Integer) || value.is_a?(Float)) && value >= 0 && value <= MAX_DURATION_SECONDS
+        next if value.nil? || in_range
 
-        raise "#{prefix} `#{key}` of build #{index} of package `#{name}` must be a number."
+        raise "#{prefix} `#{key}` of build #{index} of package `#{name}` must be a number of seconds " \
+              "from 0 to #{MAX_DURATION_SECONDS}."
       end
     end
     private_class_method :validate_build!

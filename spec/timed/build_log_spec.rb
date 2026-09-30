@@ -72,7 +72,8 @@ RSpec.describe Timed::BuildLog do
     it "names the file, package and build for every malformed package or build" do
       not_object = "<path> is not a build log: package `x` must be a JSON object with a `builds` array."
       not_build = "<path> is not a build log: build %d of package `x` must be a JSON object."
-      not_number = "<path> is not a build log: `%s` of build 0 of package `x` must be a number."
+      not_number = "<path> is not a build log: `%s` of build 0 of package `x` must be a number of seconds " \
+                   "from 0 to 604800."
       cases = {
         '{"x": []}'                                                           => not_object,
         '{"x": {}}'                                                           => not_object,
@@ -85,6 +86,14 @@ RSpec.describe Timed::BuildLog do
           "<path> is not a build log: `started` of build 0 of package `x` must be a string.",
         '{"x": {"builds": [{"started": 5}]}}'                                 =>
           "<path> is not a build log: `started` of build 0 of package `x` must be a string.",
+        '{"x": {"builds": [{"install_seconds": -1}]}}'                        =>
+          format(not_number, "install_seconds"),
+        %Q({"x": {"builds": [{"build_seconds": 1#{"0" * 400}}]}})             =>
+          format(not_number, "build_seconds"),
+        '{"x": {"builds": [{"wall_seconds": 604801}]}}'                       =>
+          format(not_number, "wall_seconds"),
+        '{"x": {"builds": [{"wall_seconds": 1e200}]}}'                        =>
+          format(not_number, "wall_seconds"),
         '{"x": {"builds": [{"install_seconds": true}]}}'                      =>
           format(not_number, "install_seconds"),
         '{"x": {"builds": [{"build_seconds": "1"}]}}'                         =>
@@ -104,6 +113,12 @@ RSpec.describe Timed::BuildLog do
         [packages, message]
       end
       expect(messages).to eq(cases)
+    end
+
+    it "accepts a duration of exactly one week" do
+      path.dirname.mkpath
+      path.write('{"schema_version": 1, "packages": {"x": {"builds": [{"wall_seconds": 604800}]}}}')
+      expect { described_class.load(path) }.not_to raise_error
     end
 
     it "accepts builds with numeric or missing durations and array problems" do
@@ -130,15 +145,24 @@ RSpec.describe Timed::BuildLog do
       cases = {
         "problems"        => [{ "problems" => "bad" }, "`problems` of build 0 of package `foo` must be an array."],
         "install_seconds" => [{ "install_seconds" => "1" },
-                              "`install_seconds` of build 0 of package `foo` must be a number."],
+                              "`install_seconds` of build 0 of package `foo` must be a number of seconds " \
+                              "from 0 to 604800."],
         "started"         => [{ "started" => 5 }, "`started` of build 0 of package `foo` must be a string."],
         "Rational"        => [{ "wall_seconds" => Rational(1, 2) },
-                              "`wall_seconds` of build 0 of package `foo` must be a number."],
+                              "`wall_seconds` of build 0 of package `foo` must be a number of seconds " \
+                              "from 0 to 604800."],
         "nesting"         => [{ "version" => (1..150).reduce([]) { |inner, _| [inner] } },
                               "nesting of 100 is too deep. " \
                               "Did you try to serialize objects with circular references?"],
+        "Complex"         => [{ "build_seconds" => Complex(1, 2) },
+                              "`build_seconds` of build 0 of package `foo` must be a number of seconds " \
+                              "from 0 to 604800."],
+        "negative"        => [{ "wall_seconds" => -0.5 },
+                              "`wall_seconds` of build 0 of package `foo` must be a number of seconds " \
+                              "from 0 to 604800."],
         "NaN"             => [{ "install_seconds" => Float::NAN },
-                              "`install_seconds` of build 0 of package `foo` must be a number."],
+                              "`install_seconds` of build 0 of package `foo` must be a number of seconds " \
+                              "from 0 to 604800."],
       }
       outcomes = cases.transform_values do |(entry, _message)|
         FileUtils.cp fixture, path
