@@ -82,6 +82,10 @@ module Timed
     # cask's, as `Cask::Upgrade` does: this assigns `Cask#config` of the new
     # casks.
     #
+    # `force` is `install --force`, which brew passes on to the casks; it only
+    # matters for `:install` (an upgrade or reinstall always deletes the old
+    # bundle).
+    #
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
     # installed cask without a successor and dispatches its `zap` stanza.
     sig {
@@ -95,14 +99,16 @@ module Timed
         env:       T::Hash[String, String],
         installed: T::Hash[String, Cask::Cask],
         zap:       T::Boolean,
+        force:     T::Boolean,
       ).returns(Plan)
     }
-    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false)
+    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
+                  force: false)
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
         old = installed[cask.token] if upgrading
-        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, in_run:, facts:, macos:))
+        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:))
       end
       first, last = entries.partition { |entry| entry.reasons.empty? }
       # A cask upgrade that fails partway is rolled back, and the rollback may
@@ -121,12 +127,13 @@ module Timed
         old:       T.nilable(Cask::Cask),
         upgrading: T::Boolean,
         zap:       T::Boolean,
+        force:     T::Boolean,
         in_run:    T::Array[String],
         facts:     Facts,
         macos:     T::Boolean,
       ).returns(T::Array[Reason])
     }
-    def self.reasons(cask, old:, upgrading:, zap:, in_run:, facts:, macos:)
+    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:)
       cask.config = cask.default_config.merge(old.config) if old
       reasons = depends_on_run(cask, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
       # Upgrade and reinstall uninstall the old version first.
@@ -135,6 +142,9 @@ module Timed
         reasons += flight_blocks(uninstalled, uninstall: true) + uninstall_directives(uninstalled, zap:) +
                    uninstall_steps(uninstalled, facts:) + replaced_bundles([cask, old].compact, facts:)
         reasons += unwritable_directories(old, facts:) if old
+      elsif force
+        # `install --force` overwrites an existing bundle through the same `delete`.
+        reasons += replaced_bundles([cask], facts:)
       end
       reasons += unwritable_directories(cask, facts:)
       reasons += altname_metadata(cask, facts:) if macos

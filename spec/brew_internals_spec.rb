@@ -308,6 +308,30 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "`install --force` over an existing bundle" do
+    it "fails without `force` and otherwise deletes the target, with permission recovery" do
+      body = brew_source("cask/artifact/moved.rb")[/^      def move\(.*?^      end$/m]
+      lines = body.lines.map(&:strip)
+      message = "raise CaskError, \"\#{message}.\""
+      kept = ["target.parent.writable?", message, "delete(target", "gain_permissions_remove"]
+      expected = [
+        "if target.parent.writable? && !force",
+        "Utils.gain_permissions_remove(target, command:)",
+        "#{message} if !force && !adopt",
+        "delete(target, force:, successor:, command:)",
+      ]
+      expect(lines.select { |line| kept.any? { |part| line.include?(part) } }).to eq(expected)
+    end
+
+    it "is reached through the `force` that `brew install` passes to the cask installer" do
+      block = brew_source("cmd/install.rb")[/Cask::Installer\.new\(.*?^                \)/m]
+      installer = brew_source("cask/installer.rb")
+      expect([block.match?(/^\s+force:\s+args\.force\?,$/), installer.include?("force: force?, predecessor:"),
+              brew_source("cask/artifact/moved.rb").include?("move(adopt:, auto_updates:, force:,")])
+        .to eq([true, true, true])
+    end
+  end
+
   describe "`SystemCommand.run` with `sudo: nil`" do
     it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
       retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]

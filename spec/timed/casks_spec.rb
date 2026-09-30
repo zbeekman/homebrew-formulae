@@ -73,11 +73,12 @@ RSpec.describe Timed::Casks do
       env:       T::Hash[String, String],
       installed: T::Hash[String, Cask::Cask],
       zap:       T::Boolean,
+      force:     T::Boolean,
     ).returns(Timed::Casks::Plan)
   }
   def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {},
-           zap: false)
-    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:)
+           zap: false, force: false)
+    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:, force:)
   end
 
   sig { params(entries: T::Array[Timed::Casks::Entry]).returns(T::Array[String]) }
@@ -478,6 +479,22 @@ RSpec.describe Timed::Casks do
       cask = remove_cask("x/f", base: "staged_path")
       result = plan(cask, world: readonly_world("#{cask.staged_path}/x"))
       expect(messages(result.last)).to eq([unwritable_message("#{cask.staged_path}/x")])
+    end
+  end
+
+  describe "`install --force` over an existing bundle" do
+    let(:app_cask) { cask { app "Foo.app", target: "/Applications/Foo.app" } }
+    let(:root_owned) { facts(entries: { "/Applications" => [501, true], "/Applications/Foo.app" => [0, true] }) }
+
+    it "puts a cask last, for sudo, when the bundle it would overwrite isn't yours" do
+      results = {
+        "install --force"    => plan(app_cask, verb: :install, world: root_owned, force: true),
+        "install"            => plan(app_cask, verb: :install, world: root_owned),
+        "install, no bundle" => plan(app_cask, verb: :install, force: true,
+                                                world: facts(entries: { "/Applications" => [501, true] })),
+      }
+      expect(results.transform_values { |result| kinds(result.last) })
+        .to eq({ "install --force" => [:sudo], "install" => [], "install, no bundle" => [] })
     end
   end
 
