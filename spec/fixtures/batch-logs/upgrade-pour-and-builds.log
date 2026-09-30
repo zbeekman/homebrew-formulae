@@ -1,0 +1,50 @@
+==> Downloading bottle manifests
+✔︎ Bottle Manifest python-markdown (3.11)
+==> Fetching downloads for: python-markdown, virtualenv and openexr
+✔︎ Bottle python-markdown (3.11)
+==> Upgrading 3 outdated packages:
+python-markdown  3.10.3  -> 3.11
+virtualenv       21.12.0 -> 21.12.1
+openexr          3.5.0   -> 3.5.1
+✔︎ Formula virtualenv (21.12.1)
+✔︎ Formula openexr (3.5.1)
+==> Upgrading python-markdown
+  3.10.3 -> 3.11
+==> Pouring python-markdown--3.11.all.bottle.tar.gz
+🍺  /usr/local/Cellar/python-markdown/3.11: 53 files, 356.9KB
+==> Upgrading virtualenv
+  21.12.0 -> 21.12.1
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+[34m==>[0m [1mpython3.14 -m venv --system-site-packages --without-pip /usr/local/Cellar/vi[0m
+[34m==>[0m [1mpython3.14 -m pip --python=/usr/local/Cellar/virtualenv/21.12.1/libexec/bin/[0m
+🍺  /usr/local/Cellar/virtualenv/21.12.1: 216 files, 9MB, built in 1 minute 37 seconds
+==> Upgrading openexr
+  3.5.0 -> 3.5.1
+[34m==>[0m [1mcmake -S . -B build[0m
+[34m==>[0m [1mcmake --build build[0m
+[34m==>[0m [1mcmake --install build[0m
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+🍺  /usr/local/Cellar/openexr/3.5.1: 214 files, 4.2MB, built in 1 minute 11 seconds
+==> Cleanup
+Removing: /usr/local/Cellar/python-markdown/3.10.3... (53 files, 354.7KB)
+Removing: /usr/local/Cellar/openexr/3.5.0... (214 files, 4.2MB)
+Disable this behaviour by setting `HOMEBREW_NO_INSTALL_CLEANUP=1`.
+Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
+==> Installation times
+python-markdown           1.549 s
+virtualenv               97.091 s
+openexr                  69.609 s
+==> Upgraded 3 requested outdated packages
+python-markdown  3.10.3  -> 3.11
+virtualenv       21.12.0 -> 21.12.1
+openexr          3.5.0   -> 3.5.1
+==> 2 homebrew/core formulae built from source
+virtualenv
+openexr

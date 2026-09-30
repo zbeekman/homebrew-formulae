@@ -1,0 +1,48 @@
+==> Downloading https://raw.githubusercontent.com/Homebrew/homebrew-core/321cc32b673be8312b8dfc0c34173dc0b775f06f/Formula/o/openssl@4.rb
+Already downloaded: /Users/user/Library/Caches/Homebrew/downloads/ea1a5a6afd36d74551017e3cfbe1db9538d05ae8e2755ce1b0554cf933303db9--openssl@4.rb
+==> Fetching downloads for: openssl@3 and openssl@4
+==> Upgrading 2 outdated packages:
+openssl@3  3.6.4 -> 3.6.4_1
+openssl@4  4.0.2 -> 4.0.2_1
+✔︎ Formula openssl@3 (3.6.4)
+✔︎ Formula openssl@4 (4.0.2)
+==> Upgrading openssl@3
+  3.6.4 -> 3.6.4_1
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+[34m==>[0m [1mperl ./Configure --prefix=/usr/local/Cellar/openssl@3/3.6.4_1 --openssldir=/[0m
+[34m==>[0m [1mmake[0m
+[34m==>[0m [1mmake install MANDIR=/usr/local/Cellar/openssl@3/3.6.4_1/share/man MANSUFFIX=[0m
+🍺  /usr/local/Cellar/openssl@3/3.6.4_1: 7,630 files, 38.2MB, built in 3 minutes 57 seconds
+==> Upgrading openssl@4
+  4.0.2 -> 4.0.2_1
+[34m==>[0m [1mperl ./Configure --prefix=/usr/local/Cellar/openssl@4/4.0.2_1 --openssldir=/[0m
+[34m==>[0m [1mmake[0m
+[34m==>[0m [1mmake install MANDIR=/usr/local/Cellar/openssl@4/4.0.2_1/share/man MANSUFFIX=[0m
+Unlinking /usr/local/Cellar/openssl@3/3.6.4_1... 6570 symlinks removed.
+
+This is a Tier 3 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-3
+You can report issues with Tier 3 configurations to Homebrew/* repositories!
+
+Read the above document before opening any issues or PRs.
+🍺  /usr/local/Cellar/openssl@4/4.0.2_1: 6,809 files, 24.2MB, built in 4 minutes 2 seconds
+==> Cleanup
+Removing: /usr/local/Cellar/openssl@3/3.6.4... (7,630 files, 38.2MB)
+Removing: /usr/local/Cellar/openssl@4/4.0.2... (7,729 files, 38.1MB)
+Disable this behaviour by setting `HOMEBREW_NO_INSTALL_CLEANUP=1`.
+Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
+==> Caveats
+==> openssl@3
+To add additional certificates, place .pem files in
+  /usr/local/etc/openssl@3/certs
+==> Installation times
+openssl@3               229.274 s
+openssl@4               232.797 s
+==> Upgraded 2 requested outdated packages
+openssl@3  3.6.4 -> 3.6.4_1
+openssl@4  4.0.2 -> 4.0.2_1
+==> 2 homebrew/core formulae built from source
+openssl@3
+openssl@4

@@ -4,12 +4,34 @@
 require "abstract_command"
 require "abstract_subcommand"
 require_relative "../lib/timed/build_log"
+require_relative "../lib/timed/receipts"
 
 module Homebrew
   module Cmd
     class BuildTimes < AbstractCommand
-      # Defined before `StatsSubcommand` because brew lists subcommands in
-      # reverse order of definition, and `stats` should come first.
+      # Brew lists subcommands in reverse order of definition, so `stats`,
+      # defined last, comes first.
+      class RestampSubcommand < Homebrew::AbstractSubcommand
+        subcommand_args do
+          usage_banner <<~EOS
+            `brew build-times restamp` [<formula> ...]:
+            Add the logged build times to the install receipts of installed formulae that lack them.
+            Stamps each installed keg of <formula>, or of every logged formula, whose receipt has no `build_times`,
+            from the latest logged build of the keg's version of the same kind: a pour for a keg poured from a bottle,
+            a source build otherwise.
+          EOS
+          named_args :formula
+        end
+
+        sig { override.void }
+        def run
+          log = Timed::BuildLog.load(Timed::BuildLog.default_path)
+          receipts = Timed::Receipts.restamp(log, args.named.empty? ? log.package_names : args.named)
+          ohai "No receipts to restamp" if receipts.empty?
+          receipts.each { |receipt| ohai "Restamped #{receipt.dirname}" }
+        end
+      end
+
       class NoteSubcommand < Homebrew::AbstractSubcommand
         subcommand_args do
           usage_banner <<~EOS
