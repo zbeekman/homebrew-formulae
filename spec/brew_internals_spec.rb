@@ -34,6 +34,24 @@ RSpec.describe "brew internals", type: :system do
   # like; shorthand `sudo:` gives `""`.
   def sudo_values(path) = brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten
 
+  describe "tap commands" do
+    it "are only found when executable" do
+      dir = mktmpdir
+      %w[plain runnable].each { |name| FileUtils.touch dir/"#{name}.rb" }
+      (dir/"runnable.rb").chmod(0755)
+      lookup = %w[plain runnable].to_h { |name| [name, which("#{name}.rb", [dir])] }
+      source = brew_source("commands.rb")
+      uses = ["which(\"\#{cmd}.rb\", tap_cmd_directories)", "select(&:executable?)"].map do |code|
+        source.include?(code)
+      end
+      expect([lookup, uses]).to eq([{ "plain" => nil, "runnable" => dir/"runnable.rb" }, [true, true]])
+    end
+
+    it "in this tap are all executable" do
+      expect((Pathname(__FILE__).dirname.parent/"cmd").children.reject(&:executable?)).to eq([])
+    end
+  end
+
   describe "the `cmd_args` block of the wrapped commands" do
     it "is kept in `@parser_block`" do
       commands = %w[upgrade install reinstall].map { |name| Timed::Command.builtin(name) }
