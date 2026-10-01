@@ -1,6 +1,7 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "formula"
 require "json"
 require "tab"
 require "utils/output"
@@ -25,6 +26,27 @@ module Timed
       data = JSON.parse(receipt.read)
       data[KEY] = build.slice(*FIELDS).compact
       receipt.atomic_write(JSON.pretty_generate(data))
+    end
+
+    # The install time brew wrote into the receipt of `formula`'s keg in
+    # `opt`, as whole seconds; nil without one. That is the keg `brew
+    # reinstall` reinstalls (it takes the linked keg, else the one in `opt`)
+    # and the one it puts in `opt`, even with a newer HEAD keg installed.
+    sig { params(formula: Formula).returns(T.nilable(Integer)) }
+    def self.install_time(formula)
+      receipt = formula.opt_prefix/AbstractTab::FILENAME
+      JSON.parse(receipt.read)["time"]&.to_i if receipt.file?
+    end
+
+    # Whether brew installed `formula` at `since` or later, by the install
+    # time it writes into the receipt of every keg it installs, poured or
+    # built: a time other than `before`, the one it had then, as a failed
+    # reinstall puts the old keg back, with its receipt, which may be from the
+    # same second.
+    sig { params(formula: Formula, since: Time, before: T.nilable(Integer)).returns(T::Boolean) }
+    def self.installed_since?(formula, since, before:)
+      time = install_time(formula)
+      !time.nil? && time != before && time >= since.to_i
     end
 
     # Stamps each installed keg of the formulae `names` whose receipt has no

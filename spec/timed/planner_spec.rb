@@ -314,6 +314,15 @@ RSpec.describe Timed::Planner do
     end
   end
 
+  describe ".plan for reinstall" do
+    it "makes one batch whatever the slow and keg-only formulae, as only `--last` splits it" do
+      estimates = { "quick" => 10, "llvm" => 3000, "flang" => 900, "lld" => 400, "gcc" => 2000 }
+      deps = { "flang" => %w[llvm], "lld" => %w[llvm] }
+      planned = batches(estimates.keys, estimates, deps:, keg_only: %w[llvm gcc], verb: :reinstall)
+      expect(planned).to eq([%w[quick gcc llvm lld flang]])
+    end
+  end
+
   describe ".plan --last" do
     sig { returns(T::Hash[String, Numeric]) }
     def estimates

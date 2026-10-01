@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "abstract_command"
+require "formulary"
 require "utils/output"
 require_relative "build_log"
 require_relative "planner"
@@ -30,10 +31,11 @@ module Timed
       block
     end
 
-    # The flags every `-timed` command adds to the wrapped command's. Those
-    # that plan formulae conflict with `--cask`.
-    sig { params(parser: Homebrew::CLI::Parser).void }
-    def self.define_flags(parser)
+    # The flags every `-timed` command adds to the wrapped command's, and
+    # `--last` unless not `last`. Those that plan formulae conflict with
+    # `--cask`.
+    sig { params(parser: Homebrew::CLI::Parser, last: T::Boolean).void }
+    def self.define_flags(parser, last: true)
       parser.comma_array "--guess",
                          description: "Comma-separated `name=duration` estimates for source builds with no " \
                                       "history, e.g. `llvm=1h30m`: hours, minutes and seconds, as " \
@@ -41,16 +43,18 @@ module Timed
       parser.flag "--estimator=",
                   description: "How to estimate a source build from its history: `mean` (the default: " \
                                "the mean plus 1.5 standard deviations) or `median`."
-      parser.comma_array "--last",
-                         description: "Comma-separated formulae to run in a final batch, with their dependents."
+      if last
+        parser.comma_array "--last",
+                           description: "Comma-separated formulae to run in a final batch, with their dependents."
+      end
       parser.comma_array "--exclude",
-                         description: "Comma-separated formulae to leave out of the batches. Homebrew may still " \
+                         description: "Comma-separated formulae to leave out of the run. Homebrew may still " \
                                       "upgrade them as dependencies of the others."
       parser.switch "--no-stamp-receipts",
                     description: "Don't add the build times to the install receipts of the formulae it installs; " \
                                  "they are still logged.",
                     env:         :timed_no_stamp_receipts
-      PLAN_FLAGS.each { |name| parser.conflicts "--cask", "--#{name}" }
+      (last ? PLAN_FLAGS : PLAN_FLAGS - ["last"]).each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
     PLAN_FLAGS = %w[guess estimator last exclude].freeze
@@ -167,6 +171,14 @@ module Timed
 
         guesses[name] = seconds
       end
+    end
+
+    # The full name of the formula `name` given to `flag`.
+    sig { params(flag: String, name: String).returns(String) }
+    def self.resolve(flag, name)
+      Formulary.factory(name).full_name
+    rescue FormulaUnavailableError => e
+      raise UsageError, "`#{flag}`: #{e}"
     end
 
     # `--estimator`'s value, `:mean` by default.

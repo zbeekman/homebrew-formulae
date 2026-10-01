@@ -6,6 +6,8 @@
 # inherit that override.
 # rubocop:disable Sorbet/BlockMethodDefinition
 
+require "formula_installer"
+require "reinstall"
 require "tab"
 require_relative "../../lib/timed/receipts"
 
@@ -69,6 +71,78 @@ RSpec.describe Timed::Receipts do
       path = receipt("foo", "0.14.1")
       described_class.stamp(path, { "status" => "poured", "install_seconds" => 1.5, "build_seconds" => nil })
       expect(JSON.parse(path.read)["build_times"]).to eq("install_seconds" => 1.5)
+    end
+  end
+
+  describe ".installed_since?" do
+    # The fixtures' install time.
+    let(:installed_at) { Time.at(1_790_557_052) }
+    let(:foo) do
+      formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-1.0.tgz"
+      end
+    end
+
+    # `foo`'s keg `version`, installed `seconds` after the fixtures' install
+    # time, linked into `opt` unless not `opt`.
+    def install_foo(seconds, version: "1.0", opt: true)
+      keg = HOMEBREW_CELLAR/"foo"/version
+      keg.mkpath
+      receipt = JSON.parse((fixtures/"built.json").read).merge("time" => installed_at.to_i + seconds)
+      receipt["source"]["versions"]["stable"] = "1.0"
+      (keg/AbstractTab::FILENAME).write(JSON.pretty_generate(receipt))
+      if opt
+        (HOMEBREW_PREFIX/"opt").mkpath
+        FileUtils.ln_sf keg, HOMEBREW_PREFIX/"opt/foo"
+      end
+      keg
+    end
+
+    it "is whether the receipt of the keg in `opt` says brew installed it at the time given or later" do
+      installed = { "later" => 5, "within the same second" => 0, "earlier" => -1, "no receipt" => nil }
+      results = installed.to_h do |label, seconds|
+        keg = install_foo(seconds || 0)
+        (keg/AbstractTab::FILENAME).delete if seconds.nil?
+        result = described_class.installed_since?(foo, installed_at + 0.5, before: nil)
+        keg.rmtree
+        [label, result]
+      end
+      expect(results).to eq("later" => true, "within the same second" => true, "earlier" => false,
+                            "no receipt" => false)
+    end
+
+    it "is false for the receipt it had before, even within the same second" do
+      install_foo(0)
+      before = described_class.install_time(foo)
+      expect([before, described_class.installed_since?(foo, installed_at, before:)])
+        .to eq([installed_at.to_i, false])
+    end
+
+    it "reads the keg brew reinstalled, not a newer HEAD keg" do
+      foo = formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-1.0.tgz"
+        head "https://brew.sh/foo.git"
+      end
+      install_foo(-60, version: "HEAD-abc1234", opt: false)
+      install_foo(60)
+      expect(described_class.installed_since?(foo, installed_at, before: installed_at.to_i - 120)).to be(true)
+    end
+
+    it "is false after a failed `brew reinstall`, which puts the old keg back" do
+      keg = Keg.new(install_foo(-60))
+      before = described_class.install_time(foo)
+      installer = FormulaInstaller.new(foo)
+      allow(installer).to receive(:install) do
+        (HOMEBREW_CELLAR/"foo/1.0").mkpath
+        raise BuildError.new(foo, "make", [], {})
+      end
+      context = Homebrew::Reinstall::InstallationContext.new(formula_installer: installer, keg:, formula: foo,
+                                                             options: Options.new)
+      expect { Homebrew::Reinstall.reinstall_formula(context) }.to raise_error(BuildError)
+      expect([(keg/AbstractTab::FILENAME).file?, described_class.installed_since?(foo, installed_at, before:)])
+        .to eq([true, false])
     end
   end
 

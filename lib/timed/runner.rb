@@ -22,32 +22,40 @@ module Timed
     # its output, without colours, in a log in `logs` named after the run's
     # start and process. With `pour_flags`, a batch is split into runs of
     # formulae in `pours` or not, in its order, and each run of `pours` gets
-    # `pour_flags` instead of `flags`, one call per run. After each batch, a
-    # formula whose version isn't installed failed; each formula brew worked
-    # on is logged in `database` with the
+    # `pour_flags` instead of `flags`, one call per run. `succeeded` is called
+    # for each formula a call is given before the call, and what it returns
+    # after, with when the call started: a formula failed unless that says
+    # brew installed it (by default, if its version is installed). Each
+    # formula brew worked on is logged in `database` with the
     # verb, the batch's label and its log, and each keg brew installed gets
     # its times in its receipt unless not `stamp`. A formula that `deps` says
     # needs one that failed or was skipped is skipped and logged as such.
+    # With `stops_at_failure` (brew stops a call at a failed build), the
+    # formulae of a failed call that brew never started are logged as
+    # skipped, not failed, with a warning.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
     # raised, even if brew finished that batch.
     sig {
       params(
-        batches:    T::Array[Planner::Batch],
-        verb:       String,
-        flags:      T::Array[String],
-        formulae:   T::Hash[String, Formula],
-        deps:       T::Hash[String, T::Array[String]],
-        pours:      T::Array[String],
-        pour_flags: T.nilable(T::Array[String]),
-        stamp:      T::Boolean,
-        database:   Pathname,
-        logs:       Pathname,
-        clock:      T.proc.returns(Float),
-        now:        T.proc.returns(Time),
+        batches:          T::Array[Planner::Batch],
+        verb:             String,
+        flags:            T::Array[String],
+        formulae:         T::Hash[String, Formula],
+        deps:             T::Hash[String, T::Array[String]],
+        pours:            T::Array[String],
+        pour_flags:       T.nilable(T::Array[String]),
+        stamp:            T::Boolean,
+        succeeded:        T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)),
+        stops_at_failure: T::Boolean,
+        database:         Pathname,
+        logs:             Pathname,
+        clock:            T.proc.returns(Float),
+        now:              T.proc.returns(Time),
       ).void
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
+                 succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
                  database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
                  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
       # Runs started in the same second are separate processes.
@@ -56,6 +64,9 @@ module Timed
       failed = T.let([], T::Array[String])
       skipped = T.let([], T::Array[String])
       not_finished = T.let(nil, T.nilable(T::Array[String]))
+      # What brew never started in a call it stopped early, e.g. at a failed
+      # build.
+      not_run = T.let([], T::Array[String])
       # The child brew is in this process group, so it gets Ctrl-C too.
       interrupts = T.let([], T::Array[Integer])
       old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
@@ -71,6 +82,8 @@ module Timed
           # Calls in a batch are separate processes, so brew doesn't know
           # what failed in an earlier one.
           failed_in_batch = T.let([], T::Array[String])
+          # Whether brew installed each formula in its call.
+          done = T.let({}, T::Hash[String, T::Boolean])
           skipped_before = skipped.length
           skip, names = skips(batch.names, failed + skipped, deps, verb)
           skipped.concat(skip)
@@ -108,11 +121,23 @@ module Timed
                 next if kept.empty?
 
                 argv = [verb, "--formula", "--yes", "--display-times", *call_flags].uniq
+                checks = kept.to_h { |name| [name, succeeded.call(formulae.fetch(name))] }
+                call_started = now.call
+                first_line = lines.length
                 results << stream([*argv, *kept], env:) do |line|
                   file.write(line.gsub(ANSI, ""))
                   lines << [line, clock.call - start]
                 end
-                failed_in_batch.concat(kept.reject { |name| formulae.fetch(name).latest_version_installed? })
+                checks.each { |name, check| done[name] = check.call(call_started) }
+                failed_in_batch.concat(kept.reject { |name| done.fetch(name) })
+                next if !stops_at_failure || results.last || interrupts.any?
+
+                # Brew names each formula it starts on, or whose download fails.
+                begun = parse(lines.drop(first_line)).keys
+                unstarted = kept.reject { |name| begun.include?(Utils.name_from_full_name(name)) }
+                not_run.concat(unstarted)
+                skipped.concat(unstarted)
+                names -= unstarted
               end
             end
             success = results.all?
@@ -125,7 +150,11 @@ module Timed
               short = Utils.name_from_full_name(name)
               build = builds.delete(short) || {}
               formula = formulae.fetch(name)
-              installed = formula.latest_version_installed?
+              # A formula whose call Ctrl-C stopped before it ran wasn't
+              # checked: checked now, from the batch's start, though a check
+              # that compares with how it was before the call can't tell. Only
+              # what brew finished in the stopped batch is logged anyway.
+              installed = done.fetch(name) { succeeded.call(formula).call(started) }
               if installed && DONE.include?(build["status"])
                 builds[short] = build
               elsif !installed
@@ -172,8 +201,12 @@ module Timed
       end
       if not_finished
         opoo "Interrupted; not finished or logged: #{not_finished.join(" ")}" if not_finished.any?
-      elsif failed.any?
-        ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: #{failed.join(" ")}"
+      else
+        opoo "`brew #{verb}` stopped early; not run: #{not_run.join(" ")}" if not_run.any?
+        if failed.any?
+          ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: " \
+                "#{failed.join(" ")}"
+        end
       end
       # Even if brew finished anyway, so that whatever runs this stops too.
       raise Interrupt if interrupts.any?
@@ -248,13 +281,17 @@ module Timed
 
     # Where brew starts on a formula, with any options after the name: each
     # upgrade (`Upgrade.print_upgrade_message`), each reinstall
-    # (`Reinstall.reinstall_formula`), and an install once its dependencies
-    # are installed (`FormulaInstaller#install`); and where it starts on a
-    # dependency (`FormulaInstaller#install_dependency`). A plain install
-    # with no dependencies to install has no heading, and a tap formula's
-    # (`Formula#print_tap_action`) isn't read.
-    HEADING = /\A==> (?:Upgrading|Installing|Reinstalling) (?<name>[^\s:]+)(?: --\S.*| *)\z/
+    # (`Reinstall.reinstall_formula`), each install of a tap formula
+    # (`Formula#print_tap_action`), and an install once its dependencies are
+    # installed (`FormulaInstaller#install`); and where it starts on a
+    # dependency (`FormulaInstaller#install_dependency`). An install of a core
+    # formula with no dependencies to install has no heading.
+    HEADING = /\A==> (?:Upgrading|Installing|Reinstalling) (?<name>[^\s:]+)(?: from \S+| --\S.*| *)\z/
     DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)\z/
+
+    # Where brew pours a bottle, named `<name>--<version>…`
+    # (`FormulaInstaller#pour`, `Bottle::Filename`).
+    POURING = /\A==> Pouring (?<name>.+?)--/
 
     # A download failed (`DownloadQueue`). A bottle's version is the keg's
     # (`pkg_version`), a source download's has no revision, so it isn't kept.
@@ -278,8 +315,10 @@ module Timed
     # log under a line naming the log and how many lines follow (unless
     # verbose); that line is kept with the last `PROBLEM_LINES - 1` of those
     # lines, blank ones and errors included but trailing blank ones dropped,
-    # stopping early at brew's next status line.
-    PROBLEM = /\A(?:Error:|Last (?<tail>\d+) lines from )/
+    # stopping early at brew's next status line. The log is in a directory
+    # named after the formula (`Formula#logs`), which names the formula when
+    # nothing else has, and brew is done with the formula after it.
+    PROBLEM = %r{\A(?:Error:|Last (?<tail>\d+) lines from (?:.*/(?<log_name>[^/]+)/[^/]+:\z)?)}
     STATUS = /\A(?:==>|✔︎|✘|🍺)/
     PROBLEM_LINES = 6
 
@@ -326,6 +365,10 @@ module Timed
         # Whether that log is printed whole, known from its first line.
         @whole_log = T.let(false, T::Boolean)
         @in_times = T.let(false, T::Boolean)
+        # When the first line of a formula brew names late arrived.
+        @unclaimed = T.let(nil, T.nilable(Float))
+        # Whether brew is done with the current formula once its problem ends.
+        @release = T.let(false, T::Boolean)
       end
 
       sig { params(raw: String, time: T.nilable(Float)).void }
@@ -339,13 +382,23 @@ module Timed
         end
 
         @in_times = line == INSTALL_TIMES
+        # A formula brew names only once it has started on it, or at its
+        # summary line, started with the first line after brew was last busy
+        # with a formula or a download.
+        @unclaimed ||= time if @current.nil? && line.present?
         if (match = HEADING.match(line) || DEPENDENCY_HEADING.match(line))
           @current = seen(match[:name].to_s, time)
+          @release = false
+        elsif (match = POURING.match(line))
+          @current = seen(match[:name].to_s, @unclaimed || time)
+          @release = false
         elsif (match = FETCH_FAILED.match(line))
           @current = seen(match[:name].to_s, time)
           build(@current)["version"] = match[:version] if match[:kind] == "Bottle"
+          # Brew won't install it, so it is done with it after its error.
+          @release = true
         elsif (match = SUMMARY.match(line))
-          name = seen(match[:name].to_s, time)
+          name = seen(match[:name].to_s, @unclaimed || time)
           @finished[name] = time if time
           built = match[:built]
           build(name).merge!("version"       => match[:version], "status" => built ? "built" : "poured",
@@ -353,10 +406,14 @@ module Timed
           # Brew is done with it: anything printed before it names another
           # formula is about the run.
           @current = nil if @current == name
-        elsif @current && (match = PROBLEM.match(line))
+          @unclaimed = nil
+        elsif (match = PROBLEM.match(line)) && (@current || match[:log_name])
+          @current = seen(match[:log_name].to_s, @unclaimed || time) if match[:log_name]
           @problem = [line]
           @tail = match[:tail]&.to_i
+          @release = true if @tail
         end
+        @unclaimed = nil if @current || line.start_with?("✔︎")
       end
 
       sig { params(started: T.nilable(Time)).returns(T::Hash[String, BuildLog::Build]) }
@@ -420,6 +477,8 @@ module Timed
         tail = @tail
         @problem = nil
         @tail = nil
+        @current = nil if @release
+        @release = false
         return if problem.nil? || current.nil?
 
         if tail
