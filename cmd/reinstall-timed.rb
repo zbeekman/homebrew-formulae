@@ -114,7 +114,8 @@ module Homebrew
         # One call, so nothing is skipped for a failure, but a failed build
         # ends `brew reinstall` before the formulae after it.
         Timed::Runner.run(result.batches, verb: "reinstall", flags: forwarded.formula, formulae:, deps: {},
-                                          stamp: !args.no_stamp_receipts?, stops_at_failure: true, succeeded:)
+                                          stamp: !args.no_stamp_receipts?, stops_at_failure: true, succeeded:,
+                                          arguments: Timed::Command.path_arguments(args.named, formulae))
       end
 
       # The full names of the formulae `formula` needs, as far as they can be

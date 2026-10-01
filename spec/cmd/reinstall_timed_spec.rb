@@ -55,13 +55,15 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
     nil
   end
 
-  # Brew: a call reinstalls each formula it is given, writing a new receipt
-  # and printing its summary line, except `failing` ones, where it stops.
+  # Brew: a call reinstalls each formula it is given, by name or file,
+  # writing a new receipt and printing its summary line, except `failing`
+  # ones, where it stops.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
     allow(Timed::Runner).to receive(:stream) do |argv, &block|
       brew_calls << argv
-      success = argv.drop(1).reject { |arg| arg.start_with?("-") }.all? do |name|
+      success = argv.drop(1).reject { |arg| arg.start_with?("-") }.all? do |arg|
+        name = File.basename(arg, ".rb")
         block.call("==> Reinstalling #{name} \n")
         next false if failing.include?(name)
 
@@ -269,6 +271,20 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
                   "gcc", "llvm", "cmake")
       flags = %w[--debug --force --verbose --build-from-source --keep-tmp --debug-symbols --git]
       expect(brew_calls).to eq([["reinstall", "--formula", "--yes", "--display-times", *flags, "cmake", "gcc"]])
+    end
+
+    it "names a formula given as a file to `brew reinstall` by that file, made absolute, and logs it by name",
+       :aggregate_failures do
+      dir = mktmpdir
+      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
+      keg = HOMEBREW_CELLAR/"foo/2.0"
+      keg.mkpath
+      FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
+      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
+      expect(brew_calls.last.last).to eq((dir/"foo.rb").realpath.to_s)
+      expect(builds.fetch("foo").last).to include("status" => "built", "verb" => "reinstall")
     end
 
     it "logs each reinstall and stamps its receipt", :aggregate_failures do

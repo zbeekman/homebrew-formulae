@@ -132,7 +132,8 @@ module Homebrew
         pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
         Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
                                           pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                          stamp: !args.no_stamp_receipts?)
+                                          stamp: !args.no_stamp_receipts?,
+                                          arguments: Timed::Command.path_arguments(args.named, formulae))
       end
 
       private

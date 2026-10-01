@@ -113,6 +113,16 @@ module Timed
       names.map { |name| (name.end_with?(".rb", ".json") && File.exist?(name)) ? File.expand_path(name) : name }
     end
 
+    # The argument for each of `formulae` (by full name) that `names` gave as
+    # a path, as `named_argv` makes it. Brew loads such a formula from that
+    # file only: by name, a sub-call would load another formula, or the one
+    # stored in its installed keg.
+    sig { params(names: T::Array[String], formulae: T::Hash[String, Formula]).returns(T::Hash[String, String]) }
+    def self.path_arguments(names, formulae)
+      paths = named_argv(names)
+      formulae.filter_map { |name, formula| [name, formula.path.to_s] if paths.include?(formula.path.to_s) }.to_h
+    end
+
     # Set in the command re-run after an update, so it never updates again.
     AUTO_UPDATED_ENV = "HOMEBREW_TIMED_AUTO_UPDATED"
 

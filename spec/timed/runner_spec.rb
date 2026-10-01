@@ -96,7 +96,7 @@ RSpec.describe Timed::Runner do
 
     def batch(*names, label: "main") = Timed::Planner::Batch.new(label:, reason: nil, names:)
 
-    # Brew as it upgrades each name it is given that isn't installed yet,
+    # Brew as it upgrades each name or file it is given that isn't installed yet,
     # taking 10 seconds for each: installs a keg with a receipt and prints its
     # summary line, except for `failing` names, and `silent` ones, which it
     # doesn't mention either, then the formulae `alongside` the names it was
@@ -108,7 +108,7 @@ RSpec.describe Timed::Runner do
       allow(described_class).to receive(:stream) do |argv, env: {}, &on_line|
         calls << argv
         envs << env
-        names = argv.drop(1).reject { |arg| arg.start_with?("-") }
+        names = argv.drop(1).reject { |arg| arg.start_with?("-") }.map { |arg| File.basename(arg, ".rb") }
         installed = []
         stopped = T.let(false, T::Boolean)
         (names + alongside.fetch(names, [])).each do |name|
@@ -159,6 +159,14 @@ RSpec.describe Timed::Runner do
       run([batch("lib", "tool"), batch("app", label: "last")])
       expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib tool],
                            %w[upgrade --formula --yes --display-times --verbose app]])
+    end
+
+    it "names a formula to brew by its argument in `arguments`, and logs it by its name", :aggregate_failures do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")], arguments: { "lib" => "/work/lib.rb" })
+      expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose /work/lib.rb]])
+      expect(builds.keys).to eq(%w[lib])
     end
 
     it "gives each run its own logs, even when two start in the same second" do

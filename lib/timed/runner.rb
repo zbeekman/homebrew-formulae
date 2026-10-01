@@ -18,7 +18,8 @@ module Timed
     DONE = %w[built poured].freeze
 
     # Runs each of `batches` of `formulae` (by full name) with
-    # `brew <verb> --formula --yes --display-times <flags> <names>`, keeping
+    # `brew <verb> --formula --yes --display-times <flags> <names>`, each name
+    # given as its argument in `arguments` if it has one, keeping
     # its output, without colours, in a log in `logs` named after the run's
     # start and process. With `pour_flags`, a batch is split into runs of
     # formulae in `pours` or not, in its order, and each run of `pours` gets
@@ -48,6 +49,7 @@ module Timed
         stamp:            T::Boolean,
         succeeded:        T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)),
         stops_at_failure: T::Boolean,
+        arguments:        T::Hash[String, String],
         database:         Pathname,
         logs:             Pathname,
         clock:            T.proc.returns(Float),
@@ -56,7 +58,7 @@ module Timed
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
                  succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
-                 database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
+                 arguments: {}, database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
                  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
       # Runs started in the same second are separate processes.
       prefix = "#{now.call.strftime("%Y%m%d-%H%M%S")}-#{Process.pid}"
@@ -124,7 +126,7 @@ module Timed
                 checks = kept.to_h { |name| [name, succeeded.call(formulae.fetch(name))] }
                 call_started = now.call
                 first_line = lines.length
-                results << stream([*argv, *kept], env:) do |line|
+                results << stream([*argv, *kept.map { |name| arguments.fetch(name, name) }], env:) do |line|
                   file.write(line.gsub(ANSI, ""))
                   lines << [line, clock.call - start]
                 end

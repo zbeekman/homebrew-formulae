@@ -44,7 +44,9 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 Once confirmed, it runs
 `brew reinstall --formula --yes --display-times` *`options`* *`formula`* ...
 once, from the home directory, with the formula options it was given and the
-formulae in its order, which `brew reinstall` keeps. With `--debug`, Homebrew's
+formulae in its order, which `brew reinstall` keeps. A formula given as a file
+is passed on as that file, made absolute, so Homebrew loads it from there and
+not by its name. With `--debug`, Homebrew's
 interactive debugger is turned off (`$HOMEBREW_DISABLE_DEBREW`), as its prompt
 couldn't be answered.
 
