@@ -3,6 +3,7 @@
 
 require "abstract_command"
 require "ask"
+require "cask/caskroom"
 require "cmd/upgrade"
 require "formula_installer"
 require "install"
@@ -11,6 +12,7 @@ require "trust"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
 require_relative "../lib/timed/planner"
+require_relative "../lib/timed/runner"
 
 module Homebrew
   module Cmd
@@ -24,7 +26,8 @@ module Homebrew
 
           Takes every `brew upgrade` option. Prints the plan from `brew upgrade --dry-run` and the
           batches with their estimates, then asks for confirmation once for the whole run, as
-          `brew upgrade` does. With `--dry-run`, stops after printing the plan.
+          `brew upgrade` does. With `--dry-run`, stops after printing the plan. Otherwise runs
+          `brew upgrade` once per batch and logs how long each formula took.
         EOS
         Timed::Command.define_flags(self)
       end
@@ -43,6 +46,8 @@ module Homebrew
         end
         raise UsageError, "`--minimum-version` requires exactly one formula or cask argument." if
           minimum_version.present? && args.named.length != 1
+        raise UsageError, "`--interactive` needs a terminal; use `brew upgrade --interactive` instead." if
+          args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
@@ -66,6 +71,7 @@ module Homebrew
           latest.latest_version_installed? ? formula : latest
         end
         needs = dependencies(roots)
+        deps = needs.transform_values { |dependencies| dependencies.map(&:full_name) }
         formulae = needs.values.flatten.concat(roots).to_h { |formula| [formula.full_name, formula] }
         set = needs.keys
         log = Timed::BuildLog.load(Timed::BuildLog.default_path)
@@ -76,7 +82,7 @@ module Homebrew
         result = Timed::Planner.plan(
           verb:      :upgrade,
           names:     set,
-          deps:      needs.transform_values { |dependencies| dependencies.map(&:full_name) },
+          deps:,
           estimates: estimates.transform_values(&:seconds),
           keg_only:  set.select { |name| formulae.fetch(name).keg_only? },
           last:,
@@ -85,10 +91,21 @@ module Homebrew
 
         # Brew's own plan, which also reports named formulae it won't upgrade.
         forwarded = Timed::Command.forward(args.options_only, conflicts: self.class.parser.conflicts)
-        preview = ["upgrade", "--dry-run", *forwarded.preview, *Timed::Command.named_argv(args.named)]
-        Homebrew.failed = true unless Timed::Command.brew({}, preview)
-        Timed::Command.show_plan("upgrade", result, estimates, excluded: set & exclude)
+        preview_argv = ["upgrade", "--dry-run", *forwarded.preview, *Timed::Command.named_argv(args.named)]
+        preview = T.let([], T::Array[String])
+        Homebrew.failed = true unless Timed::Runner.stream(preview_argv) { |line| preview << line }
+        excluded = set & exclude
+        Timed::Command.show_plan("upgrade", result, estimates, excluded:)
         planned = result.batches.flat_map(&:names)
+        # Without names, brew's preview lists every formula and cask it would
+        # upgrade, casks by token.
+        if args.named.empty?
+          listed = Timed::Runner.would_upgrade(preview)
+          left_out = ((listed - Cask::Caskroom.tokens) & candidates.map(&:full_name)) - planned - excluded
+          opoo "The batches leave out #{left_out.join(", ")}, which `brew upgrade` would upgrade." if left_out.any?
+          extra = planned - listed
+          opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
+        end
         return if args.dry_run? || planned.empty?
 
         # Once for the whole run, by brew's rules: with named formulae, only if
@@ -104,7 +121,17 @@ module Homebrew
         # Exits on "n"; returns false without a terminal, where brew carries on
         # unasked.
         Homebrew::Ask.confirm?(action: "upgrade") if ask
-        odie "Running the batches is not implemented yet."
+
+        # `brew upgrade` takes `--minimum-version` with one name only, which
+        # planning has already applied to.
+        flags = forwarded.formula.reject { |option| option.start_with?("--minimum-version=") }
+        # `brew upgrade` builds only the named formulae from source with
+        # `--build-from-source`, but gives `--debug-symbols` to every build in
+        # a call; formulae planned as pours go in a call without either.
+        pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
+        Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
+                                          pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
+                                          stamp: !args.no_stamp_receipts?)
       end
 
       private

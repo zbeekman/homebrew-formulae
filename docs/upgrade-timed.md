@@ -39,15 +39,70 @@ Formulae it won't upgrade (up to date, not installed, pinned, unknown or
 needing a newer version of a pinned dependency) are reported by
 `brew upgrade --dry-run`'s plan, and the command fails if that does. Relative
 paths to formula or cask files are passed on as absolute paths, as Homebrew
-runs from the home directory.
+runs from the home directory. With no *`installed_formula`* named, it warns
+about any formula that `brew upgrade --dry-run` lists but the batches leave
+out, or the other way round (formulae given to `--exclude` count as planned,
+and a name that is also an installed cask's token is taken for the cask).
+`--interactive` can't be used, as it needs a terminal: use
+`brew upgrade --interactive` instead.
 
-Running the batches is not implemented yet: without `--dry-run`, it stops
-after the confirmation. Casks are listed in `brew upgrade --dry-run`'s plan,
-but not in the batches.
+Casks are listed in `brew upgrade --dry-run`'s plan, but not upgraded: use
+`brew upgrade --cask` for those.
 
 `brew upgrade-timed` is a command in this tap. Trust it once with
 `brew trust --command zbeekman/tap/upgrade-timed`, or trust the whole tap. See
 [Tap Trust](https://docs.brew.sh/Tap-Trust).
+
+## Running
+
+Once confirmed, it runs
+`brew upgrade --formula --yes --display-times` *`options`* *`formula`* ...
+once per batch, from the home directory, with the formula options it was
+given other than `--minimum-version` (which the plan has already applied).
+With `--debug`, Homebrew's interactive debugger is turned off
+(`$HOMEBREW_DISABLE_DEBREW`), as its prompt couldn't be answered.
+
+`--build-from-source` only builds the named formulae from source, as with
+`brew upgrade`, but `--debug-symbols` would apply to every source build in a
+call. So when it is given, each batch is split, in its order (dependencies
+first), into runs of formulae the plan shows as a `pour` and runs of the named
+formulae and the others built from source. Each run is one call: a run of
+pours without either option, the rest with them. A batch without pours stays
+one call. A formula that needs one that failed in an earlier call of the batch
+is skipped, as in later batches. Calls for pours skip Homebrew's check for
+outdated dependents (`$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`), which would
+pour a named formula before its own call builds it;
+`brew upgrade --build-from-source` doesn't run that check for them either.
+
+Homebrew's output and errors are shown as they arrive, in colour if the output
+is a terminal (unless `$HOMEBREW_NO_COLOR` is set), and kept without colours in
+`$HOMEBREW_LOGS/timed/`*`time`*`-`*`pid`*`-batch`*`N`*`.log`, where *`time`* is
+when the run started, e.g. `20260930-143000`, and *`pid`* its process ID, so
+runs started in the same second keep their own logs. After each batch, it:
+
+- checks that the new version of each formula is installed; if it isn't, the
+  formula failed, and so does the command, as with `brew upgrade`;
+- logs each formula Homebrew worked on, including those it upgraded alongside
+  the batch (e.g. outdated dependents), in the log shown by
+  [`brew build-times`](build-times.md), with `upgrade`, the batch (`main`, or
+  `last` for `--last`) and the batch's log. A failed formula is logged with
+  the version it was to be upgraded to;
+- adds the times to the install receipt (`INSTALL_RECEIPT.json`) of each keg
+  Homebrew installed, under `build_times`, unless `--no-stamp-receipts` is
+  given;
+- skips the formulae in later batches that need one that failed or was
+  skipped, and logs them as `skipped`. The other formulae still run.
+
+It doesn't run `brew cleanup` itself: each `brew upgrade` cleans up the
+formulae it upgraded, and runs Homebrew's periodic cleanup, unless
+`$HOMEBREW_NO_INSTALL_CLEANUP` is set.
+
+Ctrl-C stops Homebrew too. The command waits for it to exit, then logs and
+stamps the formulae of the stopped batch that Homebrew finished (with build and
+wall times, but no install time), lists the rest of that batch and every later
+batch, none of which are logged, and exits with status 130, as Homebrew does.
+The batches that finished are logged. It exits with status 130 even if
+Homebrew finished the last batch anyway.
 
 ## Output
 
@@ -92,5 +147,12 @@ see `brew upgrade --help`. It handles `-n`, `--dry-run` and `-y`, `--yes`,
 : Comma-separated formulae to leave out of the batches. Homebrew may still
   upgrade them as dependencies of the others.
 
-These plan formulae only, so they can't be used with `--cask`, and each name
-must be a formula.
+`--guess`, `--estimator`, `--last` and `--exclude` plan formulae only, so they
+can't be used with `--cask`, and each name must be a formula.
+
+`--no-stamp-receipts`
+
+: Don't add the build times to the install receipts of the formulae it
+  installs; they are still logged. Enabled by default if
+  `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set, to any value. Receipts are then
+  left exactly as Homebrew wrote them.
