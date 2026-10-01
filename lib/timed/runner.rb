@@ -86,6 +86,9 @@ module Timed
 
           started = now.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
+          # With `dependencies_only`, the formulae whose dependencies brew
+          # finished, which aren't logged themselves.
+          finished = T.let([], T::Array[String])
           # Calls in a batch are separate processes, so brew doesn't know
           # what failed in an earlier one.
           failed_in_batch = T.let([], T::Array[String])
@@ -161,7 +164,7 @@ module Timed
               # what brew finished in the stopped batch is logged anyway.
               installed = done.fetch(name) { succeeded.call(formula).call(started) }
               if dependencies_only
-                failed << name unless installed
+                (installed ? finished : failed) << name
                 next
               end
 
@@ -204,8 +207,9 @@ module Timed
           end
           next unless stopped
 
-          not_finished = batch.names.reject { |name| entries.key?(Utils.name_from_full_name(name)) } +
-                         batches.drop(index).flat_map(&:names)
+          not_finished = batch.names.reject do |name|
+            finished.include?(name) || entries.key?(Utils.name_from_full_name(name))
+          end + batches.drop(index).flat_map(&:names)
           break
         end
       ensure

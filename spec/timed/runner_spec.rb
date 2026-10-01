@@ -495,6 +495,15 @@ RSpec.describe Timed::Runner do
         expect(builds.keys).to eq(%w[zlib])
       end
 
+      it "leaves out a formula whose dependencies brew finished in the stopped batch, with `dependencies_only`" do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew(silent: %w[lib app], alongside: { %w[lib app] => %w[zlib] }) { interrupt }
+        succeeded = ->(formula) { ->(_since) { formula.name == "lib" } }
+        expect { run([batch("lib", "app"), batch("tool")], verb: "install", succeeded:, dependencies_only: true) }
+          .to raise_error(Interrupt)
+          .and output("Warning: Interrupted; not finished or logged: the dependencies of app tool\n").to_stderr
+      end
+
       it "logs and stamps the formulae of the stopped batch that brew finished", :aggregate_failures do
         %w[lib app tool].each { |name| stub_formula(name) }
         fake_brew(failing: %w[app]) { interrupt }
