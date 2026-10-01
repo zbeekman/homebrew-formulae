@@ -1,0 +1,42 @@
+==> Fetching downloads for: pour, build, tapped and broken
+✔︎ Bottle Manifest pour (1.2.3)
+✔︎ Bottle pour (1.2.3)
+✔︎ Formula build (4.5)
+✔︎ Formula tapped (0.9)
+✔︎ Formula broken (2.0)
+==> Pouring pour--1.2.3.sonoma.bottle.tar.gz
+🍺  /usr/local/Cellar/pour/1.2.3: 12 files, 345.6KB
+==> ./configure --disable-silent-rules
+==> make install
+🍺  /usr/local/Cellar/build/4.5: 30 files, 1.2MB, built in 2 minutes 5 seconds
+==> Installing tapped from user/tap
+==> cmake -S . -B build
+==> cmake --build build
+==> cmake --install build
+🍺  /usr/local/Cellar/tapped/0.9: 8 files, 96KB, built in 45 seconds
+==> ./configure
+Last 15 lines from /Users/user/Library/Logs/Homebrew/broken/01.configure.log:
+checking for a BSD-compatible install... /usr/bin/install -c
+checking whether build environment is sane... yes
+checking for a race-free mkdir -p... ./install-sh -c -d
+checking for gawk... no
+checking for mawk... no
+checking for nawk... no
+checking for awk... awk
+checking whether make sets $(MAKE)... yes
+checking whether make supports nested variables... yes
+checking for gcc... no
+checking for cc... no
+checking for cl.exe... no
+checking for clang... no
+configure: error: in '/private/tmp/broken-20261001-1234-abcdef/broken-2.0':
+configure: error: no acceptable C compiler found in $PATH
+
+
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+==> Installation times
+pour                        1.402 s
+build                     127.311 s
+tapped                     46.802 s

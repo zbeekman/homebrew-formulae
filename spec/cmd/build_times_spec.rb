@@ -101,7 +101,7 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       expect(help).to start_with("Usage: brew build-times [subcommand] ")
       expect(help)
         .to include("Show and annotate the log of how long formulae took to build from source or to pour a bottle. " \
-                    "brew upgrade-timed uses it to order its batches.")
+                    "brew upgrade-timed and brew reinstall-timed use it to order the formulae they run.")
     end
 
     it "lists `stats` first" do

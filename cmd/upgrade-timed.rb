@@ -53,9 +53,10 @@ module Homebrew
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
 
         named = named_formulae
-        guesses = Timed::Command.guesses(args.guess || [], resolve: ->(name) { resolve("--guess", name) })
-        last = (args.last || []).map { |name| resolve("--last", name) }
-        exclude = (args.exclude || []).map { |name| resolve("--exclude", name) }
+        guesses = Timed::Command.guesses(args.guess || [],
+                                         resolve: ->(name) { Timed::Command.resolve("--guess", name) })
+        last = (args.last || []).map { |name| Timed::Command.resolve("--last", name) }
+        exclude = (args.exclude || []).map { |name| Timed::Command.resolve("--exclude", name) }
 
         candidates = if args.cask?
           []
@@ -131,7 +132,8 @@ module Homebrew
         pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
         Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
                                           pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                          stamp: !args.no_stamp_receipts?)
+                                          stamp: !args.no_stamp_receipts?,
+                                          arguments: Timed::Command.path_arguments(args.named, formulae))
       end
 
       private
@@ -147,14 +149,6 @@ module Homebrew
 
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
         args.named.to_formulae_and_casks_and_unavailable(method: :resolve).grep(Formula)
-      end
-
-      # The full name of the formula `name` given to `flag`.
-      sig { params(flag: String, name: String).returns(String) }
-      def resolve(flag, name)
-        Formulary.factory(name).full_name
-      rescue FormulaUnavailableError => e
-        raise UsageError, "`#{flag}`: #{e}"
       end
 
       # What brew would install or upgrade before each formula it upgrades,

@@ -1,0 +1,2 @@
+# Batch logs keep brew's output as it printed it, trailing spaces included.
+spec/fixtures/batch-logs/*.log whitespace=-trailing-space

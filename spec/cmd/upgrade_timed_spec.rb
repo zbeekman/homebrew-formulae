@@ -63,7 +63,8 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
   def run_command(*argv) = described_class.new(argv).run
 
   # Brew: `brew upgrade --dry-run` prints `preview`; a batch installs each
-  # formula at 2.0, with a receipt, and prints its summary line.
+  # formula, by name or file, at 2.0, with a receipt, and prints its summary
+  # line.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
     allow(Formula).to receive(:installed) { installed }
@@ -73,8 +74,8 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       if argv.include?("--dry-run")
         preview.each { |line| block.call("#{line}\n") }
       else
-        argv.drop(1).reject { |arg| arg.start_with?("-") }.each do |name|
-          keg = HOMEBREW_CELLAR/name/"2.0"
+        argv.drop(1).reject { |arg| arg.start_with?("-") }.each do |arg|
+          keg = HOMEBREW_CELLAR/File.basename(arg, ".rb")/"2.0"
           keg.mkpath
           FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
           block.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
@@ -465,6 +466,20 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       run_command("--yes", "--verbose", "--minimum-version=1.5", "--greedy", "cmake")
       expect(brew_calls).to eq([%w[upgrade --dry-run --verbose --minimum-version=1.5 --greedy cmake],
                                 %w[upgrade --formula --yes --display-times --verbose cmake]])
+    end
+
+    it "names a formula given as a file to `brew upgrade` by that file, made absolute, and logs it by name",
+       :aggregate_failures do
+      dir = mktmpdir
+      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
+      keg = HOMEBREW_CELLAR/"foo/1.0"
+      (keg/"bin").mkpath
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
+      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
+      expect(brew_calls.last).to eq(["upgrade", "--formula", "--yes", "--display-times",
+                                     (dir/"foo.rb").realpath.to_s])
+      expect(builds.fetch("foo").last).to include("version" => "2.0", "status" => "built", "verb" => "upgrade")
     end
 
     it "logs each upgrade and stamps its receipt", :aggregate_failures do

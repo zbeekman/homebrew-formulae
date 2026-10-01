@@ -1,0 +1,33 @@
+==> Fetching downloads for: lib, app and tool
+✔︎ Bottle Manifest lib (1.0)
+✔︎ Bottle lib (1.0)
+✔︎ Formula app (2.0)
+✔︎ Formula tool (3.0)
+==> Reinstalling lib 
+==> Pouring lib--1.0.sonoma.bottle.tar.gz
+🍺  /usr/local/Cellar/lib/1.0: 10 files, 120KB
+==> Reinstalling app 
+==> ./configure --disable-dependency-tracking
+==> make install
+Last 15 lines from /Users/user/Library/Logs/Homebrew/app/02.make.log:
+cc -c alloc.c
+cc -c buffer.c
+cc -c config.c
+cc -c error.c
+cc -c hash.c
+cc -c list.c
+cc -c parse.c
+cc -c print.c
+cc -c string.c
+cc -c app.c
+app.c:1:10: fatal error: 'missing.h' file not found
+    1 | #include <missing.h>
+      |          ^~~~~~~~~~~
+1 error generated.
+make: *** [app.o] Error 1
+
+
+This build failure was expected, as this is not a Tier 1 configuration:
+  https://docs.brew.sh/Support-Tiers
+Do not report any issues to Homebrew/* repositories!
+Read the above document instead before opening any issues or PRs.
