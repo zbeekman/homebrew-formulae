@@ -30,8 +30,8 @@ module Timed
       block
     end
 
-    # The flags every `-timed` command adds to the wrapped command's. They
-    # plan formulae only, so each conflicts with `--cask`.
+    # The flags every `-timed` command adds to the wrapped command's. Those
+    # that plan formulae conflict with `--cask`.
     sig { params(parser: Homebrew::CLI::Parser).void }
     def self.define_flags(parser)
       parser.comma_array "--guess",
@@ -46,10 +46,15 @@ module Timed
       parser.comma_array "--exclude",
                          description: "Comma-separated formulae to leave out of the batches. Homebrew may still " \
                                       "upgrade them as dependencies of the others."
-      OWN_FLAGS.each { |name| parser.conflicts "--cask", "--#{name}" }
+      parser.switch "--no-stamp-receipts",
+                    description: "Don't add the build times to the install receipts of the formulae it installs; " \
+                                 "they are still logged.",
+                    env:         :timed_no_stamp_receipts
+      PLAN_FLAGS.each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
-    OWN_FLAGS = %w[guess estimator last exclude].freeze
+    PLAN_FLAGS = %w[guess estimator last exclude].freeze
+    OWN_FLAGS = T.let([*PLAN_FLAGS, "no_stamp_receipts"].freeze, T::Array[String])
 
     # Handled by the `-timed` command itself, once for the whole run.
     ASK_FLAGS = %w[ask no_ask dry_run].freeze

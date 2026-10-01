@@ -23,6 +23,9 @@ module Homebrew
 
         sig { returns(T.nilable(T::Array[String])) }
         def last; end
+
+        sig { returns(T::Boolean) }
+        def no_stamp_receipts?; end
       end
     end
   end

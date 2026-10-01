@@ -12,7 +12,8 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
   long formulae took to build from source or pour, and restore those times in
   install receipts.
 - [`brew upgrade-timed`](docs/upgrade-timed.md): upgrade outdated formulae in
-  batches ordered by estimated build time, quickest first.
+  batches ordered by estimated build time, quickest first, and log how long
+  each took.
 
 ## Documentation
 `brew help`, `man brew` or check [Homebrew's documentation](https://docs.brew.sh).

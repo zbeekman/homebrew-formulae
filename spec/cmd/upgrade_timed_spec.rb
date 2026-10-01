@@ -11,8 +11,11 @@ require_relative "../../cmd/upgrade-timed"
 
 RSpec.describe Homebrew::Cmd::UpgradeTimed do
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
+  let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
   let(:installed) { [] }
+  # What `brew upgrade --dry-run` prints.
+  let(:preview) { [] }
 
   # A formula at version `latest`, with `installed_version` in the Cellar and
   # linked into `opt` (neither when nil), loadable by name. A bottled one's
@@ -59,12 +62,24 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
   def run_command(*argv) = described_class.new(argv).run
 
+  # Brew: `brew upgrade --dry-run` prints `preview`; a batch installs each
+  # formula at 2.0, with a receipt, and prints its summary line.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
     allow(Formula).to receive(:installed) { installed }
     allow(Timed::Command).to receive(:auto_update)
-    allow(Timed::Command).to receive(:brew) do |env, argv|
-      brew_calls << [env, argv]
+    allow(Timed::Runner).to receive(:stream) do |argv, &block|
+      brew_calls << argv
+      if argv.include?("--dry-run")
+        preview.each { |line| block.call("#{line}\n") }
+      else
+        argv.drop(1).reject { |arg| arg.start_with?("-") }.each do |name|
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          block.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+        end
+      end
       true
     end
     database.dirname.mkpath
@@ -85,11 +100,18 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(Timed::Command.builtin("upgrade").parser.conflicts - described_class.parser.conflicts).to eq([])
     end
 
-    it "adds its own flags, none of them with `--cask`", :aggregate_failures do
-      args = described_class.new(%w[--guess=llvm=1h30m,lld=20m --estimator=median --last=llvm --exclude=gcc,go]).args
-      expect([args.guess, args.estimator, args.last, args.exclude])
-        .to eq([%w[llvm=1h30m lld=20m], "median", %w[llvm], %w[gcc go]])
+    it "adds its own flags, none of them but `--no-stamp-receipts` with `--cask`", :aggregate_failures do
+      argv = %w[--guess=llvm=1h30m,lld=20m --estimator=median --last=llvm --exclude=gcc,go --no-stamp-receipts]
+      args = described_class.new(argv).args
+      expect([args.guess, args.estimator, args.last, args.exclude, args.no_stamp_receipts?])
+        .to eq([%w[llvm=1h30m lld=20m], "median", %w[llvm], %w[gcc go], true])
       expect { described_class.new(%w[--cask --last=llvm]) }.to raise_error(Homebrew::CLI::OptionConflictError)
+      expect(described_class.new(%w[--cask --no-stamp-receipts]).args.no_stamp_receipts?).to be(true)
+    end
+
+    it "takes `--no-stamp-receipts` from `HOMEBREW_TIMED_NO_STAMP_RECEIPTS` set to anything" do
+      ENV["HOMEBREW_TIMED_NO_STAMP_RECEIPTS"] = "0"
+      expect(described_class.new([]).args.no_stamp_receipts?).to be(true)
     end
 
     it "keeps `--` as the end of options" do
@@ -128,9 +150,11 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
   describe "help" do
     let(:help) { described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ") }
 
-    it "shows the usage and its own description", :aggregate_failures do
+    it "shows the usage, its own description and the variable that turns on `--no-stamp-receipts`",
+       :aggregate_failures do
       expect(help).to start_with("Usage: brew upgrade-timed [options] [installed_formula|installed_cask ...] ")
       expect(help).to include("Upgrade outdated, unpinned formulae like brew upgrade, in timed batches:")
+      expect(help).to include("Enabled by default if $HOMEBREW_TIMED_NO_STAMP_RECEIPTS is set.")
     end
   end
 
@@ -143,14 +167,14 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
     it "prints `brew upgrade --dry-run` with the forwarded flags and named arguments" do
       stub_formula("cmake")
       run_command("--dry-run", "--verbose", "--last=cmake", "cmake")
-      expect(brew_calls).to eq([[{}, %w[upgrade --dry-run --verbose cmake]]])
+      expect(brew_calls).to eq([%w[upgrade --dry-run --verbose cmake]])
     end
 
     it "passes the named arguments to the preview as the sub-calls need them" do
       stub_formula("cmake")
       allow(Timed::Command).to receive(:named_argv).with(%w[cmake]).and_return(%w[/work/cmake])
       run_command("--dry-run", "cmake")
-      expect(brew_calls).to eq([[{}, %w[upgrade --dry-run /work/cmake]]])
+      expect(brew_calls).to eq([%w[upgrade --dry-run /work/cmake]])
     end
 
     it "plans every outdated, unpinned formula, dependencies first, then the quickest" do
@@ -260,7 +284,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
     end
 
     it "fails when brew's preview fails" do
-      allow(Timed::Command).to receive(:brew).and_return(false)
+      allow(Timed::Runner).to receive(:stream).and_return(false)
       run_command("--dry-run")
       expect(Homebrew).to be_failed
     end
@@ -354,8 +378,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("app", deps: %w[lib])
       stub_formula("other")
       expect(Homebrew::Ask).not_to receive(:confirm?)
-      expect { run_command("app", "other") }
-        .to raise_error(SystemExit).and output(/Running the batches is not implemented yet/).to_stderr
+      run_command("app", "other")
     end
 
     it "checks the dependents of a refused named formula too, as `brew upgrade` does, and asks" do
@@ -429,8 +452,130 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
     it "carries on without a terminal, where brew doesn't ask" do
       allow(Homebrew::Ask).to receive(:confirm?).and_return(false)
       stub_formula("cmake")
-      expect { run_command }.to raise_error(SystemExit)
-        .and output(/Running the batches is not implemented yet/).to_stderr
+      run_command
+      expect(brew_calls.last).to eq(%w[upgrade --formula --yes --display-times cmake])
+    end
+  end
+
+  describe "running the batches" do
+    def builds = JSON.parse(database.read)["packages"].transform_values { |package| package["builds"] }
+
+    it "runs each batch with the forwarded formula flags, but not `--minimum-version`, after the preview" do
+      stub_formula("cmake")
+      run_command("--yes", "--verbose", "--minimum-version=1.5", "--greedy", "cmake")
+      expect(brew_calls).to eq([%w[upgrade --dry-run --verbose --minimum-version=1.5 --greedy cmake],
+                                %w[upgrade --formula --yes --display-times --verbose cmake]])
+    end
+
+    it "logs each upgrade and stamps its receipt", :aggregate_failures do
+      stub_formula("cmake")
+      run_command("--yes")
+      expect(builds.fetch("cmake").last).to include("version" => "2.0", "status" => "built", "verb" => "upgrade")
+      expect(JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)["build_times"])
+        .to include("verb" => "upgrade", "build_seconds" => 9.0)
+    end
+
+    it "leaves receipts as they are with `--no-stamp-receipts` or `HOMEBREW_TIMED_NO_STAMP_RECEIPTS`, " \
+       "but still logs the upgrades" do
+      stub_formula("cmake")
+      ways = %w[--no-stamp-receipts HOMEBREW_TIMED_NO_STAMP_RECEIPTS]
+      results = ways.to_h do |way|
+        database.write(JSON.generate("schema_version" => 1, "packages" => {}))
+        ENV["HOMEBREW_TIMED_NO_STAMP_RECEIPTS"] = "1" if way.start_with?("HOMEBREW_")
+        run_command("--yes", *("--no-stamp-receipts" if way.start_with?("--")))
+        keg = HOMEBREW_CELLAR/"cmake/2.0"
+        result = [(keg/"INSTALL_RECEIPT.json").read == receipt.read,
+                  builds.fetch("cmake").map { |build| build["verb"] }]
+        keg.rmtree
+        [way, result]
+      end
+      expect(results).to eq(ways.to_h { |way| [way, [true, ["upgrade"]]] })
+    end
+
+    it "upgrades a batch's poured dependencies without `--build-from-source` or `--debug-symbols`, first" do
+      stub_formula("lib", bottled: true)
+      stub_formula("app", deps: %w[lib])
+      run_command("--yes", "--build-from-source", "--debug-symbols", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib],
+                                        %w[upgrade --formula --yes --display-times --build-from-source
+                                           --debug-symbols app]])
+    end
+
+    it "keeps a named source build ahead of a pour that needs it, so brew doesn't pour it as a dependency" do
+      stub_formula("lib", bottled: true)
+      stub_formula("dep", bottled: true, deps: %w[lib])
+      stub_formula("app", deps: %w[dep])
+      run_command("--yes", "--build-from-source", "lib", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times --build-from-source lib],
+                                        %w[upgrade --formula --yes --display-times dep],
+                                        %w[upgrade --formula --yes --display-times --build-from-source app]])
+    end
+
+    it "upgrades a batch of source builds with `--build-from-source` in one call" do
+      stub_formula("app")
+      stub_formula("other")
+      run_command("--yes", "--build-from-source", "app", "other")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times --build-from-source app other]])
+    end
+
+    it "upgrades pours and source builds together without `--build-from-source`" do
+      stub_formula("lib", bottled: true)
+      stub_formula("app", deps: %w[lib])
+      run_command("--yes", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib app]])
+    end
+
+    it "passes `--debug` on" do
+      stub_formula("cmake")
+      run_command("--yes", "--debug", "cmake")
+      expect(brew_calls.last).to eq(%w[upgrade --formula --yes --display-times --debug cmake])
+    end
+
+    it "refuses `--interactive`, which needs a terminal" do
+      expect { run_command("--dry-run", "--interactive", "cmake") }
+        .to raise_error(UsageError, "Invalid usage: `--interactive` needs a terminal; " \
+                                    "use `brew upgrade --interactive` instead.")
+    end
+
+    it "doesn't run anything with nothing to upgrade" do
+      stub_formula("cmake", "2.0")
+      run_command("--yes")
+      expect(brew_calls).to eq([%w[upgrade --dry-run]])
+    end
+  end
+
+  describe "checking the plan against brew's" do
+    it "warns about formulae brew's preview lists but the batches don't, and the other way round" do
+      stub_formula("cmake")
+      stub_formula("gcc", "2.0")
+      preview.push("==> Would upgrade 2 outdated packages", "gcc      1.0 -> 2.0", "firefox  1 -> 2")
+      expect { run_command("--dry-run") }.to output(<<~EOS).to_stderr
+        Warning: The batches leave out gcc, which `brew upgrade` would upgrade.
+        Warning: The batches include cmake, which `brew upgrade` wouldn't upgrade.
+      EOS
+    end
+
+    it "counts `--exclude`d formulae as planned and ignores casks" do
+      stub_formula("cmake")
+      stub_formula("gcc")
+      preview.push("==> Would upgrade 3 outdated packages", "cmake    1.0 -> 2.0", "gcc      1.0 -> 2.0",
+                   "firefox  1 -> 2")
+      expect { run_command("--dry-run", "--exclude=gcc") }.not_to output.to_stderr
+    end
+
+    it "doesn't take an installed cask for a formula of the same name, or the other way round" do
+      stub_formula("gcc", "2.0")
+      stub_formula("cmake")
+      (HOMEBREW_PREFIX/"Caskroom").mkpath
+      %w[gcc cmake].each { |token| (HOMEBREW_PREFIX/"Caskroom"/token).mkpath }
+      preview.push("==> Would upgrade 2 outdated packages", "gcc    1 -> 2", "cmake  1.0 -> 2.0")
+      expect { run_command("--dry-run") }.not_to output.to_stderr
+    end
+
+    it "only checks without named arguments, where brew's preview lists everything it would upgrade" do
+      stub_formula("cmake")
+      preview.push("==> Would upgrade 1 requested outdated package", "cmake    1.0 -> 2.0")
+      expect { run_command("--dry-run", "cmake") }.not_to output.to_stderr
     end
   end
 end
