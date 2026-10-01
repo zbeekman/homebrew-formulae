@@ -537,6 +537,17 @@ RSpec.describe "brew internals", type: :system do
       .to eq("llvm" => 2811.4, "a-formula-with-a-long-name" => 123456.789)
   end
 
+  describe "`Dependency.expand`" do
+    it "names each dependency it keeps by its formula's full name, and prunes by `action` only without a block" do
+      expand = brew_source("dependency.rb")[/^    def expand\(.*?^    end$/m]
+      action = brew_source("dependency.rb")[/^    def action\(.*?^    end$/m]
+      expect([expand.include?("dep = dep.dup_with_formula_name(dep_formula)"),
+              brew_source("dependency.rb").include?("self.class.new(formula.full_name.to_s, tags)"),
+              action.include?("Dependable::PRUNE unless T.cast(dependent, Formula).build.with?(dep)")])
+        .to eq([true, true, true])
+    end
+  end
+
   describe "`brew reinstall`" do
     it "has no `--dry-run`, so `brew reinstall-timed` adds its own and prints brew's plan in-process" do
       options = Timed::Command.builtin("reinstall").parser.processed_options.flat_map { |short, long| [short, long] }

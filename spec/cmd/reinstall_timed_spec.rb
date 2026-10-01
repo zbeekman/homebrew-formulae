@@ -16,10 +16,11 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
   # Names brew fails to reinstall, leaving their kegs as they were.
   let(:failing) { [] }
 
-  # A formula at version 2.0, installed at 2.0 (unless not `installed`) and
-  # linked into `opt`, with a receipt from long ago, loadable by name.
-  def stub_formula(name, installed: true, deps: [], bottled: false)
-    formula = formula(name) do
+  # A formula at version 2.0, in `tap` if given, installed at 2.0 (unless not
+  # `installed`) and linked into `opt`, with a receipt from long ago, loadable
+  # by name and full name.
+  def stub_formula(name, installed: true, deps: [], bottled: false, tap: nil)
+    formula = formula(name, tap:) do
       T.bind(self, T.class_of(Formula))
       url "https://brew.sh/#{name}-2.0.tgz"
       deps.each { |dep| depends_on dep }
@@ -33,6 +34,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
     # Brew loads an installed formula by its receipt's tap too.
     stub_formula_loader(formula)
     stub_formula_loader(formula, "homebrew/core/#{name}")
+    stub_formula_loader(formula, name) if tap
     if installed
       keg = HOMEBREW_CELLAR/name/"2.0"
       keg.mkpath
@@ -189,6 +191,26 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         run_command("--dry-run", *flags, "lib")
       end
       expect(pours).to eq([] => true, %w[--build-from-source] => false)
+    end
+
+    it "orders a tap formula after a named dependency it declares by its bare name" do
+      tap = Tap.fetch("user", "tap")
+      stub_formula("lib", tap:)
+      stub_formula("app", deps: %w[lib], tap:)
+      expect { run_command("--dry-run", "user/tap/app", "user/tap/lib") }
+        .to output(%r{^user/tap/lib +build .*^user/tap/app +build }m).to_stdout
+    end
+
+    it "orders a formula after the named dependencies that load, even if another doesn't" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[gone lib])
+      expect { run_command("--dry-run", "app", "lib") }.to output(/^lib +build .*^app +build /m).to_stdout
+    end
+
+    it "doesn't order a formula after an optional dependency it wasn't built with, as brew leaves it out" do
+      stub_formula("lib")
+      stub_formula("app", deps: [{ "lib" => :optional }])
+      expect { run_command("--dry-run", "app", "lib") }.to output(/^app +build .*^lib +build /m).to_stdout
     end
 
     it "still plans a formula with a dependency that can't be loaded, for brew to report" do

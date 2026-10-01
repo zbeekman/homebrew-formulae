@@ -118,13 +118,19 @@ module Homebrew
                                           arguments: Timed::Command.path_arguments(args.named, formulae))
       end
 
-      # The full names of the formulae `formula` needs, as far as they can be
-      # loaded, to reinstall those first.
+      # The full names of the formulae `formula` needs, to reinstall those
+      # first: brew's expansion, which names each by its formula's full name
+      # and leaves out optional and recommended dependencies the formula
+      # wasn't built with, also leaving out those that can't be loaded (and
+      # what only they need).
       sig { params(formula: Formula).returns(T::Array[String]) }
       def dependency_names(formula)
-        formula.recursive_dependencies.map(&:name)
-      rescue FormulaUnavailableError
-        []
+        formula.recursive_dependencies do |dependent, dependency|
+          dependency.to_formula
+          Dependency.action(dependent, dependency)
+        rescue FormulaUnavailableError
+          Dependable::PRUNE
+        end.map(&:name)
       end
 
       # The installer `brew reinstall` would use, with the options it would use.
