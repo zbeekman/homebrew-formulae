@@ -389,7 +389,7 @@ RSpec.describe Timed::Runner do
       it "doesn't log a formula brew was upgrading alongside the stopped batch" do
         stub_formula("lib")
         fake_brew(failing: %w[dependent], alongside: { %w[lib] => %w[dependent] }) { interrupt }
-        expect { run([batch("lib")]) }.to raise_error(Interrupt).and output(/Interrupted/).to_stderr
+        expect { run([batch("lib")]) }.to raise_error(Interrupt).and not_to_output.to_stderr
         expect(builds.keys).to eq(%w[lib])
       end
 
@@ -407,6 +407,14 @@ RSpec.describe Timed::Runner do
         expect { run([batch("lib"), batch("app")]) }
           .to raise_error(Interrupt).and output(/not finished or logged: app$/).to_stderr
         expect([calls.length, builds.keys]).to eq([1, %w[lib]])
+      end
+
+      it "still raises `Interrupt` when brew finished the last batch anyway, with nothing to list",
+         :aggregate_failures do
+        stub_formula("lib")
+        fake_brew { interrupt }
+        expect { run([batch("lib")]) }.to raise_error(Interrupt).and not_to_output.to_stderr
+        expect(builds.keys).to eq(%w[lib])
       end
 
       it "restores the interrupt handler" do

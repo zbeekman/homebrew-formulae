@@ -100,7 +100,8 @@ Ctrl-C stops Homebrew too. The command waits for it to exit, then logs and
 stamps the formulae of the stopped batch that Homebrew finished (with build and
 wall times, but no install time), lists the rest of that batch and every later
 batch, none of which are logged, and exits with status 130, as Homebrew does.
-The batches that finished are logged.
+The batches that finished are logged. It exits with status 130 even if
+Homebrew finished the last batch anyway.
 
 ## Output
 

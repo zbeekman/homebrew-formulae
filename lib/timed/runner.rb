@@ -30,7 +30,7 @@ module Timed
     # needs one that failed or was skipped is skipped and logged as such.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
-    # raised.
+    # raised, even if brew finished that batch.
     sig {
       params(
         batches:    T::Array[Planner::Batch],
@@ -171,12 +171,12 @@ module Timed
         Signal.trap(:INT, old_trap)
       end
       if not_finished
-        opoo "Interrupted; not finished or logged: #{not_finished.join(" ")}"
-        raise Interrupt
+        opoo "Interrupted; not finished or logged: #{not_finished.join(" ")}" if not_finished.any?
+      elsif failed.any?
+        ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: #{failed.join(" ")}"
       end
-      return if failed.empty?
-
-      ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: #{failed.join(" ")}"
+      # Even if brew finished anyway, so that whatever runs this stops too.
+      raise Interrupt if interrupts.any?
     end
 
     # `candidates` split into those `deps` says need one of `blocked`, which
