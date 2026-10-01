@@ -722,6 +722,24 @@ RSpec.describe Timed::Runner do
       )
     end
 
+    it "reads a verbose `brew install`'s failed build of a formula with no heading of its own" do
+      logs = %w[00.options.out 01.configure.log 01.configure.cc].map do |log|
+        "     /Users/user/Library/Logs/Homebrew/broken/#{log}"
+      end
+      expect(described_class.parse(fixture_lines("install-verbose-headingless.log"))).to eq(
+        "pour"   => poured("1.2.3", 1.402),
+        "broken" => { "status"   => "failed",
+                      "problems" => [["Error: broken 2.0 did not build", "Logs:", *logs].join("\n")] },
+      )
+    end
+
+    it "times a verbose failed build with no heading from the first line after the formula before" do
+      lines = [["🍺  /prefix/Cellar/pour/1.0: 4KB\n", 1.0], ["==> make\n", 2.0],
+               ["Error: user/tap/broken 2.0 did not build\n", 30.0]]
+      expect(described_class.parse(lines, started: Time.new(2026, 10, 1, 10, 0, 0, "-04:00"))["broken"])
+        .to include("started" => "2026-10-01T10:00:02-04:00")
+    end
+
     it "blames a pour brew gives no heading for the error it hits" do
       lines = ["==> Pouring foo--1.0.sonoma.bottle.tar.gz", "Error: foo: Failed to extract the bottle"]
       expect(described_class.parse(lines.map { |line| ["#{line}\n", nil] }))

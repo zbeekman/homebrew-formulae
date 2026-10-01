@@ -55,11 +55,12 @@ the run started, e.g. `20260930-143000`, and *`pid`* its process ID, so runs
 started in the same second keep their own logs. Then it:
 
 - checks that Homebrew reinstalled each formula: a failed reinstall puts the
-  old keg back, at the same version, so a formula counts as reinstalled only if
-  the install receipt (`INSTALL_RECEIPT.json`) of its keg in `opt` records an
-  install time other than the one it had before, and no earlier than the second
-  `brew reinstall` started. If it doesn't, the formula failed, and so does the
-  command, as with `brew reinstall`;
+  old keg back, at the same version, with its install receipt
+  (`INSTALL_RECEIPT.json`) unchanged, so a formula counts as reinstalled only if
+  the receipt of its keg in `opt` is a new file, not the one it had before, and
+  records an install time no earlier than the second `brew reinstall` started.
+  If it doesn't, the formula failed, and so does the command, as with
+  `brew reinstall`;
 - logs each formula Homebrew worked on, including the outdated dependents it
   upgraded alongside, in the log shown by [`brew build-times`](build-times.md),
   with `reinstall` and the log of the run;

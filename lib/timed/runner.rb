@@ -317,8 +317,13 @@ module Timed
     # lines, blank ones and errors included but trailing blank ones dropped,
     # stopping early at brew's next status line. The log is in a directory
     # named after the formula (`Formula#logs`), which names the formula when
-    # nothing else has, and brew is done with the formula after it.
-    PROBLEM = %r{\A(?:Error:|Last (?<tail>\d+) lines from (?:.*/(?<log_name>[^/]+)/[^/]+:\z)?)}
+    # nothing else has, and brew is done with the formula after it. A verbose
+    # build prints its output as it goes instead, and its failure ends with
+    # an error naming the formula (`BuildError#dump`), which does the same.
+    PROBLEM = %r{
+      \A(?:Error:(?:\s(?<failed>\S+)\s\S+\sdid\snot\sbuild\z)?
+      |Last\s(?<tail>\d+)\slines\sfrom\s(?:.*/(?<log_name>[^/]+)/[^/]+:\z)?)
+    }x
     STATUS = /\A(?:==>|✔︎|✘|🍺)/
     PROBLEM_LINES = 6
 
@@ -407,11 +412,11 @@ module Timed
           # formula is about the run.
           @current = nil if @current == name
           @unclaimed = nil
-        elsif (match = PROBLEM.match(line)) && (@current || match[:log_name])
-          @current = seen(match[:log_name].to_s, @unclaimed || time) if match[:log_name]
+        elsif (match = PROBLEM.match(line)) && (named = match[:log_name] || match[:failed] || @current)
+          @current = seen(named, @unclaimed || time)
           @problem = [line]
           @tail = match[:tail]&.to_i
-          @release = true if @tail
+          @release = true if @tail || match[:failed]
         end
         @unclaimed = nil if @current || line.start_with?("✔︎")
       end

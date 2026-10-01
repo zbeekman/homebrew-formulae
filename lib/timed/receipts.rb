@@ -28,25 +28,32 @@ module Timed
       receipt.atomic_write(JSON.pretty_generate(data))
     end
 
-    # The install time brew wrote into the receipt of `formula`'s keg in
-    # `opt`, as whole seconds; nil without one. That is the keg `brew
+    # The receipt of `formula`'s keg in `opt`. That is the keg `brew
     # reinstall` reinstalls (it takes the linked keg, else the one in `opt`)
     # and the one it puts in `opt`, even with a newer HEAD keg installed.
-    sig { params(formula: Formula).returns(T.nilable(Integer)) }
-    def self.install_time(formula)
-      receipt = formula.opt_prefix/AbstractTab::FILENAME
-      JSON.parse(receipt.read)["time"]&.to_i if receipt.file?
+    sig { params(formula: Formula).returns(Pathname) }
+    def self.receipt(formula) = formula.opt_prefix/AbstractTab::FILENAME
+
+    # The file status of `formula`'s receipt, nil without one.
+    sig { params(formula: Formula).returns(T.nilable(File::Stat)) }
+    def self.receipt_stat(formula)
+      path = receipt(formula)
+      path.stat if path.file?
     end
 
-    # Whether brew installed `formula` at `since` or later, by the install
-    # time it writes into the receipt of every keg it installs, poured or
-    # built: a time other than `before`, the one it had then, as a failed
-    # reinstall puts the old keg back, with its receipt, which may be from the
-    # same second.
-    sig { params(formula: Formula, since: Time, before: T.nilable(Integer)).returns(T::Boolean) }
+    # Whether brew installed `formula` at `since` or later: its receipt isn't
+    # the file it was (`before`, from `receipt_stat`), as brew writes a new
+    # one for every keg it installs, poured or built, and a failed reinstall
+    # renames the old keg back, receipt and all; and the install time brew
+    # wrote into it is no earlier than `since`, which a receipt brew only
+    # rewrote (e.g. moving a keg to a new name) keeps.
+    sig { params(formula: Formula, since: Time, before: T.nilable(File::Stat)).returns(T::Boolean) }
     def self.installed_since?(formula, since, before:)
-      time = install_time(formula)
-      !time.nil? && time != before && time >= since.to_i
+      stat = receipt_stat(formula)
+      return false if stat.nil?
+      return false if before && [stat.dev, stat.ino, stat.mtime] == [before.dev, before.ino, before.mtime]
+
+      JSON.parse(receipt(formula).read)["time"].to_i >= since.to_i
     end
 
     # Stamps each installed keg of the formulae `names` whose receipt has no

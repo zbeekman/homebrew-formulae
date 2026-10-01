@@ -572,6 +572,17 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  it "writes each receipt as a new file, while a failed reinstall renames the old keg back, receipt and all" do
+    reinstall = brew_source("reinstall/reinstall.rb")
+    receipt = mktmpdir/"INSTALL_RECEIPT.json"
+    receipt.write("{}")
+    inode = receipt.stat.ino
+    receipt.atomic_write("{}")
+    expect([brew_source("tab.rb").include?("tfile.atomic_write(to_json)"), receipt.stat.ino == inode,
+            reinstall.include?("keg.rename backup_path(keg)"), reinstall.include?("path.rename keg.to_s")])
+      .to eq([true, false, true, true])
+  end
+
   it "writes the install time into the receipt of every keg it builds or pours" do
     create = brew_source("tab.rb")[/^  def self\.create\(.*?^  end$/m]
     pour = brew_source("formula_installer.rb")[/^  def pour\n.*?^  end$/m]
@@ -614,6 +625,14 @@ RSpec.describe "brew internals", type: :system do
         "puts \"Last \#{log_lines} lines from \#{log_filename}:\"",
       )
       expect(parsed(["Last 15 lines from #{foo.logs}/01.make.log:", "make: *** Error 1"])).to eq(%w[foo])
+    end
+
+    it "include the error ending a verbose build's failure, which prints no log tail", :aggregate_failures do
+      expect([brew_source("formula.rb").include?("if !verbose? || verbose_using_dots"),
+              brew_source("exceptions.rb").include?(
+                "onoe \"\#{formula.full_name} \#{formula.version} did not build\"",
+              )]).to eq([true, true])
+      expect(parsed(["Error: #{foo.full_name} #{foo.version} did not build"])).to eq(%w[foo])
     end
   end
 

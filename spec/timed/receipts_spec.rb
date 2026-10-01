@@ -114,9 +114,15 @@ RSpec.describe Timed::Receipts do
 
     it "is false for the receipt it had before, even within the same second" do
       install_foo(0)
-      before = described_class.install_time(foo)
-      expect([before, described_class.installed_since?(foo, installed_at, before:)])
-        .to eq([installed_at.to_i, false])
+      before = described_class.receipt_stat(foo)
+      expect(described_class.installed_since?(foo, installed_at, before:)).to be(false)
+    end
+
+    it "is true for a new receipt written as brew writes one, even with the old one's install time" do
+      receipt = install_foo(0)/AbstractTab::FILENAME
+      before = described_class.receipt_stat(foo)
+      receipt.atomic_write(receipt.read)
+      expect(described_class.installed_since?(foo, installed_at, before:)).to be(true)
     end
 
     it "reads the keg brew reinstalled, not a newer HEAD keg" do
@@ -127,12 +133,12 @@ RSpec.describe Timed::Receipts do
       end
       install_foo(-60, version: "HEAD-abc1234", opt: false)
       install_foo(60)
-      expect(described_class.installed_since?(foo, installed_at, before: installed_at.to_i - 120)).to be(true)
+      expect(described_class.installed_since?(foo, installed_at, before: nil)).to be(true)
     end
 
     it "is false after a failed `brew reinstall`, which puts the old keg back" do
-      keg = Keg.new(install_foo(-60))
-      before = described_class.install_time(foo)
+      keg = Keg.new(install_foo(0))
+      before = described_class.receipt_stat(foo)
       installer = FormulaInstaller.new(foo)
       allow(installer).to receive(:install) do
         (HOMEBREW_CELLAR/"foo/1.0").mkpath

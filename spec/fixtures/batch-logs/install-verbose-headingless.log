@@ -1,0 +1,34 @@
+==> Fetching downloads for: pour and broken
+✔︎ Bottle Manifest pour (1.2.3)
+✔︎ Bottle pour (1.2.3)
+✔︎ Formula broken (2.0)
+==> Pouring pour--1.2.3.sonoma.bottle.tar.gz
+==> Finishing up
+ln -s ../Cellar/pour/1.2.3/bin/pour pour
+==> Summary
+🍺  /usr/local/Cellar/pour/1.2.3: 12 files, 345.6KB
+==> ./configure --disable-silent-rules
+checking for a BSD-compatible install... /usr/bin/install -c
+checking for gcc... no
+checking for cc... no
+configure: error: no acceptable C compiler found in $PATH
+
+==> Formula
+Path: /usr/local/Homebrew/Library/Taps/homebrew/homebrew-core/Formula/b/broken.rb
+==> Configuration
+HOMEBREW_VERSION: 5.0.0
+==> ENV
+HOMEBREW_CC: clang
+
+Error: broken 2.0 did not build
+Logs:
+     /Users/user/Library/Logs/Homebrew/broken/00.options.out
+     /Users/user/Library/Logs/Homebrew/broken/01.configure.log
+     /Users/user/Library/Logs/Homebrew/broken/01.configure.cc
+
+
+Warning: Your Xcode (26.3) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+==> Installation times
+pour                        1.402 s

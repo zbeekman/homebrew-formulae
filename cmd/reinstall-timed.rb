@@ -108,7 +108,7 @@ module Homebrew
         # A failed reinstall leaves the old version installed, so only a new
         # receipt shows brew reinstalled a formula.
         succeeded = lambda do |formula|
-          before = Timed::Receipts.install_time(formula)
+          before = Timed::Receipts.receipt_stat(formula)
           ->(since) { Timed::Receipts.installed_since?(formula, since, before:) }
         end
         # One call, so nothing is skipped for a failure, but a failed build
