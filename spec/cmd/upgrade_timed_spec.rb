@@ -502,13 +502,13 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
     end
 
     it "keeps a named source build ahead of a pour that needs it, so brew doesn't pour it as a dependency" do
-      stub_formula("b", bottled: true)
-      stub_formula("p", bottled: true, deps: %w[b])
-      stub_formula("r", deps: %w[p])
-      run_command("--yes", "--build-from-source", "b", "r")
-      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times --build-from-source b],
-                                        %w[upgrade --formula --yes --display-times p],
-                                        %w[upgrade --formula --yes --display-times --build-from-source r]])
+      stub_formula("lib", bottled: true)
+      stub_formula("dep", bottled: true, deps: %w[lib])
+      stub_formula("app", deps: %w[dep])
+      run_command("--yes", "--build-from-source", "lib", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times --build-from-source lib],
+                                        %w[upgrade --formula --yes --display-times dep],
+                                        %w[upgrade --formula --yes --display-times --build-from-source app]])
     end
 
     it "upgrades a batch of source builds with `--build-from-source` in one call" do
