@@ -59,13 +59,19 @@ RSpec.describe Timed::Runner do
       expect(stream).to eq(["caf�\n"])
     end
 
-    it "adds `env` to brew's environment, and asks brew for colour when the output is a terminal" do
-      brew_script("echo \"${HOMEBREW_COLOR-plain} ${HOMEBREW_X-}\"\n")
+    it "adds `env` to brew's environment, turns off its interactive debugger, which would wait on a prompt " \
+       "nobody sees, and asks brew for colour when the output is a terminal" do
+      brew_script("echo \"${HOMEBREW_COLOR-plain} ${HOMEBREW_X-} ${HOMEBREW_DISABLE_DEBREW-}\"\n")
       tty = [false, true].to_h do |terminal|
         allow($stdout).to receive(:tty?).and_return(terminal)
         [terminal, stream(env: { "HOMEBREW_X" => "x" })]
       end
-      expect(tty).to eq(false => ["plain x\n"], true => ["1 x\n"])
+      expect(tty).to eq(false => ["plain x 1\n"], true => ["1 x 1\n"])
+    end
+
+    it "lets `env` override what it sets" do
+      brew_script("echo \"${HOMEBREW_DISABLE_DEBREW-}\"\n")
+      expect(stream(env: { "HOMEBREW_DISABLE_DEBREW" => "" })).to eq(["\n"])
     end
   end
 
@@ -136,7 +142,7 @@ RSpec.describe Timed::Runner do
 
     def builds = JSON.parse(database.read)["packages"].transform_values { |package| package["builds"] }
 
-    def log(index) = (logs/"20260930-100000-batch#{index}.log").to_s
+    def log(index, pid: Process.pid) = (logs/"20260930-100000-#{pid}-batch#{index}.log").to_s
 
     it "runs `brew upgrade --formula --yes --display-times` with the flags for each batch, and nothing else" do
       %w[lib app tool].each { |name| stub_formula(name) }
@@ -146,11 +152,14 @@ RSpec.describe Timed::Runner do
                            %w[upgrade --formula --yes --display-times --verbose app]])
     end
 
-    it "turns off brew's interactive debugger, which would wait on a prompt nobody sees" do
-      stub_formula("lib")
+    it "gives each run its own logs, even when two start in the same second" do
+      %w[lib app].each { |name| stub_formula(name) }
       fake_brew
+      allow(Process).to receive(:pid).and_return(101, 202)
       run([batch("lib")])
-      expect(envs).to eq([{ "HOMEBREW_DISABLE_DEBREW" => "1" }])
+      run([batch("app")])
+      expect([log(1, pid: 101), log(1, pid: 202)].to_h { |path| [path, Pathname(path).read[/Upgrading \w+/]] })
+        .to eq(log(1, pid: 101) => "Upgrading lib", log(1, pid: 202) => "Upgrading app")
     end
 
     describe "with `pour_flags`" do
@@ -180,9 +189,8 @@ RSpec.describe Timed::Runner do
         %w[lib dep app].each { |name| stub_formula(name) }
         fake_brew
         run([batch("lib", "dep", "app")], flags: source, pours: %w[dep], pour_flags: [])
-        debrew = { "HOMEBREW_DISABLE_DEBREW" => "1" }
         no_check = { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }
-        expect(envs).to eq([debrew, debrew.merge(no_check), debrew])
+        expect(envs).to eq([{}, no_check, {}])
       end
 
       it "skips a run's formulae that need one that failed in an earlier run of the batch", :aggregate_failures do

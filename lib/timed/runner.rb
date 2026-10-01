@@ -19,12 +19,12 @@ module Timed
 
     # Runs each of `batches` of `formulae` (by full name) with
     # `brew <verb> --formula --yes --display-times <flags> <names>`, keeping
-    # its output, without colours, in a log in `logs`. With `pour_flags`, a
-    # batch is split into runs of formulae in `pours` or not, in its order,
-    # and each run of `pours` gets `pour_flags` instead of `flags`, one call
-    # per run. Brew's interactive debugger is off, as nobody would see its
-    # prompt. After each batch, a formula whose version isn't installed
-    # failed; each formula brew worked on is logged in `database` with the
+    # its output, without colours, in a log in `logs` named after the run's
+    # start and process. With `pour_flags`, a batch is split into runs of
+    # formulae in `pours` or not, in its order, and each run of `pours` gets
+    # `pour_flags` instead of `flags`, one call per run. After each batch, a
+    # formula whose version isn't installed failed; each formula brew worked
+    # on is logged in `database` with the
     # verb, the batch's label and its log, and each keg brew installed gets
     # its times in its receipt unless not `stamp`. A formula that `deps` says
     # needs one that failed or was skipped is skipped and logged as such.
@@ -50,7 +50,8 @@ module Timed
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
                  database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
                  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
-      prefix = now.call.strftime("%Y%m%d-%H%M%S")
+      # Runs started in the same second are separate processes.
+      prefix = "#{now.call.strftime("%Y%m%d-%H%M%S")}-#{Process.pid}"
       logs.mkpath
       failed = T.let([], T::Array[String])
       skipped = T.let([], T::Array[String])
@@ -84,15 +85,14 @@ module Timed
             # a formula as a dependency before its call to build it.
             runs = pour_flags ? names.chunk_while { |a, b| pours.include?(a) == pours.include?(b) } : [names]
             calls = runs.map do |run_names|
-              env = { "HOMEBREW_DISABLE_DEBREW" => "1" }
-              next [flags, run_names, env] if pour_flags.nil? || pours.exclude?(run_names.fetch(0))
+              next [flags, run_names, {}] if pour_flags.nil? || pours.exclude?(run_names.fetch(0))
 
               # Brew's installed-dependents check would pour the run's
               # outdated dependents, named formulae among them, before their
               # own call builds them; brew never runs it for these formulae.
               # The run set the variable, not the user, so no hint about it.
               [pour_flags, run_names,
-               env.merge("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1")]
+               { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }]
             end
             results = T.let([], T::Array[T.nilable(T::Boolean)])
             log.open("w") do |file|
@@ -200,16 +200,18 @@ module Timed
     # Runs `brew` with `argv` from the home directory (source builds that
     # clone a repository fail from some directories), with its output and
     # errors through one pipe, not a terminal, and `env` added to its
-    # environment. Asks brew for colours if the output is a terminal (unless
-    # `HOMEBREW_NO_COLOR` is set). Echoes each line as it arrives, with any
-    # bytes that aren't UTF-8 replaced, and yields it. Returns whether brew
-    # succeeded, as `Kernel.system` does.
+    # environment. Turns off brew's interactive debugger, as nobody would see
+    # its prompt, and asks brew for colours if the output is a terminal
+    # (unless `HOMEBREW_NO_COLOR` is set). Echoes each line as it arrives,
+    # with any bytes that aren't UTF-8 replaced, and yields it. Returns
+    # whether brew succeeded, as `Kernel.system` does.
     # rubocop:disable Naming/PredicateMethod
     sig {
       params(argv: T::Array[String], env: T::Hash[String, String], _block: T.proc.params(line: String).void)
         .returns(T.nilable(T::Boolean))
     }
     def self.stream(argv, env: {}, &_block)
+      env = { "HOMEBREW_DISABLE_DEBREW" => "1" }.merge(env)
       env = { "HOMEBREW_COLOR" => "1" }.merge(env) if $stdout.tty?
       IO.popen(env, [HOMEBREW_BREW_FILE.to_s, *argv], err: [:child, :out], chdir: Dir.home) do |io|
         io.each_line do |raw|

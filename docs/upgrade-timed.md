@@ -76,8 +76,9 @@ pour a named formula before its own call builds it;
 
 Homebrew's output and errors are shown as they arrive, in colour if the output
 is a terminal (unless `$HOMEBREW_NO_COLOR` is set), and kept without colours in
-`$HOMEBREW_LOGS/timed/`*`time`*`-batch`*`N`*`.log`, where *`time`* is when
-the run started, e.g. `20260930-143000`. After each batch, it:
+`$HOMEBREW_LOGS/timed/`*`time`*`-`*`pid`*`-batch`*`N`*`.log`, where *`time`* is
+when the run started, e.g. `20260930-143000`, and *`pid`* its process ID, so
+runs started in the same second keep their own logs. After each batch, it:
 
 - checks that the new version of each formula is installed; if it isn't, the
   formula failed, and so does the command, as with `brew upgrade`;
