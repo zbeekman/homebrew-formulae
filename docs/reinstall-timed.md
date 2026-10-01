@@ -114,7 +114,7 @@ itself, once for the whole run. It adds:
 `--exclude`
 
 : Comma-separated formulae to leave out of the run. Homebrew may still
-  upgrade them as dependencies of the others.
+  install or upgrade them as dependencies of the others.
 
 `--guess`, `--estimator` and `--exclude` plan formulae only, so they can't be
 used with `--cask`, and each name must be a formula.
