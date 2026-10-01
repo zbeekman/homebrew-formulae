@@ -68,7 +68,7 @@ module Homebrew
         end
         # Brew loads every name before it installs anything, so an unknown one
         # stops it.
-        items = args.named.to_formulae_and_casks
+        items = args.named.to_formulae_and_casks(warn: false)
         casks = items.grep(Cask::Cask)
         if casks.any?
           raise UsageError, "`brew install-timed` doesn't install casks yet; use " \

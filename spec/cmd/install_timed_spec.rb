@@ -192,6 +192,12 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       run_command("--dry-run", "user/tap/app")
     end
 
+    it "loads the names as `brew install` does, without warnings about renamed or migrated formulae" do
+      stub_formula("cmake")
+      expect(Formulary).to receive(:factory).with("cmake", hash_including(warn: false)).and_call_original
+      run_command("--dry-run", "cmake")
+    end
+
     it "prints brew's plan in-process, as `brew install --dry-run` prints it, then the batches, running no brew",
        :aggregate_failures do
       stub_formula("lib")
