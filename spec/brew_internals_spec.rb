@@ -565,7 +565,7 @@ RSpec.describe "brew internals", type: :system do
         .to eq([true, true, true, true])
     end
 
-    it "reinstalls the linked keg, else the one in `opt`, which `Timed::Receipts.install_time` reads" do
+    it "reinstalls the linked keg, else the one in `opt`, whose receipt `Timed::Receipts.receipt_stat` reads" do
       resolve = brew_source("formulary.rb")[/^  def self\.resolve\(.*?^  end$/m]
       expect([resolve.include?("f = from_rack(rack, spec, alias_path:, force_bottle:, flags:)"),
               brew_source("keg.rb").include?(
