@@ -96,18 +96,22 @@ RSpec.describe Timed::Runner do
 
     def batch(*names, label: "main") = Timed::Planner::Batch.new(label:, reason: nil, names:)
 
-    # Brew as it upgrades each name it is given that isn't installed yet,
+    # Brew as it upgrades each name or file it is given that isn't installed yet,
     # taking 10 seconds for each: installs a keg with a receipt and prints its
     # summary line, except for `failing` names, and `silent` ones, which it
     # doesn't mention either, then the formulae `alongside` the names it was
-    # given; then prints the installation times. Yields the names before it
-    # returns.
-    def fake_brew(failing: [], silent: [], alongside: {}, &block)
+    # given; then prints the installation times. With `stop_at_failure`, it
+    # stops at the first failing name instead, as `brew reinstall` does at a
+    # failed build, without the installation times. Yields the names before
+    # it returns.
+    def fake_brew(failing: [], silent: [], alongside: {}, stop_at_failure: false, &block)
       allow(described_class).to receive(:stream) do |argv, env: {}, &on_line|
         calls << argv
         envs << env
-        names = argv.drop(1).reject { |arg| arg.start_with?("-") }
-        installed = (names + alongside.fetch(names, [])).filter_map do |name|
+        names = argv.drop(1).reject { |arg| arg.start_with?("-") }.map { |arg| File.basename(arg, ".rb") }
+        installed = []
+        stopped = T.let(false, T::Boolean)
+        (names + alongside.fetch(names, [])).each do |name|
           if (HOMEBREW_CELLAR/name/"2.0").exist?
             on_line.call("Warning: #{name} 2.0 already installed\n")
             next
@@ -118,6 +122,9 @@ RSpec.describe Timed::Runner do
           clock[0] += 10
           if failing.include?(name)
             on_line.call("Error: #{name}: it failed\n")
+            stopped = stop_at_failure
+            break if stopped
+
             next
           end
 
@@ -125,19 +132,21 @@ RSpec.describe Timed::Runner do
           keg.mkpath
           FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
           on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
-          name
+          installed << name
         end
-        on_line.call("==> Installation times\n")
-        installed.each { |name| on_line.call(format("%<name>-20s %<seconds>.3f s\n", name:, seconds: 9.5)) }
+        unless stopped
+          on_line.call("==> Installation times\n")
+          installed.each { |name| on_line.call(format("%<name>-20s %<seconds>.3f s\n", name:, seconds: 9.5)) }
+        end
         block&.call(names)
         !(names + alongside.fetch(names, [])).intersect?(failing + silent)
       end
     end
 
-    def run(batches, stamp: true, deps: {}, flags: %w[--verbose --display-times], pours: [], pour_flags: nil)
-      described_class.run(batches, verb: "upgrade", flags:, pours:, pour_flags:, formulae:, deps:, stamp:,
-                                   database:, logs:, clock: -> { clock.fetch(0) },
-                                   now: -> { Time.new(2026, 9, 30, 10, 0, 0, "-04:00") })
+    def run(batches, verb: "upgrade", stamp: true, deps: {}, flags: %w[--verbose --display-times], pours: [],
+            pour_flags: nil, now: -> { Time.new(2026, 9, 30, 10, 0, 0, "-04:00") }, **options)
+      described_class.run(batches, verb:, flags:, pours:, pour_flags:, formulae:, deps:, stamp:,
+                                   database:, logs:, clock: -> { clock.fetch(0) }, now:, **options)
     end
 
     def builds = JSON.parse(database.read)["packages"].transform_values { |package| package["builds"] }
@@ -150,6 +159,14 @@ RSpec.describe Timed::Runner do
       run([batch("lib", "tool"), batch("app", label: "last")])
       expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib tool],
                            %w[upgrade --formula --yes --display-times --verbose app]])
+    end
+
+    it "names a formula to brew by its argument in `arguments`, and logs it by its name", :aggregate_failures do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")], arguments: { "lib" => "/work/lib.rb" })
+      expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose /work/lib.rb]])
+      expect(builds.keys).to eq(%w[lib])
     end
 
     it "gives each run its own logs, even when two start in the same second" do
@@ -370,6 +387,69 @@ RSpec.describe Timed::Runner do
         .to output(/Skipping top: dependency app did not upgrade\n.*did not upgrade: lib app\n/m).to_stderr
       expect(builds["app"].map { |entry| entry.slice("status", "version") })
         .to eq([{ "status" => "failed", "version" => "2.0" }])
+    end
+
+    describe "with `succeeded`" do
+      it "starts it for each formula before its call, and finishes it after, with when the call started",
+         :aggregate_failures do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        events = []
+        fake_brew { |names| events << "call #{names.join(" ")}" }
+        times = [0, 0, 60, 120, 180].map { |seconds| Time.new(2026, 9, 30, 10, 0, 0, "-04:00") + seconds }
+        succeeded = lambda do |formula|
+          events << "before #{formula.name}"
+          lambda do |since|
+            events << "after #{formula.name} #{since.strftime("%T")}"
+            true
+          end
+        end
+        run([batch("lib", "app"), batch("tool")], succeeded:, now: -> { times.shift || raise("no time left") })
+        expect(events).to eq(["before lib", "before app", "call lib app", "after lib 10:01:00",
+                              "after app 10:01:00", "before tool", "call tool", "after tool 10:03:00"])
+        expect(builds.keys).to contain_exactly("lib", "app", "tool")
+      end
+
+      it "takes a formula it says brew didn't install as failed, even if its version is installed",
+         :aggregate_failures do
+        %w[lib app].each { |name| stub_formula(name) }
+        (HOMEBREW_CELLAR/"lib/2.0").mkpath
+        fake_brew
+        succeeded = ->(formula) { ->(_since) { formula.name != "lib" } }
+        expect { run([batch("lib", "app")], verb: "reinstall", succeeded:) }
+          .to output("Error: 1 formula did not reinstall: lib\n").to_stderr
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+          .to eq("lib" => ["failed"], "app" => ["built"])
+      end
+    end
+
+    describe "with `stops_at_failure`" do
+      it "logs the formulae of a failed call that brew never started as skipped, not failed, and warns",
+         :aggregate_failures do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[app], stop_at_failure: true)
+        expect { run([batch("lib", "app", "tool")], verb: "reinstall", stops_at_failure: true) }
+          .to output(<<~EOS).to_stderr
+            Warning: `brew reinstall` stopped early; not run: tool
+            Error: 1 formula did not reinstall: app
+          EOS
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+          .to eq("lib" => ["built"], "app" => ["failed"], "tool" => ["skipped"])
+        expect(Homebrew).to be_failed
+      end
+
+      it "takes a formula whose download failed as failed, not as not run" do
+        %w[lib app].each { |name| stub_formula(name) }
+        # Brew fetches everything first, then installs what downloaded.
+        allow(described_class).to receive(:stream) do |_argv, &on_line|
+          ["✘ Formula app (2.0)\n", "Error: app: download failed\n", "==> Reinstalling lib\n"].each(&on_line)
+          (HOMEBREW_CELLAR/"lib/2.0").mkpath
+          FileUtils.cp receipt, HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{HOMEBREW_CELLAR}/lib/2.0: 3 files, 12KB, built in 9 seconds\n")
+          false
+        end
+        expect { run([batch("app", "lib")], verb: "reinstall", stops_at_failure: true) }
+          .to output("Error: 1 formula did not reinstall: app\n").to_stderr
+      end
     end
 
     describe "Ctrl-C" do
@@ -618,6 +698,8 @@ RSpec.describe Timed::Runner do
         "==> Installing bar --HEAD",
         "Error: bar: something went wrong",
         "Error: bar: something went wrong",
+        "==> Installing qux from user/tap",
+        "Error: qux: it went wrong too",
         "\e[32m==>\e[0m \e[1mInstallation times\e[0m",
         "baz                       1.500 s",
       ].map { |line| ["#{line}\n", nil] }
@@ -625,7 +707,94 @@ RSpec.describe Timed::Runner do
         "cgns@3.4" => { "version" => "3.4.1", "status" => "built", "build_seconds" => 5.0 },
         "foo"      => { "status" => "failed" },
         "bar"      => { "status" => "failed", "problems" => ["Error: bar: something went wrong"] },
+        "qux"      => { "status" => "failed", "problems" => ["Error: qux: it went wrong too"] },
         "baz"      => { "status" => "failed", "install_seconds" => 1.5 },
+      )
+    end
+
+    # Made up in the format of brew's output, from its source.
+    it "reads formulae `brew install` gives no heading of their own, and a tap formula's heading" do
+      problem = <<~EOS.chomp
+        Last 15 lines from /Users/user/Library/Logs/Homebrew/broken/01.configure.log:
+        checking for cc... no
+        checking for cl.exe... no
+        checking for clang... no
+        configure: error: in '/private/tmp/broken-20261001-1234-abcdef/broken-2.0':
+        configure: error: no acceptable C compiler found in $PATH
+      EOS
+      expect(described_class.parse(fixture_lines("install-headingless.log"))).to eq(
+        "pour"   => poured("1.2.3", 1.402),
+        "build"  => built("4.5", 127.311, 125.0),
+        "tapped" => built("0.9", 46.802, 45.0),
+        "broken" => { "status" => "failed", "problems" => [problem] },
+      )
+    end
+
+    it "reads a verbose `brew install`'s failed build of a formula with no heading of its own" do
+      logs = %w[00.options.out 01.configure.log 01.configure.cc].map do |log|
+        "     /Users/user/Library/Logs/Homebrew/broken/#{log}"
+      end
+      expect(described_class.parse(fixture_lines("install-verbose-headingless.log"))).to eq(
+        "pour"   => poured("1.2.3", 1.402),
+        "broken" => { "status"   => "failed",
+                      "problems" => [["Error: broken 2.0 did not build", "Logs:", *logs].join("\n")] },
+      )
+    end
+
+    it "times a verbose failed build with no heading from the first line after the formula before" do
+      lines = [["🍺  /prefix/Cellar/pour/1.0: 4KB\n", 1.0], ["==> make\n", 2.0],
+               ["Error: user/tap/broken 2.0 did not build\n", 30.0]]
+      expect(described_class.parse(lines, started: Time.new(2026, 10, 1, 10, 0, 0, "-04:00"))["broken"])
+        .to include("started" => "2026-10-01T10:00:02-04:00")
+    end
+
+    it "blames a pour brew gives no heading for the error it hits" do
+      lines = ["==> Pouring foo--1.0.sonoma.bottle.tar.gz", "Error: foo: Failed to extract the bottle"]
+      expect(described_class.parse(lines.map { |line| ["#{line}\n", nil] }))
+        .to eq("foo" => { "status" => "failed", "problems" => ["Error: foo: Failed to extract the bottle"] })
+    end
+
+    it "reads a `brew reinstall` that a failed build stopped, leaving out the formulae it never started" do
+      problem = <<~EOS.chomp
+        Last 15 lines from /Users/user/Library/Logs/Homebrew/app/02.make.log:
+        app.c:1:10: fatal error: 'missing.h' file not found
+            1 | #include <missing.h>
+              |          ^~~~~~~~~~~
+        1 error generated.
+        make: *** [app.o] Error 1
+      EOS
+      expect(described_class.parse(fixture_lines("reinstall-failure.log"))).to eq(
+        "lib" => { "version" => "1.0", "status" => "poured" },
+        "app" => { "status" => "failed", "problems" => [problem] },
+      )
+    end
+
+    it "times a formula without a heading from the first line after the one before it, or after the downloads" do
+      lines = [
+        ["==> Fetching downloads for: build, pour, broken, next and gone\n", 0.0],
+        ["✔︎ Formula build (2.0)\n", 3.0],
+        ["✘ Formula gone (2.0)\n", 4.0],
+        ["Error: gone: download failed\n", 4.5],
+        ["==> ./configure\n", 7.0],
+        ["🍺  /prefix/Cellar/build/2.0: 12 files, 1.1MB, built in 50 seconds\n", 57.5],
+        ["\n", 57.6],
+        ["==> Pouring pour--1.0.sonoma.bottle.tar.gz\n", 58.0],
+        ["🍺  /prefix/Cellar/pour/1.0: 4KB\n", 59.5],
+        ["==> make\n", 60.0],
+        ["Last 1 lines from /logs/broken/01.make.log:\n", 61.0],
+        ["make: *** [all] Error 1\n", 61.0],
+        ["\n", 61.1],
+        ["==> ./configure\n", 62.0],
+        ["🍺  /prefix/Cellar/next/3.0: 2 files, 8KB, built in 9 seconds\n", 71.5],
+      ]
+      times = described_class.parse(lines, started: Time.new(2026, 10, 1, 10, 0, 0, "-04:00"))
+                             .transform_values { |build| build.slice("started", "wall_seconds") }
+      expect(times).to eq(
+        "gone"   => { "started" => "2026-10-01T10:00:04-04:00" },
+        "build"  => { "started" => "2026-10-01T10:00:07-04:00", "wall_seconds" => 50.5 },
+        "pour"   => { "started" => "2026-10-01T10:00:58-04:00", "wall_seconds" => 1.5 },
+        "broken" => { "started" => "2026-10-01T10:01:00-04:00" },
+        "next"   => { "started" => "2026-10-01T10:01:02-04:00", "wall_seconds" => 9.5 },
       )
     end
 

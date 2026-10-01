@@ -537,6 +537,116 @@ RSpec.describe "brew internals", type: :system do
       .to eq("llvm" => 2811.4, "a-formula-with-a-long-name" => 123456.789)
   end
 
+  describe "`Dependency.expand`" do
+    it "names each dependency it keeps by its formula's full name, and prunes by `action` only without a block" do
+      expand = brew_source("dependency.rb")[/^    def expand\(.*?^    end$/m]
+      action = brew_source("dependency.rb")[/^    def action\(.*?^    end$/m]
+      expect([expand.include?("dep = dep.dup_with_formula_name(dep_formula)"),
+              brew_source("dependency.rb").include?("self.class.new(formula.full_name.to_s, tags)"),
+              action.include?("Dependable::PRUNE unless T.cast(dependent, Formula).build.with?(dep)")])
+        .to eq([true, true, true])
+    end
+  end
+
+  describe "`brew reinstall`" do
+    it "has no `--dry-run`, so `brew reinstall-timed` adds its own and prints brew's plan in-process" do
+      options = Timed::Command.builtin("reinstall").parser.processed_options.flat_map { |short, long| [short, long] }
+      expect(options & %w[-n --dry-run]).to eq([])
+    end
+
+    it "asks by `Install.formulae_ask_prompt_needed?`, through `Install.ask_formulae`, unless `--no-ask`" do
+      reinstall = brew_source("cmd/reinstall.rb")
+      ask_formulae = brew_source("install.rb")[/^      def ask_formulae\(.*?^      end$/m]
+      prompt_check = "return if prompt && !formulae_ask_prompt_needed?(formulae_installer, dependants)"
+      expect([reinstall.include?("ask = !args.no_ask?"),
+              reinstall.match?(/Install\.ask_formulae\(\n\s+formulae_installers,\n\s+dependants,\n\s+action:\s+
+                                "reinstallation",/x),
+              ask_formulae.include?(prompt_check), ask_formulae.include?("ask_input(action:) if prompt")])
+        .to eq([true, true, true, true])
+    end
+
+    it "reinstalls the linked keg, else the one in `opt`, whose receipt `Timed::Receipts.receipt_stat` reads" do
+      resolve = brew_source("formulary.rb")[/^  def self\.resolve\(.*?^  end$/m]
+      expect([resolve.include?("f = from_rack(rack, spec, alias_path:, force_bottle:, flags:)"),
+              brew_source("keg.rb").include?(
+                "kegs.find(&:linked?) || kegs.find(&:optlinked?) || kegs.max_by(&:scheme_and_version)",
+              ),
+              brew_source("formula_installer.rb").include?("keg.optlink(verbose: verbose?, overwrite: overwrite?)")])
+        .to eq([true, true, true])
+    end
+
+    it "stops at a failed build, where `brew install` and `brew upgrade` carry on" do
+      reraised = brew_source("cmd/reinstall.rb").match?(/rescue BuildError\n(?:\s*#.*\n)*\s*raise\n/)
+      dumped = /rescue BuildError => e\n\s*(?:require .*\n\s*)?(?:Utils::Analytics.*\n\s*)?e\.dump/
+      carry_on = %w[install.rb upgrade.rb].to_h { |path| [path, brew_source(path).match?(dumped)] }
+      expect([reraised, carry_on]).to eq([true, { "install.rb" => true, "upgrade.rb" => true }])
+    end
+  end
+
+  it "writes each receipt as a new file, while a failed reinstall renames the old keg back, receipt and all" do
+    reinstall = brew_source("reinstall/reinstall.rb")
+    receipt = mktmpdir/"INSTALL_RECEIPT.json"
+    receipt.write("{}")
+    inode = receipt.stat.ino
+    receipt.atomic_write("{}")
+    expect([brew_source("tab.rb").include?("tfile.atomic_write(to_json)"), receipt.stat.ino == inode,
+            reinstall.include?("keg.rename backup_path(keg)"), reinstall.include?("path.rename keg.to_s")])
+      .to eq([true, false, true, true])
+  end
+
+  it "writes the install time into the receipt of every keg it builds or pours" do
+    create = brew_source("tab.rb")[/^  def self\.create\(.*?^  end$/m]
+    pour = brew_source("formula_installer.rb")[/^  def pour\n.*?^  end$/m]
+    expect([create.include?("time:                     Time.now.to_i,"), pour.include?("tab.time = Time.now.to_i")])
+      .to eq([true, true])
+  end
+
+  describe "the lines `Timed::Runner.parse` names formulae by" do
+    let(:foo) do
+      formula("foo", tap: Tap.fetch("user", "tap")) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-1.0.tgz"
+      end
+    end
+
+    def parsed(lines) = Timed::Runner.parse(lines.map { |line| ["#{line}\n", nil] }).keys
+
+    it "include the heading a tap formula's install starts with" do
+      lines = []
+      allow(foo).to receive(:ohai) { |title| lines << "==> #{title}" }
+      foo.print_tap_action
+      expect(parsed(lines)).to eq(%w[foo])
+    end
+
+    it "include the bottle a formula pours, which is all an install with no dependencies to install names " \
+       "before its summary", :aggregate_failures do
+      expect(brew_source("formula_installer.rb")).to include(
+        "oh1 \"Installing \#{Formatter.identifier(formula.full_name)} \#{options}\".strip if show_header?",
+        "@show_header = true unless deps.empty?",
+        "ohai \"Pouring \#{downloadable_object.downloader.basename}\"",
+      )
+      bottle = Bottle::Filename.new("foo", PkgVersion.parse("1.0_1"), Utils::Bottles.tag, 1)
+      expect(parsed(["==> Pouring #{bottle}"])).to eq(%w[foo])
+    end
+
+    it "include the log a failed build prints the end of, in a directory named after the formula",
+       :aggregate_failures do
+      expect(brew_source("formula.rb")).to include(
+        "log_filename = format(\"\#{logs}/\#{active_log_prefix}%02<exec_count>d.%<cmd_base>s.log\",",
+        "puts \"Last \#{log_lines} lines from \#{log_filename}:\"",
+      )
+      expect(parsed(["Last 15 lines from #{foo.logs}/01.make.log:", "make: *** Error 1"])).to eq(%w[foo])
+    end
+
+    it "include the error ending a verbose build's failure, which prints no log tail", :aggregate_failures do
+      expect([brew_source("formula.rb").include?("if !verbose? || verbose_using_dots"),
+              brew_source("exceptions.rb").include?(
+                "onoe \"\#{formula.full_name} \#{formula.version} did not build\"",
+              )]).to eq([true, true])
+      expect(parsed(["Error: #{foo.full_name} #{foo.version} did not build"])).to eq(%w[foo])
+    end
+  end
+
   describe "the summary `FormulaInstaller` prints for each formula it installs" do
     let(:installer) do
       formula = formula("foo") do

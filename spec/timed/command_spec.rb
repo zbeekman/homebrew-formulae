@@ -66,6 +66,22 @@ RSpec.describe Timed::Command do
     end
   end
 
+  describe ".path_arguments" do
+    it "gives each formula named by a path that path, made absolute, and leaves the others to their names" do
+      dir = mktmpdir
+      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-1.0.tgz\"\nend\n")
+      bar = formula("bar") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/bar-1.0.tgz"
+      end
+      Dir.chdir(dir) do
+        foo = Formulary.factory("foo.rb")
+        expect(described_class.path_arguments(%w[foo.rb bar], { "foo" => foo, "bar" => bar }))
+          .to eq("foo" => (dir/"foo.rb").realpath.to_s)
+      end
+    end
+  end
+
   describe ".auto_update" do
     let(:fetch_head) { mktmpdir/"FETCH_HEAD" }
     let(:calls) { [] }

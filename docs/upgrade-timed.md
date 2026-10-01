@@ -144,7 +144,7 @@ see `brew upgrade --help`. It handles `-n`, `--dry-run` and `-y`, `--yes`,
 
 `--exclude`
 
-: Comma-separated formulae to leave out of the batches. Homebrew may still
+: Comma-separated formulae to leave out of the run. Homebrew may still
   upgrade them as dependencies of the others.
 
 `--guess`, `--estimator`, `--last` and `--exclude` plan formulae only, so they
