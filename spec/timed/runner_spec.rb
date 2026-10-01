@@ -440,6 +440,26 @@ RSpec.describe Timed::Runner do
           .to eq("zlib" => ["failed"], "pcre" => ["built"])
         expect(calls.map(&:last)).to eq(%w[lib other])
       end
+
+      it "logs and stamps a formula brew installs as another one's dependency, but not that one",
+         :aggregate_failures do
+        %w[lib app].each { |name| stub_formula(name) }
+        allow(described_class).to receive(:stream) do |_argv, &on_line|
+          on_line.call("==> Installing app dependency: lib\n")
+          keg = HOMEBREW_CELLAR/"lib/2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+          true
+        end
+        succeeded = ->(_formula) { ->(_since) { true } }
+        expect { run([batch("lib", "app")], verb: "install", succeeded:, dependencies_only: true) }
+          .not_to output.to_stderr
+        expect(builds.transform_values { |entries| entries.map { |entry| entry.slice("status", "build_seconds") } })
+          .to eq("lib" => [{ "status" => "built", "build_seconds" => 9.0 }])
+        expect(JSON.parse((HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json").read)["build_times"])
+          .to include("verb" => "install", "build_seconds" => 9.0)
+      end
     end
 
     describe "with `stops_at_failure`" do

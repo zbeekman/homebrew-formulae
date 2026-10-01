@@ -35,8 +35,9 @@ module Timed
     # formulae of a failed call that brew never started are logged as
     # skipped, not failed, with a warning. With `dependencies_only` (`brew
     # install --only-dependencies`), the calls install only what the formulae
-    # need, so `succeeded` checks that, and the formulae are never logged
-    # themselves, failed or skipped, only what brew's output shows it did.
+    # need, so `succeeded` checks that, and the formulae are never logged for
+    # themselves, failed or skipped, only what brew's output shows it did,
+    # which includes one brew installs as another one's dependency.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
     # raised, even if brew finished that batch.
@@ -87,7 +88,7 @@ module Timed
           started = now.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
           # With `dependencies_only`, the formulae whose dependencies brew
-          # finished, which aren't logged themselves.
+          # finished, which aren't logged for themselves.
           finished = T.let([], T::Array[String])
           # Calls in a batch are separate processes, so brew doesn't know
           # what failed in an earlier one.

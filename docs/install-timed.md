@@ -116,8 +116,10 @@ runs started in the same second keep their own logs. After each batch, it:
   and the outdated dependents it upgraded alongside the batch, in the log shown
   by [`brew build-times`](build-times.md), with `install`, the batch (`main`,
   or `last` for `--last`) and the batch's log. A failed formula is logged with
-  the version it was to install. With `--only-dependencies`, the named formulae
-  themselves are never logged, only what Homebrew installed for them;
+  the version it was to install. With `--only-dependencies`, a named formula
+  is never logged for itself, failed or skipped, only what Homebrew installed
+  for it; it is logged, and stamped, when Homebrew installs it as another
+  named formula's dependency;
 - adds the times to the install receipt (`INSTALL_RECEIPT.json`) of each keg
   Homebrew installed, under `build_times`, unless `--no-stamp-receipts` is
   given;

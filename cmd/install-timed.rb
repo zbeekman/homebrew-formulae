@@ -213,7 +213,8 @@ module Homebrew
 
         succeeded = lambda do |formula|
           # With `--only-dependencies`, brew installs what each formula needs,
-          # as it would before the formula, not the formula itself.
+          # as it would before the formula, not the formula itself (unless
+          # another named formula needs it, when it is logged as installed).
           if args.only_dependencies?
             needed = installers.fetch(formula.full_name).compute_dependencies(use_cache: false).map(&:to_formula)
             return ->(_since) { needed.all?(&:latest_version_installed?) }
