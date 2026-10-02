@@ -157,24 +157,29 @@ module Timed
     # `missing` maps a cask to those brew's cask installer would install
     # before it as they aren't installed: what their installs need (sudo,
     # a dialog) counts for the cask, naming the dependency.
+    #
+    # `cask_dependencies` maps a cask to the casks brew may install before it,
+    # by full name, and those that can't be loaded, as named; without an entry,
+    # its own `depends_on cask:`, as named. See `skip_dependents`.
     sig {
       params(
-        casks:     T::Array[Cask::Cask],
-        verb:      Symbol,
-        in_run:    T::Array[String],
-        facts:     Facts,
-        tty:       T.proc.returns(T::Boolean),
-        macos:     T::Boolean,
-        env:       T::Hash[String, String],
-        installed: T::Hash[String, Cask::Cask],
-        zap:       T::Boolean,
-        force:     T::Boolean,
-        needs:     T::Hash[String, T::Array[String]],
-        missing:   T::Hash[String, T::Array[Cask::Cask]],
+        casks:             T::Array[Cask::Cask],
+        verb:              Symbol,
+        in_run:            T::Array[String],
+        facts:             Facts,
+        tty:               T.proc.returns(T::Boolean),
+        macos:             T::Boolean,
+        env:               T::Hash[String, String],
+        installed:         T::Hash[String, Cask::Cask],
+        zap:               T::Boolean,
+        force:             T::Boolean,
+        needs:             T::Hash[String, T::Array[String]],
+        missing:           T::Hash[String, T::Array[Cask::Cask]],
+        cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]],
       ).returns(Plan)
     }
     def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
-                  force: false, needs: {}, missing: {})
+                  force: false, needs: {}, missing: {}, cask_dependencies: {})
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
@@ -198,7 +203,7 @@ module Timed
         last = entries - first
         skipped = []
       elsif verb == :install
-        skipped, first, last = skip_dependents(skipped, first, last)
+        skipped, first, last = skip_dependents(skipped, first, last, cask_dependencies:)
       end
       Plan.new(first:, last:, skipped:)
     end
@@ -210,17 +215,23 @@ module Timed
     # dependency that is in an `upgrade` or `reinstall` run is installed
     # already, so its dependents are left alone there (the caller classifies
     # the install of an installed, outdated cask as `:upgrade`).
+    # A dependent is matched by full name (see `plan`'s `cask_dependencies`),
+    # or, for a dependency that can't be loaded, by name alone, which may skip
+    # it for another tap's cask of that name, to be safe.
     sig {
-      params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry])
+      params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry],
+             cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]])
         .returns([T::Array[Entry], T::Array[Entry], T::Array[Entry]])
     }
-    def self.skip_dependents(skipped, first, last)
+    def self.skip_dependents(skipped, first, last, cask_dependencies: {})
       remaining = first + last
       queue = skipped.dup
       while (current = queue.shift)
-        dependency = current.cask.token
+        dependency = current.cask.full_name
         dependents = remaining.select do |entry|
-          entry.cask.depends_on.cask.any? { |name| Utils.name_from_full_name(name) == dependency }
+          resolved, unresolved = cask_dependencies.fetch(entry.cask.full_name) { [[], entry.cask.depends_on.cask] }
+          resolved.include?(dependency) ||
+            unresolved.any? { |name| Utils.name_from_full_name(name) == current.cask.token }
         end
         remaining -= dependents
         moved = dependents.map do |entry|

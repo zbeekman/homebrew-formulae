@@ -402,7 +402,9 @@ module Timed
         all_needs = list.to_h { |cask| [cask.full_name, cask_needs(cask)] }
         needs = all_needs.transform_values { |needed| needed.among(in_run, casks: !skip_cask_deps) }
         missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
-        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:)
+        cask_dependencies = all_needs.transform_values { |needed| [needed.casks.map(&:full_name), needed.unresolved] }
+        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
+                         cask_dependencies:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
                       skipped: plans.flat_map(&:skipped))

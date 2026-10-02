@@ -281,6 +281,24 @@ RSpec.describe Timed::Command do
     end
 
     describe "casks with the same token from different taps" do
+      it "skips, without a terminal, only the casks that need the skipped one by its full name" do
+        other = Cask::Cask.new("sudo-app", tap: Tap.fetch("user", "tap")) do
+          T.bind(self, Cask::DSL)
+          version "1.0"
+          sha256 :no_check
+          url "file:///dev/null"
+        end
+        stub_cask_loader(other, "user/tap/sudo-app")
+        casks = [stub_cask("sudo-app", nil, stanzas: 'pkg "Sudo.pkg"'),
+                 stub_cask("other-tap-app", nil, stanzas: 'depends_on cask: "user/tap/sudo-app"'),
+                 stub_cask("same-tap-app", nil, stanzas: 'depends_on cask: "sudo-app"')]
+        result = described_class.cask_plan({ install: casks }, in_run: [], facts: Timed::Casks::DiskFacts.new,
+                                                               tty: -> { false })
+        expect({ first:   result.first.map { |entry| entry.cask.full_name },
+                 skipped: result.skipped.map { |entry| entry.cask.full_name } })
+          .to eq(first: %w[other-tap-app], skipped: %w[sudo-app same-tap-app])
+      end
+
       it "classifies each on its own needs" do
         stub_lib_and_app
         tap_foo = Cask::Cask.new("foo", tap: Tap.fetch("user", "tap")) do
