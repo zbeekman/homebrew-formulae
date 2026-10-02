@@ -349,9 +349,11 @@ module Timed
     end
 
     # Lists the casks to run before the formulae and those to run after them,
-    # with why, and warns about those skipped for want of a terminal.
-    sig { params(verb: String, plan: Casks::Plan).void }
-    def self.show_casks(verb, plan)
+    # with why, and warns about those skipped for want of a terminal, with the
+    # command to run them later, naming each as `cask_arguments` does for the
+    # `named` arguments.
+    sig { params(verb: String, plan: Casks::Plan, named: T::Array[String]).void }
+    def self.show_casks(verb, plan, named:)
       rows = lambda do |entries|
         entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
       end
@@ -363,7 +365,7 @@ module Timed
       end
       return if plan.skipped.empty?
 
-      names = plan.skipped.map { |entry| entry.cask.full_name }
+      names = cask_arguments(named, plan.skipped.map(&:cask))
       opoo <<~EOS
         Skipping #{Utils.pluralize("cask", names.length, include_count: true)}, as sudo can't ask for a password without a terminal:
         #{rows.call(plan.skipped).join("\n")}

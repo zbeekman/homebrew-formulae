@@ -215,7 +215,7 @@ module Homebrew
                                                                dependencies_only: args.only_dependencies?)
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
                                              in_run: planned, force: args.force?)
-        Timed::Command.show_casks("install", cask_plan)
+        Timed::Command.show_casks("install", cask_plan, named: args.named)
         # The installed casks brew won't upgrade, which it only reports on.
         first_casks = cask_plan.first.map(&:cask) + (casks - new_casks - upgrading)
         last_casks = cask_plan.last.map(&:cask)

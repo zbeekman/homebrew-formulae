@@ -108,7 +108,7 @@ module Homebrew
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },
                                              in_run: result.batches.flat_map(&:names), zap: args.zap?,
                                              force: args.force?)
-        Timed::Command.show_casks("reinstall", cask_plan)
+        Timed::Command.show_casks("reinstall", cask_plan, named: args.named)
         return if args.dry_run? || (result.batches.empty? && cask_plan.first.empty? && cask_plan.last.empty?)
 
         # Once, by brew's rules: if brew would install or upgrade dependencies

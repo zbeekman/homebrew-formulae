@@ -112,7 +112,7 @@ module Homebrew
           opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
         end
         cask_plan = Timed::Command.cask_plan({ upgrade: outdated_casks(items.grep(Cask::Cask)) }, in_run: planned)
-        Timed::Command.show_casks("upgrade", cask_plan)
+        Timed::Command.show_casks("upgrade", cask_plan, named: args.named)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)
 

@@ -167,18 +167,19 @@ RSpec.describe Timed::Command do
       it "lists the casks to run first, and those to run last with why", :aggregate_failures do
         last = [entry("baz", "`pkg` requires sudo", "`postflight` block may call sudo")]
         plan = Timed::Casks::Plan.new(first: [entry("foo"), entry("bar")], last:, skipped: [])
-        expect { described_class.show_casks("upgrade", plan) }.to output(<<~EOS).to_stdout.and not_to_output.to_stderr
-          ==> Would upgrade 2 casks first
-          foo bar
-          ==> Would upgrade 1 cask last
-          baz: `pkg` requires sudo; `postflight` block may call sudo
-        EOS
+        expect { described_class.show_casks("upgrade", plan, named: []) }
+          .to output(<<~EOS).to_stdout.and not_to_output.to_stderr
+            ==> Would upgrade 2 casks first
+            foo bar
+            ==> Would upgrade 1 cask last
+            baz: `pkg` requires sudo; `postflight` block may call sudo
+          EOS
       end
 
       it "warns once about the casks skipped without a terminal, with the command to run them later" do
         plan = Timed::Casks::Plan.new(first: [], last: [],
                                       skipped: [entry("foo", "`pkg` requires sudo"), entry("bar", "`kext` x")])
-        expect { described_class.show_casks("install", plan) }.to output(<<~EOS).to_stderr
+        expect { described_class.show_casks("install", plan, named: []) }.to output(<<~EOS).to_stderr
           Warning: Skipping 2 casks, as sudo can't ask for a password without a terminal:
           foo: `pkg` requires sudo
           bar: `kext` x
@@ -186,9 +187,22 @@ RSpec.describe Timed::Command do
         EOS
       end
 
+      it "names a skipped cask given as a path by that path, made absolute, in the command to run it later" do
+        dir = mktmpdir
+        (dir/"foo.rb").write(cask_source("foo", "2.0"))
+        Dir.chdir(dir) do
+          reasons = [Timed::Casks::Reason.new(kind: :sudo, message: "`pkg` requires sudo")]
+          skipped = [Timed::Casks::Entry.new(cask: Cask::CaskLoader.load("foo.rb"), reasons:)]
+          plan = Timed::Casks::Plan.new(first: [], last: [], skipped:)
+          path = Regexp.escape((dir/"foo.rb").realpath.to_s)
+          expect { described_class.show_casks("install", plan, named: %w[foo.rb]) }
+            .to output(/^Install it later with `brew install --cask #{path}`\.$/).to_stderr
+        end
+      end
+
       it "prints nothing without casks" do
-        expect { described_class.show_casks("upgrade", Timed::Casks::Plan.new(first: [], last: [], skipped: [])) }
-          .not_to output.to_stdout
+        plan = Timed::Casks::Plan.new(first: [], last: [], skipped: [])
+        expect { described_class.show_casks("upgrade", plan, named: []) }.not_to output.to_stdout
       end
     end
 

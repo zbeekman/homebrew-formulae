@@ -713,6 +713,18 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([%w[install --cask --yes iterm2]])
     end
 
+    it "names a cask skipped without a terminal that was given as a file by that file in the command to " \
+       "install it later" do
+      allow(Timed::Casks).to receive(:terminal?).and_return(false)
+      dir = mktmpdir
+      (dir/"firefox.rb").write(cask_source("firefox", "2.0", 'pkg "Firefox.pkg"'))
+      path = Regexp.escape((dir/"firefox.rb").realpath.to_s)
+      Dir.chdir(dir) do
+        expect { run_command("--dry-run", "--cask", "firefox.rb") }
+          .to output(/^Install it later with `brew install --cask #{path}`\.$/).to_stderr
+      end
+    end
+
     it "gives the cask classifier `--force`" do
       stub_cask("firefox", nil)
       expect(Timed::Command).to receive(:cask_plan).with(anything, hash_including(force: true)).and_call_original
