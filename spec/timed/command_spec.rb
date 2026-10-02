@@ -264,6 +264,52 @@ RSpec.describe Timed::Command do
       end)
     end
 
+    # A core formula `foo`, also loadable as `foo-alias`, and a tap formula
+    # `user/tap/foo`, neither installed.
+    def stub_two_foos
+      allow(Formulary).to receive(:loader_for).and_call_original
+      core = formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-1.0.tgz"
+      end
+      stub_formula_loader(core)
+      stub_formula_loader(core, "foo-alias")
+      stub_formula_loader(formula("foo", tap: Tap.fetch("user", "tap")) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-2.0.tgz"
+      end, "user/tap/foo")
+    end
+
+    describe "matching casks' needs with the run" do
+      it "matches a formula a cask needs by its full name, after aliases, and by name only if it can't be " \
+         "loaded, so a formula of the same name in another tap doesn't count" do
+        stub_two_foos
+        casks = { "tap"     => stub_cask("tap-app", nil, stanzas: 'depends_on formula: "user/tap/foo"'),
+                  "alias"   => stub_cask("alias-app", nil, stanzas: 'depends_on formula: "foo-alias"'),
+                  "missing" => stub_cask("gone-app", nil, stanzas: 'depends_on formula: "gone/tap/foo"') }
+        placed = [%w[foo], %w[user/tap/foo]].to_h do |in_run|
+          result = described_class.cask_plan({ install: casks.values }, in_run:, facts: Timed::Casks::DiskFacts.new,
+                                                                        tty: -> { true })
+          [in_run, result.last.to_h { |entry| [entry.cask.token, entry.reasons.map(&:message)] }]
+        end
+        expect(placed).to eq(
+          %w[foo]          => { "alias-app" => ["depends on `foo`, which is in this run"],
+                                "gone-app"  => ["depends on `foo`, which is in this run"] },
+          %w[user/tap/foo] => { "tap-app"  => ["depends on `user/tap/foo`, which is in this run"],
+                                "gone-app" => ["depends on `user/tap/foo`, which is in this run"] },
+        )
+      end
+
+      it "holds back a cask only for the formula it needs that didn't install, by full name" do
+        stub_two_foos
+        casks = [stub_cask("tap-app", nil, stanzas: 'depends_on formula: "user/tap/foo"')]
+        kept = [%w[foo], %w[user/tap/foo]].to_h do |unfinished|
+          [unfinished, described_class.last_casks("install", casks, named: [], flags: [], unfinished:)]
+        end
+        expect(kept).to eq(%w[foo] => %w[tap-app], %w[user/tap/foo] => [])
+      end
+    end
+
     describe ".cask_plan's needs" do
       it "puts a cask whose download needs a formula in the run to unpack last, and holds it back when that " \
          "formula didn't install and isn't installed", :aggregate_failures do
@@ -321,8 +367,8 @@ RSpec.describe Timed::Command do
         stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app", "bad-app"]')
         loop_a = stub_cask("loop-a", nil, stanzas: 'depends_on cask: "loop-b"')
         needs = described_class.cask_needs(loop_a)
-        expect([needs.formulae, needs.casks.map { |cask| cask.is_a?(Cask::Cask) ? cask.token : cask }])
-          .to eq([[], %w[loop-b gone-app bad-app]])
+        expect([needs.formulae, needs.casks.map(&:token), needs.unresolved])
+          .to eq([[], %w[loop-b], %w[gone-app bad-app]])
       end
 
       it "adds what brew needs to unpack the download, by its container type, its cached file or its " \

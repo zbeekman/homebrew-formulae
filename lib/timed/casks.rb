@@ -146,9 +146,10 @@ module Timed
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
     # installed cask without a successor and dispatches its `zap` stanza.
     #
-    # `needs` maps a token to everything the cask needs, e.g. through its
-    # formulae's dependencies, which brew may install before it; without an
-    # entry, only its own `depends_on` counts.
+    # `needs` maps a token to what the cask needs that is in the run, e.g.
+    # through its formulae's dependencies, which brew may install before it,
+    # as the run names it (the caller matches them by full name); without an
+    # entry, its own `depends_on` counts, matched by name.
     #
     # `missing` maps a token to the casks brew's cask installer would install
     # before the cask as they aren't installed: what their installs need (sudo,

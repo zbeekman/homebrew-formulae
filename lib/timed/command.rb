@@ -379,8 +379,10 @@ module Timed
     # Sorts the casks of a run, given by the verb brew acts on each with, into
     # those to run before the formulae, after them and not at all, by what is
     # on disk and whether sudo can prompt. `in_run` names the formulae in the
-    # run; the casks are in it too. Each cask counts what brew may install
-    # before it (see `cask_needs`), and what installing its missing cask
+    # run, by full name; the casks are in it too. Each cask counts what brew
+    # may install before it that is in the run (see `cask_needs` and
+    # `Needs#among`), handed to `Casks.plan` by full name, and what installing
+    # its missing cask
     # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
     # which brew installs only formula dependencies, those of skipped casks
     # included. `zap` and `force` are the wrapped command's.
@@ -397,10 +399,8 @@ module Timed
           installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.token, old] }
         end.to_h
         all_needs = list.to_h { |cask| [cask.token, cask_needs(cask)] }
-        needs = all_needs.transform_values { |needed| skip_cask_deps ? needed.formulae : needed.names }
-        missing = all_needs.transform_values do |needed|
-          skip_cask_deps ? [] : needed.casks.grep(Cask::Cask).reject(&:installed?)
-        end
+        needs = all_needs.transform_values { |needed| needed.among(in_run, casks: !skip_cask_deps) }
+        missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
         Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
@@ -435,11 +435,22 @@ module Timed
     # casks, by name if they can't be loaded (e.g. from a tap that isn't
     # trusted).
     class Needs < T::Struct
+      # Formulae by full name, so aliases and renames are resolved.
       const :formulae, T::Array[String], default: []
-      const :casks, T::Array[T.any(Cask::Cask, String)], default: []
+      const :casks, T::Array[Cask::Cask], default: []
+      # Formulae and casks that can't be loaded, as named.
+      const :unresolved, T::Array[String], default: []
 
-      sig { returns(T::Array[String]) }
-      def names = formulae + casks.map { |cask| cask.is_a?(Cask::Cask) ? cask.full_name : cask }
+      # Those of `names` (full names, e.g. of formulae in the run) this needs:
+      # by full name, or, for what can't be loaded, by name alone, which may
+      # match another tap's formula of that name, to be safe. Only formulae
+      # without `casks`.
+      sig { params(names: T::Array[String], casks: T::Boolean).returns(T::Array[String]) }
+      def among(names, casks: true)
+        full = formulae + (casks ? self.casks.map(&:full_name) : [])
+        loose = unresolved.map { |name| ::Utils.name_from_full_name(name) }
+        names.select { |name| full.include?(name) || loose.include?(::Utils.name_from_full_name(name)) }
+      end
     end
 
     # What brew's cask installer may install before `cask`
@@ -451,7 +462,8 @@ module Timed
     sig { params(cask: Cask::Cask).returns(Needs) }
     def self.cask_needs(cask)
       formulae = T.let([], T::Array[String])
-      casks = T.let([], T::Array[T.any(Cask::Cask, String)])
+      casks = T.let([], T::Array[Cask::Cask])
+      unresolved = T.let([], T::Array[String])
       seen = [cask.token]
       pending = cask.depends_on.formula.map { |name| [:formula, name] } +
                 cask.depends_on.cask.map { |name| [:cask, name] } + container_needs(cask)
@@ -465,7 +477,7 @@ module Timed
             pending.concat(formula.deps.reject { |dep| dep.build? || dep.test? }.map { |dep| [:formula, dep.name] })
             pending.concat(formula.requirements.filter_map(&:cask).map { |token| [:cask, token] })
           rescue FormulaUnavailableError, Homebrew::UntrustedTapError
-            formulae << name unless formulae.include?(name)
+            unresolved << name unless unresolved.include?(name)
           end
         else
           token = Utils.name_from_full_name(name)
@@ -479,11 +491,11 @@ module Timed
                            dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] } +
                            container_needs(dependency))
           rescue Cask::CaskError, Homebrew::UntrustedTapError
-            casks << name
+            unresolved << name
           end
         end
       end
-      Needs.new(formulae:, casks:)
+      Needs.new(formulae:, casks:, unresolved:)
     end
 
     # What brew needs to unpack `cask`'s download (`UnpackStrategy#dependencies`,
@@ -525,9 +537,7 @@ module Timed
              unfinished: T::Array[String]).returns(T::Array[String])
     }
     def self.last_casks(verb, casks, named:, flags:, unfinished:)
-      # Matched by name, as casks may name a formula without its tap, and
-      # loaded by full name, so another tap's formula of the same name isn't.
-      unfinished = unfinished.to_h { |name| [Utils.name_from_full_name(name), name] }
+      # Loaded by full name, so another tap's formula of the same name isn't.
       missing = lambda do |name|
         formula = Formulary.factory(name)
         !(formula.any_version_installed? && formula.optlinked?)
@@ -536,8 +546,7 @@ module Timed
       end
       needs = casks.to_h do |cask|
         # Brew installs formula dependencies even with `--skip-cask-deps`.
-        needed = cask_needs(cask).formulae.map { |name| Utils.name_from_full_name(name) }.uniq & unfinished.keys
-        [cask, needed.select { |name| missing.call(unfinished.fetch(name)) }]
+        [cask, cask_needs(cask).among(unfinished, casks: false).select { |name| missing.call(name) }]
       end
       blocked = needs.select { |_, needed| needed.any? }
       if blocked.any?
