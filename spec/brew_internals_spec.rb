@@ -420,6 +420,25 @@ RSpec.describe "brew internals", type: :system do
               untrusted&.exclude?("@cask ="), zap.include?("@cask.artifacts.grep(Artifact::Zap)")])
         .to eq([true, true, true])
     end
+
+    it "uninstalls instead the artifacts the untrusted cask recorded, replayed as `Timed::Command.recorded_cask` " \
+       "replays them" do
+      source = brew_source("cask/installer.rb")
+      untrusted = source[/^    def load_installed_caskfile!.*?^    end$/m].to_s[/trusted\?.*?^\s+return$/m].to_s
+      replay = ["dsl = DSL.new(@cask)",
+                "default_uninstall_artifact_keys = DSL::ACTIVATABLE_ARTIFACT_CLASSES.filter_map do |klass|",
+                "next if [Artifact::Uninstall, Artifact::Zap].include?(klass)",
+                "next if !klass.method_defined?(:uninstall_phase) && !klass.method_defined?(:post_uninstall_phase)",
+                "Array(tab.uninstall_artifacts).each do |artifact_entry|",
+                "next unless default_uninstall_artifact_keys.include?(dsl_key)",
+                "args = Array(raw_args)", "if args.last.is_a?(Hash)", "*args[...-1],",
+                "**T.cast(args.last, T::Hash[T.any(Symbol, String), T.anything]).transform_keys(&:to_sym),",
+                "dsl.public_send(dsl_key, *args)",
+                "@default_uninstall_artifacts ||= dsl.artifacts"]
+      expect([replay.map { |line| untrusted.lines.map(&:strip).include?(line) },
+              source.match?(/def artifacts\n\s+@default_uninstall_artifacts \|\| @cask\.artifacts\n/)])
+        .to eq([replay.map { true }, true])
+    end
   end
 
   describe "`brew upgrade` of a cask" do

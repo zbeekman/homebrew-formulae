@@ -110,8 +110,9 @@ The uninstall side is read from the cask as installed, as Homebrew loads it
 to reinstall it. With tap trust on (the default unless
 `$HOMEBREW_NO_REQUIRE_TAP_TRUST` is set), Homebrew doesn't load an installed
 Ruby caskfile for a cask that isn't trusted: it uninstalls the artifacts the
-cask recorded and zaps with the new cask's `zap` stanza instead, so the
-uninstall side is read from the new cask then.
+cask recorded when it was installed and zaps with the new cask's `zap` stanza
+instead, so the uninstall side is read from those, and, to be safe, from the
+new cask's `uninstall` stanza too, which Homebrew doesn't run then.
 
 A failed build stops `brew reinstall` before it reinstalls any cask it was
 given. The casks of the first call, before the formulae, have been reinstalled

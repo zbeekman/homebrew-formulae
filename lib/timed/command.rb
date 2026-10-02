@@ -314,19 +314,65 @@ module Timed
     # nil if that fails too or `cask` isn't installed. To `reinstall`, with tap
     # trust on, brew loads a Ruby caskfile only for a trusted cask, and
     # otherwise uninstalls the artifacts the cask recorded and zaps with
-    # `cask`'s `zap` stanza (`Installer#load_installed_caskfile!`): nil then,
-    # so `cask` stands in.
+    # `cask`'s `zap` stanza (`Installer#load_installed_caskfile!`): see
+    # `recorded_cask` then.
     sig { params(cask: Cask::Cask, reinstall: T::Boolean).returns(T.nilable(Cask::Cask)) }
     def self.installed_cask(cask, reinstall: false)
       return unless (caskfile = cask.installed_caskfile)
-      return if reinstall && caskfile.extname == ".rb" && Homebrew::EnvConfig.require_tap_trust? &&
-                (tap = Cask::CaskLoader.load_installed_tab(cask).tap || cask.tap) &&
-                !Homebrew::Trust.trusted?(:cask, "#{tap.name}/#{cask.token}")
+
+      tab = Cask::CaskLoader.load_installed_tab(cask)
+      if reinstall && caskfile.extname == ".rb" && Homebrew::EnvConfig.require_tap_trust? &&
+         (tap = tab.tap || cask.tap) && !Homebrew::Trust.trusted?(:cask, "#{tap.name}/#{cask.token}")
+        begin
+          return recorded_cask(cask, tab)
+        rescue
+          # `cask` stands in.
+          return
+        end
+      end
 
       begin
         Cask::CaskLoader.load_from_installed_caskfile(caskfile)
       rescue Cask::CaskInvalidError, Cask::CaskUnavailableError, MethodDeprecatedError
         Cask::CaskLoader.recover_from_installed_caskfile(caskfile, fallback_cask: cask)
+      end
+    end
+
+    # `cask` with the uninstall artifacts its `tab` recorded, as brew replays
+    # them to uninstall a cask it won't load (`Installer#load_installed_caskfile!`
+    # without its migration and warning): only the artifact kinds that have an
+    # uninstall phase, other than `uninstall` and `zap`. Brew never runs the
+    # new cask's `uninstall` stanza then, but this keeps it, to be safe, and its
+    # `zap`, which brew does run for `--zap`.
+    sig { params(cask: Cask::Cask, tab: Cask::Tab).returns(Cask::Cask) }
+    def self.recorded_cask(cask, tab)
+      keys = Cask::DSL::ACTIVATABLE_ARTIFACT_CLASSES.filter_map do |klass|
+        next if [Cask::Artifact::Uninstall, Cask::Artifact::Zap].include?(klass)
+        next if !klass.method_defined?(:uninstall_phase) && !klass.method_defined?(:post_uninstall_phase)
+
+        klass.dsl_key
+      end
+      entries = Array(tab.uninstall_artifacts).grep(Hash)
+      kept = cask.artifacts.grep(Cask::Artifact::AbstractUninstall)
+      version = cask.version.to_s
+      Cask::Cask.new(cask.token, tap: cask.tap, config: cask.config) do
+        T.bind(self, Cask::DSL)
+        self.version version
+        entries.each do |entry|
+          entry.each do |raw_key, raw_args|
+            dsl_key = raw_key.to_sym
+            next unless keys.include?(dsl_key)
+
+            args = Array(raw_args)
+            last = args.last
+            if last.is_a?(Hash)
+              public_send(dsl_key, *args[...-1], **last.transform_keys(&:to_sym))
+            else
+              public_send(dsl_key, *args)
+            end
+          end
+        end
+        kept.each { |artifact| artifacts.add(artifact) }
       end
     end
 

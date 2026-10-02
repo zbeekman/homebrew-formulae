@@ -91,7 +91,35 @@ RSpec.describe Timed::Command do
           allow(Homebrew::Trust).to receive(:trusted?).with(:cask, "user/tap/foo").and_return(trusted)
           [[trust_on, trusted, reinstall], described_class.installed_cask(cask, reinstall:)&.version]
         end
-        expect(loaded).to eq(runs.to_h { |run| [run, (run == [true, false, true]) ? nil : "1.0"] })
+        # The cask brew uninstalls then is the new cask with the artifacts its
+        # install recorded.
+        expect(loaded).to eq(runs.to_h { |run| [run, (run == [true, false, true]) ? "2.0" : "1.0"] })
+      end
+
+      it "gives a reinstall of a cask that isn't trusted the artifacts its install recorded, with the new " \
+         "cask's `uninstall` and `zap`, as brew uninstalls the recorded ones and zaps with the new cask's",
+         :aggregate_failures do
+        allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(true)
+        allow(Homebrew::Trust).to receive(:trusted?).and_return(false)
+        dir = mktmpdir
+        dir.chmod(0555)
+        cask = stub_cask("foo", stanzas:           "uninstall quit: \"com.new\"\nzap trash: \"~/x\"",
+                                installed_stanzas: 'pkg "Old.pkg"')
+        allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
+        recorded = [{ "app" => ["Old.app", { "target" => "#{dir}/Old.app" }] },
+                    { "uninstall" => [{ "pkgutil" => "com.old" }] }]
+        (HOMEBREW_PREFIX/"Caskroom/foo/.metadata/INSTALL_RECEIPT.json")
+          .write(JSON.generate("uninstall_artifacts" => recorded))
+        installed = described_class.installed_cask(cask, reinstall: true)
+        expect(installed&.artifacts&.map { |artifact| [artifact.class.dsl_key, artifact.to_args] })
+          .to contain_exactly([:app, ["Old.app", { target: "#{dir}/Old.app" }]], [:uninstall, [{ quit: "com.new" }]],
+                              [:zap, [{ trash: "~/x" }]])
+        plan = described_class.cask_plan({ reinstall: [cask] }, in_run: [], facts: Timed::Casks::DiskFacts.new,
+                                                                tty: -> { true })
+        expect(plan.last.flat_map { |entry| entry.reasons.map(&:message) })
+          .to include("`app` needs `#{dir}` writable", "`uninstall quit` may raise a dialog")
+      ensure
+        dir&.chmod(0755)
       end
 
       it "rebuilds the installed version from the new cask when brew can't load its caskfile, as brew does" do
@@ -139,8 +167,8 @@ RSpec.describe Timed::Command do
         target&.chmod(0755)
       end
 
-      it "judges a reinstall of a cask from a tap that isn't trusted on the new cask, but an upgrade on the " \
-         "installed one, as brew does" do
+      it "judges a reinstall of a cask from a tap that isn't trusted on what its install recorded, not its " \
+         "installed caskfile, but an upgrade on the installed one, as brew does" do
         allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(true)
         allow(Homebrew::Trust).to receive(:trusted?).and_return(false)
         placed = [:reinstall, :upgrade].to_h do |verb|
