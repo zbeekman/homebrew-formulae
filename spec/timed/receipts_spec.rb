@@ -112,6 +112,23 @@ RSpec.describe Timed::Receipts do
                             "no receipt" => false)
     end
 
+    it "reads the build times of the receipt in `opt`, coping with none or one brew can't read" do
+      times = { "verb" => "install", "future" => 1 }
+      read = {
+        "none"       => nil,
+        "unstamped"  => -> { install_foo(0) },
+        "stamped"    => -> { described_class.stamp(install_foo(0)/AbstractTab::FILENAME, times, exact: true) },
+        "unreadable" => -> { (install_foo(0)/AbstractTab::FILENAME).write("{") },
+        "not a hash" => -> { (install_foo(0)/AbstractTab::FILENAME).write("[]") },
+      }.to_h do |name, setup|
+        FileUtils.rm_rf [HOMEBREW_CELLAR/"foo", HOMEBREW_PREFIX/"opt/foo"]
+        setup&.call
+        [name, described_class.build_times(foo)]
+      end
+      expect(read).to eq("none" => nil, "unstamped" => nil, "stamped" => times, "unreadable" => nil,
+                         "not a hash" => nil)
+    end
+
     it "is false for the receipt it had before, even within the same second" do
       install_foo(0)
       before = described_class.receipt_stat(foo)

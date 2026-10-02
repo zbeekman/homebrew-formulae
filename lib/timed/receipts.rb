@@ -19,13 +19,26 @@ module Timed
     # The fields of a logged build that go into a receipt.
     FIELDS = %w[verb started install_seconds build_seconds wall_seconds].freeze
 
-    # Sets `build_times` in `receipt` from `build`, a build-log entry. The
-    # rest of the file is kept as is, written as `Tab#write` writes it.
-    sig { params(receipt: Pathname, build: BuildLog::Build).void }
-    def self.stamp(receipt, build)
+    # Sets `build_times` in `receipt` from `build`, a build-log entry, or to
+    # `build` as it is if `exact` (build times read from a receipt). The rest
+    # of the file is kept as is, written as `Tab#write` writes it.
+    sig { params(receipt: Pathname, build: BuildLog::Build, exact: T::Boolean).void }
+    def self.stamp(receipt, build, exact: false)
       data = JSON.parse(receipt.read)
-      data[KEY] = build.slice(*FIELDS).compact
+      data[KEY] = exact ? build : build.slice(*FIELDS).compact
       receipt.atomic_write(JSON.pretty_generate(data))
+    end
+
+    # The build times in `formula`'s receipt, nil without them.
+    sig { params(formula: Formula).returns(T.nilable(BuildLog::Build)) }
+    def self.build_times(formula)
+      path = receipt(formula)
+      return unless path.file?
+
+      data = JSON.parse(path.read)
+      data[KEY] if data.is_a?(Hash)
+    rescue JSON::ParserError
+      nil
     end
 
     # The receipt of `formula`'s keg in `opt`. That is the keg `brew

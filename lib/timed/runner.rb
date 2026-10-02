@@ -33,32 +33,38 @@ module Timed
     # needs one that failed or was skipped is skipped and logged as such.
     # With `stops_at_failure` (brew stops a call at a failed build), the
     # formulae of a failed call that brew never started are logged as
-    # skipped, not failed, with a warning.
+    # skipped, not failed, with a warning. With `dependencies_only` (`brew
+    # install --only-dependencies`), the calls install only what the formulae
+    # need, so `succeeded` checks that, and the formulae are never logged for
+    # themselves, failed or skipped, only what brew's output shows it did,
+    # which includes one brew installs as another one's dependency.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
     # raised, even if brew finished that batch.
     sig {
       params(
-        batches:          T::Array[Planner::Batch],
-        verb:             String,
-        flags:            T::Array[String],
-        formulae:         T::Hash[String, Formula],
-        deps:             T::Hash[String, T::Array[String]],
-        pours:            T::Array[String],
-        pour_flags:       T.nilable(T::Array[String]),
-        stamp:            T::Boolean,
-        succeeded:        T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)),
-        stops_at_failure: T::Boolean,
-        arguments:        T::Hash[String, String],
-        database:         Pathname,
-        logs:             Pathname,
-        clock:            T.proc.returns(Float),
-        now:              T.proc.returns(Time),
+        batches:           T::Array[Planner::Batch],
+        verb:              String,
+        flags:             T::Array[String],
+        formulae:          T::Hash[String, Formula],
+        deps:              T::Hash[String, T::Array[String]],
+        pours:             T::Array[String],
+        pour_flags:        T.nilable(T::Array[String]),
+        stamp:             T::Boolean,
+        succeeded:         T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)),
+        stops_at_failure:  T::Boolean,
+        dependencies_only: T::Boolean,
+        arguments:         T::Hash[String, String],
+        database:          Pathname,
+        logs:              Pathname,
+        clock:             T.proc.returns(Float),
+        now:               T.proc.returns(Time),
       ).void
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
                  succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
-                 arguments: {}, database: BuildLog.default_path, logs: HOMEBREW_LOGS/"timed",
+                 dependencies_only: false, arguments: {}, database: BuildLog.default_path,
+                 logs: HOMEBREW_LOGS/"timed",
                  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
       # Runs started in the same second are separate processes.
       prefix = "#{now.call.strftime("%Y%m%d-%H%M%S")}-#{Process.pid}"
@@ -81,13 +87,16 @@ module Timed
 
           started = now.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
+          # With `dependencies_only`, the formulae whose dependencies brew
+          # finished, which aren't logged for themselves.
+          finished = T.let([], T::Array[String])
           # Calls in a batch are separate processes, so brew doesn't know
           # what failed in an earlier one.
           failed_in_batch = T.let([], T::Array[String])
           # Whether brew installed each formula in its call.
           done = T.let({}, T::Hash[String, T::Boolean])
           skipped_before = skipped.length
-          skip, names = skips(batch.names, failed + skipped, deps, verb)
+          skip, names = skips(batch.names, failed + skipped, deps, verb, dependencies_only)
           skipped.concat(skip)
 
           stopped = T.let(false, T::Boolean)
@@ -117,7 +126,7 @@ module Timed
                   break
                 end
 
-                skip, kept = skips(call_names, failed + failed_in_batch + skipped, deps, verb)
+                skip, kept = skips(call_names, failed + failed_in_batch + skipped, deps, verb, dependencies_only)
                 skipped.concat(skip)
                 names -= skip
                 next if kept.empty?
@@ -149,14 +158,19 @@ module Timed
             Homebrew.failed = true unless success
             builds = parse(lines, started:)
             names.each do |name|
-              short = Utils.name_from_full_name(name)
-              build = builds.delete(short) || {}
               formula = formulae.fetch(name)
               # A formula whose call Ctrl-C stopped before it ran wasn't
               # checked: checked now, from the batch's start, though a check
               # that compares with how it was before the call can't tell. Only
               # what brew finished in the stopped batch is logged anyway.
               installed = done.fetch(name) { succeeded.call(formula).call(started) }
+              if dependencies_only
+                (installed ? finished : failed) << name
+                next
+              end
+
+              short = Utils.name_from_full_name(name)
+              build = builds.delete(short) || {}
               if installed && DONE.include?(build["status"])
                 builds[short] = build
               elsif !installed
@@ -170,7 +184,7 @@ module Timed
           end
           # By short name, as the log keys formulae; what brew did with a
           # formula it tried anyway is kept instead.
-          skipped.drop(skipped_before).each do |name|
+          (dependencies_only ? [] : skipped.drop(skipped_before)).each do |name|
             entries[Utils.name_from_full_name(name)] ||= {
               "status" => "skipped", "version" => formulae.fetch(name).pkg_version.to_s, "started" => started.iso8601
             }
@@ -194,20 +208,24 @@ module Timed
           end
           next unless stopped
 
-          not_finished = batch.names.reject { |name| entries.key?(Utils.name_from_full_name(name)) } +
-                         batches.drop(index).flat_map(&:names)
+          not_finished = batch.names.reject do |name|
+            finished.include?(name) || entries.key?(Utils.name_from_full_name(name))
+          end + batches.drop(index).flat_map(&:names)
           break
         end
       ensure
         Signal.trap(:INT, old_trap)
       end
       if not_finished
-        opoo "Interrupted; not finished or logged: #{not_finished.join(" ")}" if not_finished.any?
+        if not_finished.any?
+          opoo "Interrupted; not finished or logged: #{"the dependencies of " if dependencies_only}" \
+               "#{not_finished.join(" ")}"
+        end
       else
         opoo "`brew #{verb}` stopped early; not run: #{not_run.join(" ")}" if not_run.any?
         if failed.any?
-          ofail "#{Utils.pluralize("formula", failed.length, include_count: true)} did not #{verb}: " \
-                "#{failed.join(" ")}"
+          count = Utils.pluralize("formula", failed.length, include_count: true)
+          ofail "#{dependencies_only ? "The dependencies of #{count}" : count} did not #{verb}: #{failed.join(" ")}"
         end
       end
       # Even if brew finished anyway, so that whatever runs this stops too.
@@ -215,18 +233,19 @@ module Timed
     end
 
     # `candidates` split into those `deps` says need one of `blocked`, which
-    # are skipped with a warning, and the rest.
+    # are skipped with a warning, and the rest. With `dependencies_only`, what
+    # failed for those was installing what they need.
     sig {
       params(candidates: T::Array[String], blocked: T::Array[String], deps: T::Hash[String, T::Array[String]],
-             verb: String).returns([T::Array[String], T::Array[String]])
+             verb: String, dependencies_only: T::Boolean).returns([T::Array[String], T::Array[String]])
     }
-    def self.skips(candidates, blocked, deps, verb)
+    def self.skips(candidates, blocked, deps, verb, dependencies_only)
       candidates.partition do |name|
         missing = deps.fetch(name, []) & blocked
         next false if missing.empty?
 
-        opoo "Skipping #{name}: #{Utils.pluralize("dependency", missing.length)} #{missing.join(", ")} " \
-             "did not #{verb}"
+        whose = dependencies_only ? "the dependencies of" : Utils.pluralize("dependency", missing.length)
+        opoo "Skipping #{name}: #{whose} #{missing.join(", ")} did not #{verb}"
         true
       end
     end

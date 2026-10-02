@@ -11,10 +11,11 @@
 ## Description
 
 Show and annotate the log of how long formulae took to build from source or to
-pour a bottle. [`brew upgrade-timed`](upgrade-timed.md) and
-[`brew reinstall-timed`](reinstall-timed.md) log each formula they upgrade or
-reinstall there, and use it to order the formulae they run by measured times
-instead of guesses.
+pour a bottle. [`brew install-timed`](install-timed.md),
+[`brew upgrade-timed`](upgrade-timed.md) and
+[`brew reinstall-timed`](reinstall-timed.md) log each formula they install,
+upgrade or reinstall there, and use it to order the formulae they run by
+measured times instead of guesses.
 
 The log is `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME` (`~/.homebrew` by
 default, `$XDG_CONFIG_HOME/homebrew` when that is set). It is written with mode
@@ -74,8 +75,8 @@ formula is renamed; this puts it back. Casks are never stamped.
 
 `restamp` is an explicit request, so it stamps receipts even when
 `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set; that variable, like
-`--no-stamp-receipts`, only stops `brew upgrade-timed` and
-`brew reinstall-timed` from stamping the kegs they install.
+`--no-stamp-receipts`, only stops `brew install-timed`, `brew upgrade-timed`
+and `brew reinstall-timed` from stamping the kegs they install.
 
 ## Options
 
