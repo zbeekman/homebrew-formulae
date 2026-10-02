@@ -391,7 +391,7 @@ module Timed
 
         seen << token
         [name, *cask_needs(Cask::CaskLoader.load(name, warn: false), seen:)]
-      rescue Cask::CaskUnavailableError, Homebrew::UntrustedTapError
+      rescue Cask::CaskError, Homebrew::UntrustedTapError
         [name]
       end
       (formulae + casks).uniq
@@ -410,7 +410,9 @@ module Timed
              unfinished: T::Array[String]).returns(T::Array[String])
     }
     def self.last_casks(verb, casks, named:, flags:, unfinished:)
-      unfinished = unfinished.map { |name| Utils.name_from_full_name(name) }
+      # Matched by name, as casks may name a formula without its tap, and
+      # loaded by full name, so another tap's formula of the same name isn't.
+      unfinished = unfinished.to_h { |name| [Utils.name_from_full_name(name), name] }
       missing = lambda do |name|
         formula = Formulary.factory(name)
         !(formula.any_version_installed? && formula.optlinked?)
@@ -418,8 +420,8 @@ module Timed
         true
       end
       needs = casks.to_h do |cask|
-        needed = cask_needs(cask).map { |name| Utils.name_from_full_name(name) }.uniq & unfinished
-        [cask, needed.select { |name| missing.call(name) }]
+        needed = cask_needs(cask).map { |name| Utils.name_from_full_name(name) }.uniq & unfinished.keys
+        [cask, needed.select { |name| missing.call(unfinished.fetch(name)) }]
       end
       blocked = needs.select { |_, needed| needed.any? }
       if blocked.any?

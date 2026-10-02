@@ -242,10 +242,13 @@ RSpec.describe Timed::Command do
     end
 
     describe ".cask_needs" do
-      it "follows casks through a cycle once and takes one it can't load by its name" do
-        stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app"]')
+      it "follows casks through a cycle once and takes one it can't load, missing or invalid, by its name" do
+        allow(Cask::CaskLoader).to receive(:load).and_call_original
+        allow(Cask::CaskLoader).to receive(:load).with("bad-app", any_args)
+                                                 .and_raise(Cask::CaskInvalidError.new("bad-app", "nope"))
+        stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app", "bad-app"]')
         loop_a = stub_cask("loop-a", nil, stanzas: 'depends_on cask: "loop-b"')
-        expect(described_class.cask_needs(loop_a)).to eq(%w[loop-b gone-app])
+        expect(described_class.cask_needs(loop_a)).to eq(%w[loop-b gone-app bad-app])
       end
     end
 
