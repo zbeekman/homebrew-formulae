@@ -618,7 +618,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         argv.last != "firefox"
       end
       expect { run_command("--yes", "cmake", "firefox", "iterm2") }
-        .to output("Error: `brew upgrade --cask firefox` failed.\n").to_stderr
+        .to output("Error: `brew upgrade --cask --yes firefox` failed.\n").to_stderr
       expect(brew_calls.drop(1).map(&:last)).to eq(%w[firefox cmake iterm2])
       expect(Homebrew).to be_failed
     end

@@ -113,10 +113,12 @@ Ruby caskfile for a cask that isn't trusted: it uninstalls the artifacts the
 cask recorded and zaps with the new cask's `zap` stanza instead, so the
 uninstall side is read from the new cask then.
 
-A failed build stops `brew reinstall` before it reinstalls any cask, so the
-last casks don't run then: a warning names them, with the command to reinstall
-them later. After any other failure Homebrew carries on to the casks, and so
-does the command, as it does after a failed build of a dependent that Homebrew
+A failed build stops `brew reinstall` before it reinstalls any cask it was
+given. The casks of the first call, before the formulae, have been reinstalled
+by then; those of the last call, after the formulae, don't run: a warning
+names them, with the command to reinstall them later. After any other failure
+Homebrew carries on to the casks, and so does the command, as it does after a
+failed build of a dependent that Homebrew
 rebuilds or upgrades alongside, or a failed post-install step. Homebrew prints
 the installation times as it finishes, if it installed anything, so then it
 didn't stop. Otherwise the command takes brew as stopped when it never started

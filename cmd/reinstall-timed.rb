@@ -146,7 +146,7 @@ module Homebrew
         # before its casks too.
         if outcome&.stopped_early && last.any?
           opoo <<~EOS
-            `brew reinstall` stopped early, so the last #{Utils.pluralize("cask", last.length)} didn't run: #{Timed::Command.cask_arguments(args.named, last).join(" ")}
+            `brew reinstall` stopped early, so the #{Utils.pluralize("cask", last.length)} to reinstall after the formulae didn't run: #{Timed::Command.cask_arguments(args.named, last).join(" ")}
             #{Timed::Command.later("reinstall", last, named: args.named, flags: forwarded.cask)}
           EOS
         else

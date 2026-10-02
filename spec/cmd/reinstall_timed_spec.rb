@@ -388,7 +388,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       it "doesn't reinstall the last casks after a failed build, which ends `brew reinstall`", :aggregate_failures do
         allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake], stopped_early: true))
         expect { run_command("--yes", "--zap", "cmake", "firefox", "iterm2") }.to output(<<~EOS).to_stderr
-          Warning: `brew reinstall` stopped early, so the last cask didn't run: iterm2
+          Warning: `brew reinstall` stopped early, so the cask to reinstall after the formulae didn't run: iterm2
           Reinstall it later with `brew reinstall --cask --zap iterm2`.
         EOS
         expect(brew_calls.map(&:last)).to eq(%w[firefox])

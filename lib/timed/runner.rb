@@ -324,14 +324,15 @@ module Timed
       oh1 "Running the #{label} #{Utils.pluralize("cask", casks.length)}: #{casks.join(" ")}"
       interrupts = T.let([], T::Array[Integer])
       old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
+      argv = [verb, "--cask", "--yes", *flags].uniq + casks
       begin
-        success = brew.call({}, [verb, "--cask", "--yes", *flags].uniq + casks)
+        success = brew.call({}, argv)
       ensure
         Signal.trap(:INT, old_trap)
       end
       raise Interrupt if interrupts.any?
 
-      ofail "`#{Shellwords.join(["brew", verb, "--cask", *casks])}` failed." unless success
+      ofail "`#{Shellwords.join(["brew", *argv])}` failed." unless success
     end
 
     # Runs `brew` with `argv` from the home directory (source builds that
