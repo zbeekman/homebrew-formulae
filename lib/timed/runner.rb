@@ -18,6 +18,15 @@ module Timed
     # What `run` logs for a formula brew installed.
     DONE = %w[built poured].freeze
 
+    # What came of `run`: the formulae (by full name) brew didn't install, as
+    # they failed, were skipped or never ran, and whether, with
+    # `stops_at_failure`, a call stopped early, which ends the whole brew
+    # command.
+    class Outcome < T::Struct
+      const :unfinished, T::Array[String]
+      const :stopped_early, T::Boolean
+    end
+
     # Runs each of `batches` of `formulae` (by full name) with
     # `brew <verb> --formula --yes --display-times <flags> <names>`, each name
     # given as its argument in `arguments` if it has one, keeping
@@ -46,9 +55,7 @@ module Timed
     # which includes one brew installs as another one's dependency.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
-    # raised, even if brew finished that batch. Returns whether, with
-    # `stops_at_failure`, a call stopped early, which ends the whole brew
-    # command.
+    # raised, even if brew finished that batch.
     sig {
       params(
         batches:           T::Array[Planner::Batch],
@@ -67,7 +74,7 @@ module Timed
         logs:              Pathname,
         clock:             T.proc.returns(Float),
         now:               T.proc.returns(Time),
-      ).returns(T::Boolean)
+      ).returns(Outcome)
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
                  succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
@@ -252,7 +259,7 @@ module Timed
       # Even if brew finished anyway, so that whatever runs this stops too.
       raise Interrupt if interrupts.any?
 
-      stopped_early
+      Outcome.new(unfinished: failed | skipped, stopped_early:)
     end
 
     # A failed download that brew names by its file, not its formula

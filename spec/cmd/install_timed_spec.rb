@@ -724,9 +724,23 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       (dir/"firefox.rb").write(cask_source("firefox", "2.0", 'pkg "Firefox.pkg"'))
       path = Regexp.escape((dir/"firefox.rb").realpath.to_s)
       Dir.chdir(dir) do
-        expect { run_command("--dry-run", "--cask", "firefox.rb") }
-          .to output(/^Install it later with `brew install --cask #{path}`\.$/).to_stderr
+        expect { run_command("--dry-run", "--cask", "--force", "firefox.rb") }
+          .to output(/^Install it later with `brew install --cask --force #{path}`\.$/).to_stderr
       end
+    end
+
+    it "doesn't install a last cask that needs a formula that failed, which brew would pour for it, saying so",
+       :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("app-for-cmake", nil, stanzas: 'depends_on formula: "cmake"')
+      failing << "cmake"
+      expect { run_command("--yes", "--keep-tmp", "cmake", "app-for-cmake") }.to output(<<~EOS).to_stderr
+        Error: 1 formula did not install: cmake
+        Warning: Not installing 1 cask, as formulae it needs didn't install:
+        app-for-cmake: needs cmake
+        Install it later with `brew install --cask app-for-cmake`.
+      EOS
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake]])
     end
 
     it "gives the cask classifier `--force`" do

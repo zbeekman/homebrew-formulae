@@ -351,10 +351,9 @@ module Timed
 
     # Lists the casks to run before the formulae and those to run after them,
     # with why, and warns about those skipped for want of a terminal, with the
-    # command to run them later, naming each as `cask_arguments` does for the
-    # `named` arguments.
-    sig { params(verb: String, plan: Casks::Plan, named: T::Array[String]).void }
-    def self.show_casks(verb, plan, named:)
+    # command to run them later (see `later`).
+    sig { params(verb: String, plan: Casks::Plan, named: T::Array[String], flags: T::Array[String]).void }
+    def self.show_casks(verb, plan, named:, flags:)
       rows = lambda do |entries|
         entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
       end
@@ -366,12 +365,52 @@ module Timed
       end
       return if plan.skipped.empty?
 
-      names = cask_arguments(named, plan.skipped.map(&:cask))
+      casks = plan.skipped.map(&:cask)
       opoo <<~EOS
-        Skipping #{Utils.pluralize("cask", names.length, include_count: true)}, as sudo can't ask for a password without a terminal:
+        Skipping #{Utils.pluralize("cask", casks.length, include_count: true)}, as sudo can't ask for a password without a terminal:
         #{rows.call(plan.skipped).join("\n")}
-        #{verb.capitalize} #{(names.length == 1) ? "it" : "them"} later with `brew #{verb} --cask #{names.join(" ")}`.
+        #{later(verb, casks, named:, flags:)}
       EOS
+    end
+
+    # The arguments for the `casks` to run after the formulae, as
+    # `cask_arguments` names them for the `named` arguments, leaving out, with
+    # one warning (see `later`), those that need, directly or through their
+    # formula dependencies, one of the `unfinished` formulae (by full name)
+    # brew didn't install: brew's cask installer would install it for them,
+    # without the formula options given for it, e.g. pour a bottle of a
+    # formula whose source build failed.
+    sig {
+      params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
+             unfinished: T::Array[String]).returns(T::Array[String])
+    }
+    def self.last_casks(verb, casks, named:, flags:, unfinished:)
+      unfinished = unfinished.map { |name| Utils.name_from_full_name(name) }
+      needs = casks.to_h do |cask|
+        needed = cask.depends_on.formula.flat_map do |name|
+          [name, *dependency_names(Formulary.factory(name))]
+        rescue FormulaUnavailableError
+          [name]
+        end
+        [cask, needed.map { |name| Utils.name_from_full_name(name) }.uniq & unfinished]
+      end
+      blocked = needs.select { |_, needed| needed.any? }
+      if blocked.any?
+        opoo <<~EOS
+          Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, as formulae #{(blocked.length == 1) ? "it needs" : "they need"} didn't #{verb}:
+          #{blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" }.join("\n")}
+          #{later(verb, blocked.keys, named:, flags:)}
+        EOS
+      end
+      cask_arguments(named, casks - blocked.keys)
+    end
+
+    # How to run `casks` later, with the cask `flags` their call was given,
+    # naming each as `cask_arguments` does for the `named` arguments.
+    sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
+    def self.later(verb, casks, named:, flags:)
+      command = ["brew", verb, "--cask", *flags, *cask_arguments(named, casks)].join(" ")
+      "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with `#{command}`."
     end
 
     # The argument that names each of `casks` in a sub-call: the file it was

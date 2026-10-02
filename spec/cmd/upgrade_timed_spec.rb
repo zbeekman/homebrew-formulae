@@ -623,6 +623,19 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(Homebrew).to be_failed
     end
 
+    it "doesn't upgrade a last cask that needs a formula that failed to upgrade, saying so", :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Runner).to receive(:run)
+        .and_return(Timed::Runner::Outcome.new(unfinished: %w[cmake], stopped_early: false))
+      expect { run_command("--yes", "--greedy", "cmake", "iterm2") }.to output(<<~EOS).to_stderr
+        Warning: Not upgrading 1 cask, as formulae it needs didn't upgrade:
+        iterm2: needs cmake
+        Upgrade it later with `brew upgrade --cask --greedy iterm2`.
+      EOS
+      expect(brew_calls.drop(1)).to eq([])
+    end
+
     it "upgrades a cask named with `--minimum-version`, without it, as planning applied it" do
       stub_cask("firefox")
       run_command("--yes", "--minimum-version=1.5", "firefox")
@@ -665,16 +678,16 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect([brew_calls.reject { |call| call.include?("--dry-run") }, Homebrew.failed?]).to eq([[], false])
     end
 
-    it "skips the casks that need sudo without a terminal, with a warning", :aggregate_failures do
+    it "skips the casks that need sudo without a terminal, with a warning giving the cask flags, but not " \
+       "`--minimum-version`, in the command to upgrade them later", :aggregate_failures do
       allow(Timed::Casks).to receive(:terminal?).and_return(false)
-      stub_cask("firefox")
       stub_cask("iterm2", stanzas: 'pkg "Bar.pkg"')
-      expect { run_command("--yes") }.to output(<<~EOS).to_stderr
+      expect { run_command("--yes", "--no-binaries", "--minimum-version=1.5", "iterm2") }.to output(<<~EOS).to_stderr
         Warning: Skipping 1 cask, as sudo can't ask for a password without a terminal:
         iterm2: `pkg` requires sudo
-        Upgrade it later with `brew upgrade --cask iterm2`.
+        Upgrade it later with `brew upgrade --cask --no-binaries iterm2`.
       EOS
-      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox]])
+      expect(brew_calls.drop(1)).to eq([])
     end
   end
 

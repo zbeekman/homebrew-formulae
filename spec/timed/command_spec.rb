@@ -167,7 +167,7 @@ RSpec.describe Timed::Command do
       it "lists the casks to run first, and those to run last with why", :aggregate_failures do
         last = [entry("baz", "`pkg` requires sudo", "`postflight` block may call sudo")]
         plan = Timed::Casks::Plan.new(first: [entry("foo"), entry("bar")], last:, skipped: [])
-        expect { described_class.show_casks("upgrade", plan, named: []) }
+        expect { described_class.show_casks("upgrade", plan, named: [], flags: []) }
           .to output(<<~EOS).to_stdout.and not_to_output.to_stderr
             ==> Would upgrade 2 casks first
             foo bar
@@ -176,15 +176,17 @@ RSpec.describe Timed::Command do
           EOS
       end
 
-      it "warns once about the casks skipped without a terminal, with the command to run them later" do
+      it "warns once about the casks skipped without a terminal, with the command to run them later with the " \
+         "cask flags" do
         plan = Timed::Casks::Plan.new(first: [], last: [],
                                       skipped: [entry("foo", "`pkg` requires sudo"), entry("bar", "`kext` x")])
-        expect { described_class.show_casks("install", plan, named: []) }.to output(<<~EOS).to_stderr
-          Warning: Skipping 2 casks, as sudo can't ask for a password without a terminal:
-          foo: `pkg` requires sudo
-          bar: `kext` x
-          Install them later with `brew install --cask foo bar`.
-        EOS
+        expect { described_class.show_casks("install", plan, named: [], flags: %w[--force --no-binaries]) }
+          .to output(<<~EOS).to_stderr
+            Warning: Skipping 2 casks, as sudo can't ask for a password without a terminal:
+            foo: `pkg` requires sudo
+            bar: `kext` x
+            Install them later with `brew install --cask --force --no-binaries foo bar`.
+          EOS
       end
 
       it "names a skipped cask given as a path by that path, made absolute, in the command to run it later" do
@@ -195,14 +197,46 @@ RSpec.describe Timed::Command do
           skipped = [Timed::Casks::Entry.new(cask: Cask::CaskLoader.load("foo.rb"), reasons:)]
           plan = Timed::Casks::Plan.new(first: [], last: [], skipped:)
           path = Regexp.escape((dir/"foo.rb").realpath.to_s)
-          expect { described_class.show_casks("install", plan, named: %w[foo.rb]) }
+          expect { described_class.show_casks("install", plan, named: %w[foo.rb], flags: []) }
             .to output(/^Install it later with `brew install --cask #{path}`\.$/).to_stderr
         end
       end
 
       it "prints nothing without casks" do
         plan = Timed::Casks::Plan.new(first: [], last: [], skipped: [])
-        expect { described_class.show_casks("upgrade", plan, named: []) }.not_to output.to_stdout
+        expect { described_class.show_casks("upgrade", plan, named: [], flags: []) }.not_to output.to_stdout
+      end
+    end
+
+    describe ".last_casks" do
+      it "leaves out, with one warning, the casks that need a formula brew didn't install, directly or through " \
+         "their formulae, as brew would install it for them without the options given for it", :aggregate_failures do
+        allow(Formulary).to receive(:loader_for).and_call_original
+        %w[lib app].each do |name|
+          stub_formula_loader(formula(name) do
+            T.bind(self, T.class_of(Formula))
+            url "https://brew.sh/#{name}-1.0.tgz"
+            depends_on "lib" if name == "app"
+          end)
+        end
+        casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"'),
+                 stub_cask("through-app", nil, stanzas: 'depends_on formula: "app"'), stub_cask("free-app", nil)]
+        kept = T.let(nil, T.nilable(T::Array[String]))
+        expect do
+          kept = described_class.last_casks("install", casks, named: [], flags: %w[--force], unfinished: %w[lib])
+        end.to output(<<~EOS).to_stderr
+          Warning: Not installing 2 casks, as formulae they need didn't install:
+          direct-app: needs lib
+          through-app: needs lib
+          Install them later with `brew install --cask --force direct-app through-app`.
+        EOS
+        expect(kept).to eq(%w[free-app])
+      end
+
+      it "keeps every cask, without a warning, when brew installed every formula" do
+        casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
+        expect { described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []) }
+          .not_to output.to_stderr
       end
     end
 

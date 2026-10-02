@@ -161,6 +161,13 @@ RSpec.describe Timed::Runner do
                            %w[upgrade --formula --yes --display-times --verbose app]])
     end
 
+    it "returns the formulae brew didn't install: those that failed, and those skipped as they need one" do
+      %w[lib app tool].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      outcome = run([batch("lib", "tool"), batch("app")], deps: { "app" => %w[lib] })
+      expect([outcome.unfinished, outcome.stopped_early]).to eq([%w[lib app], false])
+    end
+
     it "names a formula to brew by its argument in `arguments`, and logs it by its name", :aggregate_failures do
       stub_formula("lib")
       fake_brew
@@ -467,15 +474,15 @@ RSpec.describe Timed::Runner do
          "brew stopped early", :aggregate_failures do
         %w[lib app tool].each { |name| stub_formula(name) }
         fake_brew(failing: %w[app], stop_at_failure: true)
-        stopped = T.let(nil, T.nilable(T::Boolean))
-        expect { stopped = run([batch("lib", "app", "tool")], verb: "reinstall", stops_at_failure: true) }
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("lib", "app", "tool")], verb: "reinstall", stops_at_failure: true) }
           .to output(<<~EOS).to_stderr
             Warning: `brew reinstall` stopped early; not run: tool
             Error: 1 formula did not reinstall: app
           EOS
         expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
           .to eq("lib" => ["built"], "app" => ["failed"], "tool" => ["skipped"])
-        expect([stopped, Homebrew.failed?]).to eq([true, true])
+        expect([outcome&.stopped_early, outcome&.unfinished, Homebrew.failed?]).to eq([true, %w[app tool], true])
       end
 
       # Brew fetches everything first, then installs what downloaded:
@@ -496,10 +503,11 @@ RSpec.describe Timed::Runner do
          "left out with an error, which is failed, not not run", :aggregate_failures do
         %w[app lib].each { |name| stub_formula(name) }
         failed_downloads(["Error: app: no bottle available!\n"], times: true)
-        stopped = T.let(nil, T.nilable(T::Boolean))
-        expect { stopped = run([batch("app", "lib")], verb: "reinstall", stops_at_failure: true) }
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("app", "lib")], verb: "reinstall", stops_at_failure: true) }
           .to output("Error: 1 formula did not reinstall: app\n").to_stderr
-        expect([stopped, builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
+        expect([outcome&.stopped_early,
+                builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
           .to eq([false, { "app" => ["failed"], "lib" => ["built"] }])
       end
 
@@ -515,10 +523,11 @@ RSpec.describe Timed::Runner do
         %w[app tool lib].each { |name| stub_formula(name) }
         failed_downloads(["✘ Resource app--libfoo\n", "Error: libfoo: download failed\n", "✘ Patch fix.diff\n",
                           "Error: fix.diff: download failed\n"])
-        stopped = T.let(nil, T.nilable(T::Boolean))
-        expect { stopped = run([batch("app", "tool", "lib")], verb: "reinstall", stops_at_failure: true) }
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("app", "tool", "lib")], verb: "reinstall", stops_at_failure: true) }
           .to output("Error: 2 formulae did not reinstall: app tool\n").to_stderr
-        expect([stopped, builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
+        expect([outcome&.stopped_early,
+                builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
           .to eq([false, { "app" => ["failed"], "tool" => ["failed"], "lib" => ["built"] }])
       end
 
@@ -542,7 +551,7 @@ RSpec.describe Timed::Runner do
             lines.each(&on_line)
             false
           end
-          run([batch("app")], verb: "reinstall", stops_at_failure: true)
+          run([batch("app")], verb: "reinstall", stops_at_failure: true).stopped_early
         end
         expect(stopped).to eq("log tail" => true, "verbose error" => true, "other error" => false,
                               "post-install" => false, "dependent" => false, "outdated" => false)

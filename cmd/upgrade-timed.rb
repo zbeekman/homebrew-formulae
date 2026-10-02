@@ -114,8 +114,13 @@ module Homebrew
           extra = planned - listed
           opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
         end
+        # `brew upgrade` takes `--minimum-version` with one name only, which
+        # planning has already applied to.
+        without_minimum_version = ->(options) { options.reject { |option| option.start_with?("--minimum-version=") } }
+        flags = without_minimum_version.call(forwarded.formula)
+        cask_flags = without_minimum_version.call(forwarded.cask)
         cask_plan = Timed::Command.cask_plan({ upgrade: outdated }, in_run: planned)
-        Timed::Command.show_casks("upgrade", cask_plan, named: args.named)
+        Timed::Command.show_casks("upgrade", cask_plan, named: args.named, flags: cask_flags)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)
 
@@ -134,14 +139,9 @@ module Homebrew
         # unasked.
         Homebrew::Ask.confirm?(action: "upgrade") if ask
 
-        # `brew upgrade` takes `--minimum-version` with one name only, which
-        # planning has already applied to.
-        without_minimum_version = ->(options) { options.reject { |option| option.start_with?("--minimum-version=") } }
-        flags = without_minimum_version.call(forwarded.formula)
-        cask_flags = without_minimum_version.call(forwarded.cask)
         Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: cask_flags, label: "first")
-        if result.batches.any?
+        outcome = if result.batches.any?
           # `brew upgrade` builds only the named formulae from source with
           # `--build-from-source`, but gives `--debug-symbols` to every build
           # in a call; formulae planned as pours go in a call without either.
@@ -151,8 +151,9 @@ module Homebrew
                                             stamp: !args.no_stamp_receipts?,
                                             arguments: Timed::Command.path_arguments(args.named, formulae))
         end
-        Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.last.map(&:cask)),
-                                flags: cask_flags, label: "last")
+        last = Timed::Command.last_casks("upgrade", cask_plan.last.map(&:cask), named: args.named, flags: cask_flags,
+                                                                                unfinished: outcome&.unfinished || [])
+        Timed::Runner.run_casks("upgrade", last, flags: cask_flags, label: "last")
       end
 
       private

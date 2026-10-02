@@ -111,7 +111,9 @@ module Homebrew
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },
                                              in_run: result.batches.flat_map(&:names), zap: args.zap?,
                                              force: args.force?)
-        Timed::Command.show_casks("reinstall", cask_plan, named: args.named)
+        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
+                                           conflicts: self.class.parser.conflicts)
+        Timed::Command.show_casks("reinstall", cask_plan, named: args.named, flags: forwarded.cask)
         return if args.dry_run? || (result.batches.empty? && cask_plan.first.empty? && cask_plan.last.empty?)
 
         # Once, by brew's rules: if brew would install or upgrade dependencies
@@ -124,11 +126,9 @@ module Homebrew
           Homebrew::Ask.confirm?(action: "reinstallation")
         end
 
-        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
-                                           conflicts: self.class.parser.conflicts)
         Timed::Runner.run_casks("reinstall", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: forwarded.cask, label: "first")
-        stopped_early = if result.batches.any?
+        outcome = if result.batches.any?
           # A failed reinstall leaves the old version installed, so only a new
           # receipt shows brew reinstalled a formula.
           succeeded = lambda do |formula|
@@ -141,15 +141,17 @@ module Homebrew
                                             stamp: !args.no_stamp_receipts?, stops_at_failure: true, succeeded:,
                                             arguments: Timed::Command.path_arguments(args.named, formulae))
         end
-        last = Timed::Command.cask_arguments(args.named, cask_plan.last.map(&:cask))
+        last = cask_plan.last.map(&:cask)
         # What stops `brew reinstall` early, such as a failed build, stops it
         # before its casks too.
-        if stopped_early && last.any?
+        if outcome&.stopped_early && last.any?
           opoo <<~EOS
-            `brew reinstall` stopped early, so the last #{Utils.pluralize("cask", last.length)} didn't run: #{last.join(" ")}
-            Reinstall #{(last.length == 1) ? "it" : "them"} later with `brew reinstall --cask #{last.join(" ")}`.
+            `brew reinstall` stopped early, so the last #{Utils.pluralize("cask", last.length)} didn't run: #{Timed::Command.cask_arguments(args.named, last).join(" ")}
+            #{Timed::Command.later("reinstall", last, named: args.named, flags: forwarded.cask)}
           EOS
         else
+          last = Timed::Command.last_casks("reinstall", last, named: args.named, flags: forwarded.cask,
+                                                              unfinished: outcome&.unfinished || [])
           Timed::Runner.run_casks("reinstall", last, flags: forwarded.cask, label: "last")
         end
       end

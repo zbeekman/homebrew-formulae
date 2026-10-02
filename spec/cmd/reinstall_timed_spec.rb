@@ -381,19 +381,34 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         stub_cask("iterm2", "2.0", stanzas: 'pkg "iTerm2.pkg"')
       end
 
+      def outcome(unfinished: [], stopped_early: false)
+        Timed::Runner::Outcome.new(unfinished:, stopped_early:)
+      end
+
       it "doesn't reinstall the last casks after a failed build, which ends `brew reinstall`", :aggregate_failures do
-        allow(Timed::Runner).to receive(:run).and_return(true)
-        expect { run_command("--yes", "cmake", "firefox", "iterm2") }.to output(<<~EOS).to_stderr
+        allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake], stopped_early: true))
+        expect { run_command("--yes", "--zap", "cmake", "firefox", "iterm2") }.to output(<<~EOS).to_stderr
           Warning: `brew reinstall` stopped early, so the last cask didn't run: iterm2
-          Reinstall it later with `brew reinstall --cask iterm2`.
+          Reinstall it later with `brew reinstall --cask --zap iterm2`.
         EOS
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
 
       it "reinstalls the last casks after another failure, where brew carries on" do
-        allow(Timed::Runner).to receive(:run).and_return(false)
+        allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake]))
         run_command("--yes", "cmake", "firefox", "iterm2")
         expect(brew_calls.map(&:last)).to eq(%w[firefox iterm2])
+      end
+
+      it "doesn't reinstall a last cask that needs a formula that failed, saying so", :aggregate_failures do
+        stub_cask("app-for-cmake", "2.0", stanzas: 'depends_on formula: "cmake"')
+        allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake]))
+        expect { run_command("--yes", "--zap", "cmake", "firefox", "app-for-cmake") }.to output(<<~EOS).to_stderr
+          Warning: Not reinstalling 1 cask, as formulae it needs didn't reinstall:
+          app-for-cmake: needs cmake
+          Reinstall it later with `brew reinstall --cask --zap app-for-cmake`.
+        EOS
+        expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
     end
 

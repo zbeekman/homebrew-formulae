@@ -214,9 +214,11 @@ module Homebrew
         Timed::Command.show_plan("install", result, estimates, excluded:          set & exclude,
                                                                dependencies_only: args.only_dependencies?,
                                                                casks:             args.cask? || casks.any?)
+        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
+                                           conflicts: self.class.parser.conflicts)
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
                                              in_run: planned, force: args.force?)
-        Timed::Command.show_casks("install", cask_plan, named: args.named)
+        Timed::Command.show_casks("install", cask_plan, named: args.named, flags: forwarded.cask)
         # The installed casks brew won't upgrade, which it only reports on.
         first_casks = cask_plan.first.map(&:cask) + (casks - new_casks - upgrading)
         last_casks = cask_plan.last.map(&:cask)
@@ -244,21 +246,20 @@ module Homebrew
 
           ->(since) { Timed::Receipts.installed_since?(formula, since, before: current.fetch(formula.full_name)) }
         end
-        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
-                                           conflicts: self.class.parser.conflicts)
         # Each batch's `brew install` notes the support tier of the run and
         # says it as it exits, so this command doesn't say it again.
         Homebrew::Diagnostic.support_tiers.clear
         Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, first_casks),
                                 flags: forwarded.cask, label: "first")
-        if result.batches.any?
+        outcome = if result.batches.any?
           Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
                                             stamp: !args.no_stamp_receipts?, succeeded:,
                                             dependencies_only: args.only_dependencies?,
                                             arguments: Timed::Command.path_arguments(args.named, formulae))
         end
-        Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, last_casks),
-                                flags: forwarded.cask, label: "last")
+        last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
+                                                                unfinished: outcome&.unfinished || [])
+        Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
       end
 
       private

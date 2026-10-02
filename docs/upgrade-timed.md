@@ -142,12 +142,22 @@ The plan lists the casks of each call, with why each goes last. A failed cask
 call is reported and fails the command; the batches still run. Ctrl-C during a
 cask call stops the run.
 
+A cask for the last call that needs, directly or through its formulae'
+dependencies, a formula of the batches that failed or was skipped is not
+run: Homebrew would install that formula for it, without the formula options
+given for it (e.g. pour a bottle of a formula whose source build failed).
+Unlike `brew upgrade`, which would, the command leaves it out with a warning
+naming it, what it needs and the command to run it later.
+
 Without a terminal (`/dev/tty` can't be opened, e.g. under `launchd` or
 `cron`) and with `$SUDO_ASKPASS` unset, sudo can't ask for a password, so the
 casks that may need sudo are skipped, with a warning naming them and the
 command to upgrade them later. A cask upgrade that fails partway is rolled
 back, but the rollback may need sudo too and then fails, leaving the cask
 half-upgraded; `brew upgrade` would try them anyway.
+
+Each command it suggests to run casks later has the cask options the call
+would have been given, and names a cask given as a file by that file.
 
 ## Output
 
