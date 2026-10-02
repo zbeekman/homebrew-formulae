@@ -280,6 +280,23 @@ RSpec.describe Timed::Command do
       end, "user/tap/foo")
     end
 
+    describe "casks with the same token from different taps" do
+      it "classifies each on its own needs" do
+        stub_lib_and_app
+        tap_foo = Cask::Cask.new("foo", tap: Tap.fetch("user", "tap")) do
+          T.bind(self, Cask::DSL)
+          version "1.0"
+          sha256 :no_check
+          url "file:///dev/null"
+        end
+        casks = [stub_cask("foo", nil, stanzas: 'depends_on formula: "lib"'), tap_foo]
+        result = described_class.cask_plan({ install: casks }, in_run: %w[lib], facts: Timed::Casks::DiskFacts.new,
+                                                               tty: -> { true })
+        expect([result.first.map { |entry| entry.cask.full_name }, result.last.map { |entry| entry.cask.full_name }])
+          .to eq([%w[user/tap/foo], %w[foo]])
+      end
+    end
+
     describe "matching casks' needs with the run" do
       it "matches a formula a cask needs by its full name, after aliases, and by name only if it can't be " \
          "loaded, so a formula of the same name in another tap doesn't count" do

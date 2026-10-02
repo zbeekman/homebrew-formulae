@@ -396,9 +396,10 @@ module Timed
       in_run += casks.values.flatten.map(&:full_name)
       plans = casks.map do |verb, list|
         installed = list.filter_map do |cask|
-          installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.token, old] }
+          installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.full_name, old] }
         end.to_h
-        all_needs = list.to_h { |cask| [cask.token, cask_needs(cask)] }
+        # Keyed by full name, as casks from different taps may share a token.
+        all_needs = list.to_h { |cask| [cask.full_name, cask_needs(cask)] }
         needs = all_needs.transform_values { |needed| needed.among(in_run, casks: !skip_cask_deps) }
         missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
         Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:)

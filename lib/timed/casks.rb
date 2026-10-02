@@ -131,7 +131,10 @@ module Timed
     # says whether brew runs `add_altname_metadata`. `tty` says whether
     # `/dev/tty` can be opened, where sudo reads the password.
     #
-    # `installed` maps a token to the cask loaded from its installed caskfile.
+    # `installed`, `needs` and `missing` are keyed by the cask's full name, as
+    # casks from different taps may share a token.
+    #
+    # `installed` maps a cask to the one loaded from its installed caskfile.
     # On upgrade and reinstall brew runs the `uninstall_phase` of every artifact
     # of that cask, so the uninstall side (`uninstall` directives, uninstall
     # flight blocks and steps, and its bundles and links) applies to it (to the
@@ -146,13 +149,13 @@ module Timed
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
     # installed cask without a successor and dispatches its `zap` stanza.
     #
-    # `needs` maps a token to what the cask needs that is in the run, e.g.
+    # `needs` maps a cask to what it needs that is in the run, e.g.
     # through its formulae's dependencies, which brew may install before it,
     # as the run names it (the caller matches them by full name); without an
     # entry, its own `depends_on` counts, matched by name.
     #
-    # `missing` maps a token to the casks brew's cask installer would install
-    # before the cask as they aren't installed: what their installs need (sudo,
+    # `missing` maps a cask to those brew's cask installer would install
+    # before it as they aren't installed: what their installs need (sudo,
     # a dialog) counts for the cask, naming the dependency.
     sig {
       params(
@@ -175,11 +178,11 @@ module Timed
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
-        old = installed[cask.token] if upgrading
-        needed = needs.fetch(cask.token) { cask.depends_on.formula + cask.depends_on.cask }
+        old = installed[cask.full_name] if upgrading
+        needed = needs.fetch(cask.full_name) { cask.depends_on.formula + cask.depends_on.cask }
         own = reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:)
         # Brew installs a dependency without `force`, as on request.
-        dependencies = missing.fetch(cask.token, []).flat_map do |dependency|
+        dependencies = missing.fetch(cask.full_name, []).flat_map do |dependency|
           reasons(dependency, old: nil, upgrading: false, zap: false, force: false, in_run: [], needed: [], facts:,
                               macos:).map do |reason|
             Reason.new(kind: reason.kind, message: "dependency `#{dependency.full_name}`: #{reason.message}")
