@@ -115,8 +115,12 @@ module Homebrew
           opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
         end
         # `brew upgrade` takes `--minimum-version` with one name only, which
-        # planning has already applied to.
-        without_minimum_version = ->(options) { options.reject { |option| option.start_with?("--minimum-version=") } }
+        # planning has already applied to. Brew's parser names it
+        # `--minimum-version` in `options_only` either way, but both of its
+        # spellings are left out, to be safe.
+        without_minimum_version = lambda do |options|
+          options.reject { |option| option.start_with?("--minimum-version=", "--min-version=") }
+        end
         flags = without_minimum_version.call(forwarded.formula)
         cask_flags = without_minimum_version.call(forwarded.cask)
         cask_plan = Timed::Command.cask_plan({ upgrade: outdated },

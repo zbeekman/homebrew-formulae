@@ -634,10 +634,15 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes --greedy iterm2]])
     end
 
-    it "upgrades a cask named with `--minimum-version`, without it, as planning applied it" do
+    it "upgrades a cask named with `--minimum-version` or `--min-version`, without it, as planning applied it" do
       stub_cask("firefox")
-      run_command("--yes", "--minimum-version=1.5", "firefox")
-      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox]])
+      flags = %w[--minimum-version=1.5 --min-version=1.5]
+      calls = flags.to_h do |flag|
+        brew_calls.clear
+        run_command("--yes", flag, "firefox")
+        [flag, brew_calls.drop(1)]
+      end
+      expect(calls).to eq(flags.to_h { |flag| [flag, [%w[upgrade --cask --yes firefox]]] })
     end
 
     it "asks once, counting the casks, with no names" do
