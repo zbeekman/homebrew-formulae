@@ -392,6 +392,20 @@ RSpec.describe Timed::Command do
           true  => { "old" => [], "needs-helper" => ["depends on `lib`, which is in this run"], "needs-old" => [] },
         )
       end
+
+      it "skips, without a terminal, the casks that need a skipped one, but with `--skip-cask-deps` only " \
+         "those naming a cask that can't be loaded, which may be a formula brew still installs" do
+        casks = [stub_cask("sudo-app", nil, stanzas: 'pkg "Sudo.pkg"'),
+                 stub_cask("needs-sudo", nil, stanzas: 'depends_on cask: "sudo-app"'),
+                 stub_cask("needs-gone", nil, stanzas: 'depends_on cask: "gone/tap/sudo-app"')]
+        skipped = [false, true].to_h do |skip_cask_deps|
+          result = described_class.cask_plan({ install: casks }, in_run: [], skip_cask_deps:,
+                                                                 facts:  Timed::Casks::DiskFacts.new,
+                                                                 tty:    -> { false })
+          [skip_cask_deps, result.skipped.map { |entry| entry.cask.token }]
+        end
+        expect(skipped).to eq(false => %w[sudo-app needs-sudo needs-gone], true => %w[sudo-app needs-gone])
+      end
     end
 
     describe ".cask_needs" do

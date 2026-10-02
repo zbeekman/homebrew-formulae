@@ -159,11 +159,13 @@ given (`--[no-]binaries` as there). Only the casks it upgrades have an old
 version to uninstall. With `--force`, Homebrew deletes an existing app in the
 way of a cask it installs, so that counts as a file it may need sudo for. The
 installed casks Homebrew won't upgrade go in the first call, for Homebrew to
-say why. Without a terminal, a cask that depends on a skipped one is skipped
-too, as Homebrew would install the skipped one first. A last cask that needs a
-formula that failed to install or was skipped and isn't installed is left
-out, with a warning, as for `brew upgrade-timed`: Homebrew would install that
-formula for it, without the options given for it.
+say why. Without a terminal, a cask that depends on a skipped one, following
+its dependencies through other casks, is skipped too, as Homebrew would install
+the skipped one first, except with `--skip-cask-deps`, with which Homebrew
+installs no cask dependency. A last cask that needs a formula that failed to
+install or was skipped and isn't installed is left out, with a warning, as for
+`brew upgrade-timed`: Homebrew would install that formula for it, without the
+options given for it.
 
 ## Output
 

@@ -385,7 +385,8 @@ module Timed
     # its missing cask
     # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
     # which brew installs only formula dependencies, those of skipped casks
-    # included. `zap` and `force` are the wrapped command's.
+    # included, so a cask isn't skipped for a skipped cask it depends on.
+    # `zap` and `force` are the wrapped command's.
     sig {
       params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String], zap: T::Boolean,
              force: T::Boolean, skip_cask_deps: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean))
@@ -402,7 +403,11 @@ module Timed
         all_needs = list.to_h { |cask| [cask.full_name, cask_needs(cask)] }
         needs = all_needs.transform_values { |needed| needed.among(in_run, casks: !skip_cask_deps) }
         missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
-        cask_dependencies = all_needs.transform_values { |needed| [needed.casks.map(&:full_name), needed.unresolved] }
+        # What can't be loaded stays: brew installs formulae anyway and loads
+        # every cask it depends on even with `--skip-cask-deps`, so fails there.
+        cask_dependencies = all_needs.transform_values do |needed|
+          [skip_cask_deps ? [] : needed.casks.map(&:full_name), needed.unresolved]
+        end
         Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
                          cask_dependencies:)
       end
