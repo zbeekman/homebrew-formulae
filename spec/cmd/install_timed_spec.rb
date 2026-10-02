@@ -1,0 +1,678 @@
+# typed: true
+# frozen_string_literal: true
+
+# Homebrew's own specs allow this (`Library/Homebrew/test/.rubocop.yml`: RSpec
+# helper methods typecheck better as regular methods); tap style doesn't
+# inherit that override.
+# rubocop:disable Sorbet/BlockMethodDefinition
+
+require "cmd/install"
+require_relative "../../cmd/install-timed"
+
+RSpec.describe Homebrew::Cmd::InstallTimed do
+  let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
+  let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
+  let(:brew_calls) { [] }
+  # Names brew fails to install.
+  let(:failing) { [] }
+  # What brew installs for a name, if not that formula.
+  let(:installs) { {} }
+  # A receipt's build times, other than the log would give them.
+  let(:build_times) { { "verb" => "upgrade", "install_seconds" => 1.0, "started" => "2026-09-01T10:00:00-04:00" } }
+
+  # A formula at version 2.0, in `tap` if given, loadable by name, with
+  # `installed_version` in the Cellar (none when nil), linked into `opt` and,
+  # if `linked` (unless keg-only by default), into the prefix. Its receipt is
+  # for this computer's architecture, installed on request unless not
+  # `on_request`, with `build_times` if given. `status` is `:deprecated` or
+  # `:disabled` if given. A bottled one's manifest is never downloaded.
+  def stub_formula(name, installed_version = nil, deps: [], keg_only: false, linked: !keg_only, bottled: false,
+                   tap: nil, on_request: true, build_times: nil, status: nil)
+    formula = formula(name, tap:) do
+      T.bind(self, T.class_of(Formula))
+      url "https://brew.sh/#{name}-2.0.tgz"
+      head "https://brew.sh/#{name}.git"
+      deps.each { |dep| depends_on dep }
+      keg_only "it is a test" if keg_only
+      deprecate! date: "2020-01-01", because: :unmaintained if status == :deprecated
+      disable! date: "2020-01-01", because: :unmaintained if status == :disabled
+      if bottled
+        bottle do
+          T.bind(self, BottleSpecification)
+          sha256 cellar: :any, Utils::Bottles.tag.to_sym => "a" * 64
+        end
+      end
+    end
+    allow(formula.bottle).to receive_messages(github_packages_manifest_resource: nil, fetch_tab: nil) if bottled
+    stub_formula_loader(formula)
+    stub_formula_loader(formula, name) if tap
+    if installed_version
+      keg = HOMEBREW_CELLAR/name/installed_version
+      keg.mkpath
+      data = JSON.parse(receipt.read).merge("arch" => Hardware::CPU.arch.to_s, "installed_on_request" => on_request,
+                                            "build_times" => build_times)
+      (keg/"INSTALL_RECEIPT.json").write(JSON.pretty_generate(data.compact))
+      [HOMEBREW_PREFIX/"opt", *(HOMEBREW_LINKED_KEGS if linked)].each do |dir|
+        dir.mkpath
+        FileUtils.ln_s keg, dir/name
+      end
+    end
+    formula
+  end
+
+  # Removes `name`'s keg and links, and the receipts brew has read, for
+  # another run.
+  def remove_keg(name)
+    FileUtils.rm_r [HOMEBREW_CELLAR/name, HOMEBREW_PREFIX/"opt"/name, HOMEBREW_LINKED_KEGS/name]
+    Tab.clear_cache
+  end
+
+  def build(seconds) = { "status" => "built", "install_seconds" => seconds, "version" => "2.0" }
+
+  def builds = JSON.parse(database.read)["packages"].transform_values { |package| package["builds"] }
+
+  def run_command(*argv) = described_class.new(argv).run
+
+  def run_to_end(*argv)
+    run_command(*argv)
+  rescue SystemExit
+    nil
+  end
+
+  # Brew: a call installs each formula it is given, by name or file, or what
+  # `installs` lists for it, at 2.0, with a new receipt for this computer, in
+  # `opt`, printing its summary line, except `failing` ones. Brew's plan and
+  # preinstall checks run in-process, so are left out unless a spec asks for
+  # them, and the developer tools are installed. What brew notes about the
+  # support tier (e.g. for `--cc`), which it prints as the process exits, is
+  # dropped after each spec.
+  after { Homebrew::Diagnostic.support_tiers.clear }
+
+  before do
+    allow(Formulary).to receive(:loader_for).and_call_original
+    allow(Timed::Command).to receive(:auto_update)
+    allow(Homebrew::Install).to receive(:ask_formulae)
+    allow(Homebrew::Install).to receive(:perform_preinstall_checks_once)
+    allow(DevelopmentTools).to receive(:installed?).and_return(true)
+    allow(Timed::Runner).to receive(:stream) do |argv, &block|
+      brew_calls << argv
+      names = argv.drop(1).reject { |arg| arg.start_with?("-") }.map { |arg| File.basename(arg, ".rb") }
+      names.flat_map { |name| installs.fetch(name, [name]) }.map do |name|
+        block.call("==> Installing #{name}\n")
+        if failing.include?(name)
+          block.call("Error: #{name}: it failed\n")
+          next false
+        end
+
+        keg = HOMEBREW_CELLAR/name/"2.0"
+        keg.mkpath
+        data = JSON.parse(receipt.read).merge("time" => Time.now.to_i, "arch" => Hardware::CPU.arch.to_s)
+        (keg/"INSTALL_RECEIPT.json").write(JSON.pretty_generate(data))
+        (HOMEBREW_PREFIX/"opt").mkpath
+        FileUtils.rm_f HOMEBREW_PREFIX/"opt"/name
+        FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt"/name
+        block.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+        true
+      end.all?
+    end
+    database.dirname.mkpath
+    database.write(JSON.generate("schema_version" => 1,
+                                 "packages"       => { "cmake" => { "builds" => [build(200.0)] },
+                                                       "llvm"  => { "builds" => [build(5000.0)] },
+                                                       "gcc"   => { "builds" => [build(3000.0)] } }))
+  end
+
+  describe "flags" do
+    it "accepts every `brew install` option" do
+      options = ->(command) { command.parser.processed_options.map { |short, long| long || short } }
+      expect(options.call(Timed::Command.builtin("install")) - options.call(described_class)).to eq([])
+    end
+
+    it "keeps `brew install`'s conflicts" do
+      expect(Timed::Command.builtin("install").parser.conflicts - described_class.parser.conflicts).to eq([])
+    end
+
+    it "adds its own flags, none of them but `--no-stamp-receipts` with `--cask`", :aggregate_failures do
+      argv = %w[--guess=llvm=1h --estimator=median --last=llvm --exclude=gcc --no-stamp-receipts llvm]
+      args = described_class.new(argv).args
+      expect([args.guess, args.estimator, args.last, args.exclude, args.no_stamp_receipts?])
+        .to eq([%w[llvm=1h], "median", %w[llvm], %w[gcc], true])
+      expect { described_class.new(%w[--cask --last=llvm llvm]) }
+        .to raise_error(Homebrew::CLI::OptionConflictError)
+    end
+
+    it "shows the usage, its own description and what `--exclude` leaves to brew", :aggregate_failures do
+      help = described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ")
+      expect(help).to start_with("Usage: brew install-timed [options] formula|cask [...] Install formulae " \
+                                 "like brew install, in timed batches:")
+      expect(help).to include("Homebrew may still install or upgrade them as dependencies of the others.")
+    end
+
+    it "refuses `--interactive`, which needs a terminal" do
+      expect { run_command("--interactive", "cmake") }
+        .to raise_error(UsageError, "Invalid usage: `--interactive` needs a terminal; " \
+                                    "use `brew install --interactive` instead.")
+    end
+
+    it "refuses casks, naming them" do
+      stub_cask_loader(Cask::Cask.new("firefox"))
+      expect { run_command("--dry-run", "--cask", "firefox") }
+        .to raise_error(UsageError, "Invalid usage: `brew install-timed` doesn't install casks yet; " \
+                                    "use `brew install --cask firefox` instead.")
+    end
+
+    it "fails on unknown `--last`, `--exclude` and `--guess` names, naming the flag, before running anything",
+       :aggregate_failures do
+      stub_formula("cmake")
+      flags = %w[--last=nope --exclude=nope --guess=nope=1m]
+      errors = flags.to_h do |flag|
+        run_command("--dry-run", flag, "cmake")
+        [flag, nil]
+      rescue UsageError => e
+        [flag, e.message.sub(/(?<=\.) Did you mean .*/, "")]
+      end
+      expect(errors).to eq(flags.to_h do |flag|
+        [flag, "Invalid usage: `#{flag[/--\w+/]}`: No available formula with the name \"nope\"."]
+      end)
+      expect(brew_calls).to eq([])
+    end
+  end
+
+  describe "--dry-run" do
+    it "auto-updates first, with the original arguments" do
+      stub_formula("cmake")
+      expect(Timed::Command).to receive(:auto_update).with(command: "install-timed", argv: %w[--dry-run cmake])
+      run_command("--dry-run", "cmake")
+    end
+
+    it "installs the taps of the names it is given first, as `brew install` does" do
+      tap = Tap.fetch("user", "tap")
+      stub_formula("app", tap:)
+      expect(tap).to receive(:ensure_installed!)
+      run_command("--dry-run", "user/tap/app")
+    end
+
+    it "loads the names as `brew install` does, without warnings about renamed or migrated formulae" do
+      stub_formula("cmake")
+      expect(Formulary).to receive(:factory).with("cmake", hash_including(warn: false)).and_call_original
+      run_command("--dry-run", "cmake")
+    end
+
+    it "prints brew's plan in-process, as `brew install --dry-run` prints it, then the batches, running no brew",
+       :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      installer = ->(name) { an_object_having_attributes(formula: an_object_having_attributes(full_name: name)) }
+      expect(Homebrew::Install).to receive(:ask_formulae)
+        .with(contain_exactly(installer.call("lib"), installer.call("app")),
+              an_instance_of(Homebrew::Upgrade::Dependents), hash_including(prompt: false, verbose: true))
+        .ordered
+      expect(Timed::Command).to receive(:show_plan).ordered.and_call_original
+      expect { run_command("--dry-run", "--verbose", "--guess=lib=1h", "--last=lib", "app", "lib") }
+        .to output(<<~EOS).to_stdout
+          ==> Would install 2 formulae in 2 batches, estimated 1h50m
+          ==> Batch 1 of 2 (--last): 1h00m
+          lib                          build     1h00m
+          ==> Batch 2 of 2 (--last): 50m00s, slow app needs slow lib
+          app                          build   50m00s?
+        EOS
+      expect(brew_calls).to eq([])
+    end
+
+    it "prints what brew would install, with each formula's dependencies" do
+      allow(Homebrew::Install).to receive(:ask_formulae).and_call_original
+      stub_formula("dep")
+      stub_formula("app", deps: %w[dep])
+      expect { run_command("--dry-run", "app") }
+        .to output(/\A==> Would install 1 formula:\napp 2\.0\n==> Would install 1 dependency for app:\ndep\n/)
+        .to_stdout
+    end
+
+    it "plans only the named formulae `brew install` would install or upgrade, with brew's messages about each",
+       :aggregate_failures do
+      stub_formula("dep")
+      stub_formula("new", deps: %w[dep])
+      stub_formula("old", "1.0")
+      stub_formula("current", "2.0")
+      allow(stub_formula("pinned", "1.0")).to receive(:pinned?).and_return(true)
+      upgrade = Regexp.escape("old 1.0 is already installed but outdated (so it will be upgraded).")
+      current = Regexp.escape("Warning: current 2.0 is already installed and up-to-date.")
+      expect { run_command("--dry-run", "current", "pinned", "old", "new") }
+        .to output(/\A#{upgrade}\n==> Would install 2 formulae in 1 batch.*^new .*^old /m).to_stdout
+        .and output(/\A#{current}.*^Error: pinned 1\.0 is already installed/m).to_stderr
+      expect(Homebrew).not_to be_failed
+    end
+
+    it "fetches the bottle manifests after the preinstall checks and `--cc` warning, as brew does" do
+      stub_formula("cmake")
+      queue = instance_double(Homebrew::DownloadQueue, shutdown: nil)
+      allow(Homebrew::DownloadQueue).to receive(:new).and_return(queue)
+      expect(Homebrew::Install).to receive(:perform_preinstall_checks_once).ordered
+      expect(Homebrew::Install).to receive(:check_cc_argv).ordered
+      expect(queue).to receive(:fetch)
+        .with(only: Resource::BottleManifest, heading: "Downloading bottle manifests", allow_failures: true).ordered
+      run_command("--dry-run", "cmake")
+    end
+
+    it "shuts down its download queue when a preinstall check stops the command" do
+      stub_formula("cmake")
+      queue = instance_double(Homebrew::DownloadQueue, fetch: nil)
+      allow(Homebrew::DownloadQueue).to receive(:new).and_return(queue)
+      allow(Homebrew::Install).to receive(:perform_preinstall_checks_once).and_raise(SystemExit)
+      expect(queue).to receive(:shutdown)
+      expect { run_command("--dry-run", "cmake") }.to raise_error(SystemExit)
+    end
+
+    it "plans the dependencies of each formula with `--only-dependencies`, installed ones too, without estimates, " \
+       "so dependencies first, then by name, splitting only for `--last`" do
+      stub_formula("current", "2.0")
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_formula("gcc")
+      argv = %w[--dry-run --only-dependencies --guess=lib=2h --last=gcc app lib current gcc]
+      expect { run_command(*argv) }.to output(<<~EOS).to_stdout
+        ==> Would install the dependencies of 4 formulae in 2 batches
+        ==> Batch 1 of 2
+        dependencies of current
+        dependencies of lib
+        dependencies of app
+        ==> Batch 2 of 2 (--last)
+        dependencies of gcc
+      EOS
+    end
+
+    it "doesn't plan an outdated formula with `HOMEBREW_NO_INSTALL_UPGRADE`, as `brew install` doesn't" do
+      ENV["HOMEBREW_NO_INSTALL_UPGRADE"] = "1"
+      stub_formula("old", "1.0")
+      expect { run_command("--dry-run", "old") }.to output("==> No formulae to install\n").to_stdout
+    end
+
+    it "splits batches and gives the reasons, leaving out `--exclude`d formulae" do
+      stub_formula("cmake")
+      stub_formula("llvm", deps: %w[cmake])
+      stub_formula("gcc")
+      expect { run_command("--dry-run", "--exclude=gcc", "llvm", "cmake", "gcc") }.to output(<<~EOS).to_stdout
+        ==> Would install 2 formulae in 2 batches, estimated 1h26m
+        ==> Batch 1 of 2: 3m20s
+        cmake                        build     3m20s
+        ==> Batch 2 of 2: 1h23m, slow llvm needs slow cmake
+        llvm                         build     1h23m
+        ==> Excluded
+        gcc
+      EOS
+    end
+
+    it "doesn't split before a slow keg-only formula, which only `brew upgrade` moves first" do
+      stub_formula("gcc")
+      stub_formula("llvm", "1.0", keg_only: true)
+      expect { run_command("--dry-run", "llvm", "gcc") }.to output(/^==> Would install 2 formulae in 1 batch/)
+        .to_stdout
+    end
+
+    it "estimates a bottled formula as a pour, unless built from source by a flag" do
+      stub_formula("lib", bottled: true)
+      flags = [[], %w[--build-from-source], %w[--build-bottle], %w[--cc=gcc-9], %w[--HEAD]]
+      pours = flags.to_h do |flag|
+        pour = T.let(nil, T.nilable(T::Boolean))
+        allow(Timed::Command).to receive(:show_plan) { |_, _, estimates| pour = estimates.fetch("lib").pour }
+        run_command("--dry-run", *flag, "lib")
+        [flag, pour]
+      end
+      expect(pours).to eq(flags.to_h { |flag| [flag, flag.empty?] })
+    end
+
+    it "stops where `brew install` stops before installing anything, running nothing" do
+      stub_formula("cmake")
+      head_only = formula("headonly") do
+        T.bind(self, T.class_of(Formula))
+        head "https://brew.sh/headonly.git"
+      end
+      stub_formula_loader(head_only)
+      allow(DevelopmentTools).to receive(:installed?).and_return(false)
+      runs = {
+        "unknown name"   => %w[cmake nope],
+        "HEAD-only"      => %w[cmake headonly],
+        "no build tools" => %w[--build-from-source cmake],
+        "--env"          => %w[--env=std cmake],
+      }
+      stopped = runs.transform_values do |argv|
+        run_command("--yes", *argv)
+        nil
+      rescue FormulaOrCaskUnavailableError, BuildFlagsError, MethodDeprecatedError, SystemExit => e
+        e.class
+      end
+      expect([stopped, brew_calls]).to eq([{ "unknown name"   => FormulaUnavailableError,
+                                             "HEAD-only"      => SystemExit,
+                                             "no build tools" => BuildFlagsError,
+                                             "--env"          => MethodDeprecatedError }, []])
+    end
+
+    it "fails a formula brew can't install with brew's message, leaving it out, and installs the others",
+       :aggregate_failures do
+      stub_formula("app", deps: %w[gone])
+      allow(stub_formula("lib", "1.0")).to receive(:pinned?).and_return(true)
+      stub_formula("tool", deps: %w[lib])
+      stub_formula("cmake")
+      unavailable = Regexp.escape('Error: app: No available formula with the name "gone" (dependency of app).')
+      pinned = Regexp.escape("Error: You must `brew unpin lib` as installing tool requires the latest version of " \
+                             "pinned dependencies.")
+      # Brew may add a suggestion to the first.
+      expect { run_command("--yes", "app", "tool", "cmake") }
+        .to output(/\A#{unavailable}[^\n]*\n#{pinned}\n\z/).to_stderr
+      expect([brew_calls, Homebrew.failed?]).to eq([[%w[install --formula --yes --display-times cmake]], true])
+    end
+
+    it "checks each formula as brew does before its plan: a disabled or forbidden one fails and is left out, " \
+       "a deprecated one warns", :aggregate_failures do
+      stub_formula("old", status: :disabled)
+      stub_formula("dated", status: :deprecated)
+      stub_formula("banned")
+      stub_formula("cmake")
+      ENV["HOMEBREW_FORBIDDEN_FORMULAE"] = "banned"
+      expect { run_command("--yes", "old", "dated", "banned", "cmake") }
+        .to output(/\AError: old has been disabled .*^Warning: dated has been deprecated .*^Error: .*banned/m)
+        .to_stderr
+      expect([brew_calls, Homebrew.failed?]).to eq([[%w[install --formula --yes --display-times cmake dated]], true])
+    end
+
+    it "warns and makes brew's preinstall checks once, as `brew install` does before its plan, even with " \
+       "`--dry-run`" do
+      stub_formula("cmake")
+      expect(Homebrew::Install).to receive(:perform_preinstall_checks_once).ordered
+      expect(Homebrew::Install).to receive(:ask_formulae).ordered
+      ignore = Regexp.escape("Warning: `--ignore-dependencies` is an unsupported Homebrew developer option!")
+      expect { run_command("--dry-run", "--ignore-dependencies", "--cc=gcc-9", "cmake") }
+        .to output(/\A#{ignore}\n.*^Warning: You passed `--cc=gcc-9`\.\n\z/m).to_stderr
+    end
+
+    it "doesn't ask for confirmation" do
+      stub_formula("cmake")
+      allow(Homebrew::Install).to receive(:formulae_ask_prompt_needed?).and_return(true)
+      expect(Homebrew::Ask).not_to receive(:confirm?)
+      run_command("--dry-run", "cmake")
+    end
+  end
+
+  describe "build times brew drops from receipts" do
+    it "puts back the build times brew drops when it marks an installed formula as installed on request, " \
+       "as they were, and stamps no other receipt", :aggregate_failures do
+      stamped = {}
+      names = %w[cmake gcc]
+      [%w[--dry-run], %w[--yes]].each do |flags|
+        stub_formula("cmake", "2.0", on_request: false, build_times:)
+        stub_formula("gcc", "2.0", on_request: false)
+        run_command(*flags, *names)
+        stamped[flags] = names.to_h do |name|
+          [name, JSON.parse((HOMEBREW_CELLAR/name/"2.0/INSTALL_RECEIPT.json").read)
+                     .slice("installed_on_request", "build_times")]
+        end
+        names.each { |name| remove_keg(name) }
+      end
+      after = { "cmake" => { "installed_on_request" => true, "build_times" => build_times },
+                "gcc"   => { "installed_on_request" => true } }
+      expect([stamped, brew_calls]).to eq([{ %w[--dry-run] => after, %w[--yes] => after }, []])
+    end
+
+    it "warns about a receipt it can't put the build times back in, and still stops where brew stops" do
+      stub_formula("cmake", "2.0", on_request: false, build_times:)
+      head_only = formula("headonly") do
+        T.bind(self, T.class_of(Formula))
+        head "https://brew.sh/headonly.git"
+      end
+      stub_formula_loader(head_only)
+      allow(Timed::Receipts).to receive(:stamp).and_raise(Errno::EACCES)
+      expect { run_command("--yes", "cmake", "headonly") }
+        .to raise_error(SystemExit)
+        .and output(%r{^Warning: Couldn't stamp \S+/opt/cmake/INSTALL_RECEIPT\.json: Permission denied$}).to_stderr
+    end
+
+    it "warns about a receipt it can't read again, and still stops where brew stops" do
+      stub_formula("cmake", "2.0", on_request: false, build_times:)
+      head_only = formula("headonly") do
+        T.bind(self, T.class_of(Formula))
+        head "https://brew.sh/headonly.git"
+      end
+      stub_formula_loader(head_only)
+      read = []
+      allow(Timed::Receipts).to receive(:build_times) do |formula|
+        raise Errno::EACCES if read.include?(formula.name)
+
+        read << formula.name
+        build_times if formula.name == "cmake"
+      end
+      expect { run_command("--yes", "cmake", "headonly") }
+        .to raise_error(SystemExit)
+        .and output(%r{^Warning: Couldn't stamp \S+/opt/cmake/INSTALL_RECEIPT\.json: Permission denied$}).to_stderr
+    end
+
+    it "doesn't read receipts with `--no-stamp-receipts`" do
+      stub_formula("cmake", "2.0", on_request: false, build_times:)
+      expect(Timed::Receipts).not_to receive(:build_times)
+      run_command("--dry-run", "--no-stamp-receipts", "cmake")
+    end
+
+    it "puts them back even when brew then stops, but not with `--no-stamp-receipts`" do
+      stamped = {}
+      [%w[--yes], %w[--yes --no-stamp-receipts]].each do |flags|
+        stub_formula("cmake", "2.0", on_request: false, build_times:)
+        head_only = formula("headonly") do
+          T.bind(self, T.class_of(Formula))
+          head "https://brew.sh/headonly.git"
+        end
+        stub_formula_loader(head_only)
+        expect { run_command(*flags, "cmake", "headonly") }.to raise_error(SystemExit)
+        stamped[flags] = JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)["build_times"]
+        remove_keg("cmake")
+      end
+      expect(stamped).to eq(%w[--yes] => build_times, %w[--yes --no-stamp-receipts] => nil)
+    end
+  end
+
+  describe "Homebrew's support tier notice" do
+    it "is left for brew to print as the command exits, with `--dry-run` or nothing planned, but not when " \
+       "batches run, which each print it" do
+      stub_formula("cmake")
+      runs = { "--dry-run" => %w[--dry-run cmake], "nothing planned" => %w[--yes --exclude=cmake cmake],
+               "batches" => %w[--yes cmake] }
+      tiers = runs.transform_values do |argv|
+        Homebrew::Diagnostic.support_tiers.clear
+        run_command("--cc=gcc-9", *argv)
+        Homebrew::Diagnostic.support_tiers.dup
+      end
+      expect(tiers).to eq("--dry-run" => [3], "nothing planned" => [3], "batches" => [])
+    end
+  end
+
+  describe "confirmation" do
+    it "asks once, by `brew install`'s rule for the formulae it runs and their dependents" do
+      stub_formula("cmake")
+      stub_formula("gcc")
+      expect(Homebrew::Install).to receive(:formulae_ask_prompt_needed?)
+        .with([an_object_having_attributes(formula: an_object_having_attributes(full_name: "cmake"))],
+              an_instance_of(Homebrew::Upgrade::Dependents))
+        .and_return(true)
+      expect(Homebrew::Ask).to receive(:confirm?).with(action: "installation").once.and_return(true)
+      run_to_end("--exclude=gcc", "cmake", "gcc")
+    end
+
+    it "prints and asks about an outdated dependency a pour's bottle is fine with, as brew does before reading " \
+       "the bottle's manifest" do
+      allow(Homebrew::Install).to receive(:ask_formulae).and_call_original
+      stub_formula("lib", "1.0")
+      app = stub_formula("app", deps: %w[lib], bottled: true)
+      fetches = []
+      allow(app.bottle).to receive(:fetch_tab) { fetches << :fetched }
+      lib = { "full_name" => "lib", "version" => "1.0", "revision" => 0 }
+      allow(app.bottle).to receive(:tab_attributes) { fetches.empty? ? {} : { "runtime_dependencies" => [lib] } }
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      expect { run_to_end("app") }.to output(/^==> Would upgrade 1 dependency for app:\nlib\n/).to_stdout
+    end
+
+    it "asks when brew would install a dependency of a named formula" do
+      stub_formula("dep")
+      stub_formula("app", deps: %w[dep])
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      run_to_end("app")
+    end
+
+    it "asks when brew would also upgrade outdated dependents of the formulae" do
+      app = stub_formula("app", "1.0")
+      dependent = stub_formula("dependent", "1.0", deps: %w[app], bottled: true)
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [dependent], pinned: [], skipped: [])
+      expect(Homebrew::Upgrade).to receive(:dependants).with([app], hash_including(ask: true)).and_return(dependents)
+      expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
+      run_to_end("app")
+    end
+
+    it "says once that dependents aren't checked with `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`, as brew does",
+       :aggregate_failures do
+      ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
+      stub_formula("app", "1.0")
+      expect(Homebrew::Ask).not_to receive(:confirm?)
+      warning = "`$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set: not checking for outdated"
+      expect { run_to_end("app") }.to output(satisfy { |text| text.scan(warning).length == 1 }).to_stderr
+    end
+
+    it "doesn't ask when brew would install only the named formulae" do
+      stub_formula("app")
+      expect(Homebrew::Ask).not_to receive(:confirm?)
+      run_to_end("app")
+    end
+
+    it "doesn't ask with `--yes` or `HOMEBREW_NO_ASK`" do
+      stub_formula("cmake")
+      allow(Homebrew::Install).to receive(:formulae_ask_prompt_needed?).and_return(true)
+      asks = 0
+      allow(Homebrew::Ask).to receive(:confirm?) { asks += 1 }
+      ways = { "--yes" => [%w[--yes cmake], nil], "HOMEBREW_NO_ASK" => [%w[cmake], "1"] }
+      asked = ways.to_h do |way, (argv, no_ask)|
+        ENV["HOMEBREW_NO_ASK"] = no_ask
+        before = asks
+        run_to_end(*argv)
+        [way, asks - before]
+      end
+      expect(asked).to eq("--yes" => 0, "HOMEBREW_NO_ASK" => 0)
+    end
+
+    it "carries on without a terminal, where brew doesn't ask" do
+      stub_formula("dep")
+      stub_formula("app", deps: %w[dep])
+      allow(Homebrew::Ask).to receive(:confirm?).and_return(false)
+      run_command("app")
+      expect(brew_calls.last).to eq(%w[install --formula --yes --display-times app])
+    end
+  end
+
+  describe "running the batches" do
+    it "runs each batch with the forwarded formula flags but not its own" do
+      stub_formula("cmake")
+      run_command("--yes", "--verbose", "--force", "--HEAD", "--include-test", "--as-dependency", "--overwrite",
+                  "--skip-post-install", "--guess=cmake=1m", "--no-stamp-receipts", "--zap", "cmake")
+      flags = %w[--force --verbose --include-test --HEAD --skip-post-install --as-dependency --overwrite]
+      expect(brew_calls).to eq([["install", "--formula", "--yes", "--display-times", *flags, "cmake"]])
+    end
+
+    it "builds every formula of a batch from source in one call with `--build-from-source`, as each is named" do
+      stub_formula("lib", bottled: true)
+      stub_formula("app", deps: %w[lib])
+      run_command("--yes", "--build-from-source", "--debug-symbols", "--guess=lib=1m", "app", "lib")
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times --build-from-source --debug-symbols lib
+                                   app]])
+    end
+
+    it "names a formula given as a file to `brew install` by that file, made absolute, and logs it by name",
+       :aggregate_failures do
+      dir = mktmpdir
+      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
+      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
+      expect(brew_calls.last).to eq(["install", "--formula", "--yes", "--display-times",
+                                     (dir/"foo.rb").realpath.to_s])
+      expect(builds.fetch("foo").last).to include("status" => "built", "verb" => "install")
+    end
+
+    it "logs each install and stamps its receipt", :aggregate_failures do
+      stub_formula("cmake")
+      run_command("--yes", "cmake")
+      expect(builds.fetch("cmake").last).to include("version" => "2.0", "status" => "built", "verb" => "install")
+      expect(JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)["build_times"])
+        .to include("verb" => "install", "build_seconds" => 9.0)
+    end
+
+    it "leaves receipts as brew wrote them with `--no-stamp-receipts`, but still logs the installs",
+       :aggregate_failures do
+      stub_formula("cmake")
+      run_command("--yes", "--no-stamp-receipts", "cmake")
+      expect(JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)).not_to have_key("build_times")
+      expect(builds.fetch("cmake").last).to include("status" => "built", "verb" => "install")
+    end
+
+    it "takes a formula brew didn't install as failed, skips what needs it in later batches and runs the rest",
+       :aggregate_failures do
+      stub_formula("cmake")
+      stub_formula("llvm", deps: %w[cmake])
+      stub_formula("gcc")
+      failing << "cmake"
+      expect { run_command("--yes", "llvm", "cmake", "gcc") }.to output(<<~EOS).to_stderr
+        Warning: Skipping llvm: dependency cmake did not install
+        Error: 1 formula did not install: cmake
+      EOS
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times cmake gcc]])
+      expect(builds.transform_values { |entries| entries.last["status"] })
+        .to include("cmake" => "failed", "gcc" => "built", "llvm" => "skipped")
+    end
+
+    it "takes a formula whose latest version was installed when planned as installed only with a new receipt" do
+      stub_formula("app", "2.0", linked: false)
+      stub_formula("lib", "2.0", linked: false)
+      failing << "app"
+      expect { run_command("--yes", "--overwrite", "--guess=app=1m,lib=1m", "app", "lib") }
+        .to output("Error: 1 formula did not install: app\n").to_stderr
+    end
+
+    it "takes a formula an earlier batch upgraded alongside as installed, though its own call did nothing" do
+      stub_formula("lib")
+      stub_formula("app", "1.0", deps: %w[lib])
+      installs.merge!("lib" => %w[lib app], "app" => [])
+      expect { run_command("--yes", "lib", "app") }.not_to output.to_stderr
+      expect(brew_calls.map(&:last)).to eq(%w[lib app])
+    end
+
+    it "takes what a poured formula needs from its bottle's manifest, as brew does, with `--only-dependencies`" do
+      stub_formula("lib", "1.0")
+      app = stub_formula("app", deps: %w[lib], bottled: true)
+      # Like brew's, the tab is empty until the manifest has been fetched.
+      fetches = []
+      allow(app.bottle).to receive(:fetch_tab) { fetches << :fetched }
+      lib = { "full_name" => "lib", "version" => "1.0", "revision" => 0 }
+      allow(app.bottle).to receive(:tab_attributes) { fetches.empty? ? {} : { "runtime_dependencies" => [lib] } }
+      installs["app"] = []
+      expect { run_command("--yes", "--only-dependencies", "app") }.not_to output.to_stderr
+    end
+
+    describe "with `--only-dependencies`" do
+      before do
+        stub_formula("dep")
+        stub_formula("app", deps: %w[dep])
+        installs["app"] = %w[dep]
+      end
+
+      it "checks that brew installed what each formula needs, and logs that, not the formula", :aggregate_failures do
+        expect { run_command("--yes", "--only-dependencies", "app") }.not_to output.to_stderr
+        expect(brew_calls.last).to eq(%w[install --formula --yes --display-times --only-dependencies app])
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+          .to include("dep" => ["built"]).and(satisfy { |logged| !logged.key?("app") })
+      end
+
+      it "fails when brew didn't install what a formula needs, without logging the formula as failed",
+         :aggregate_failures do
+        failing << "dep"
+        expect { run_command("--yes", "--only-dependencies", "app") }
+          .to output("Error: The dependencies of 1 formula did not install: app\n").to_stderr
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+          .to include("dep" => ["failed"]).and(satisfy { |logged| !logged.key?("app") })
+      end
+    end
+  end
+end
+
+# rubocop:enable Sorbet/BlockMethodDefinition

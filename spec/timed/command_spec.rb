@@ -194,6 +194,20 @@ RSpec.describe Timed::Command do
         EOS
     end
 
+    it "shows the dependencies of each formula, without estimates, with `dependencies_only`" do
+      result = Timed::Planner::Result.new(batches:  [batch("main", nil, "a", "b"), batch("last", "--last", "c")],
+                                          warnings: [])
+      expect { described_class.show_plan("install", result, estimates, excluded: [], dependencies_only: true) }
+        .to output(<<~EOS).to_stdout
+          ==> Would install the dependencies of 3 formulae in 2 batches
+          ==> Batch 1 of 2
+          dependencies of a
+          dependencies of b
+          ==> Batch 2 of 2 (--last)
+          dependencies of c
+        EOS
+    end
+
     it "prints the planner's warnings" do
       result = Timed::Planner::Result.new(batches: [batch("main", nil, "a")], warnings: ["dependency cycle among a"])
       expect { described_class.show_plan("upgrade", result, estimates, excluded: []) }

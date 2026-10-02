@@ -49,7 +49,7 @@ module Timed
       end
       parser.comma_array "--exclude",
                          description: "Comma-separated formulae to leave out of the run. Homebrew may still " \
-                                      "upgrade them as dependencies of the others."
+                                      "install or upgrade them as dependencies of the others."
       parser.switch "--no-stamp-receipts",
                     description: "Don't add the build times to the install receipts of the formulae it installs; " \
                                  "they are still logged.",
@@ -159,6 +159,21 @@ module Timed
       exec.call({ AUTO_UPDATED_ENV => "1" }, [command, *argv])
     end
 
+    # The full names of the formulae `formula` needs, to run those first:
+    # brew's expansion, which names each by its formula's full name and
+    # leaves out optional and recommended dependencies the formula isn't
+    # built with, also leaving out those that can't be loaded (and what only
+    # they need).
+    sig { params(formula: Formula).returns(T::Array[String]) }
+    def self.dependency_names(formula)
+      formula.recursive_dependencies do |dependent, dependency|
+        dependency.to_formula
+        Dependency.action(dependent, dependency)
+      rescue FormulaUnavailableError
+        Dependable::PRUNE
+      end.map(&:name)
+    end
+
     # The lookahead asks for at least one of hours, minutes or seconds.
     GUESS = /\A(?<name>[^=]+)=(?=\d)(?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?\z/
 
@@ -224,27 +239,35 @@ module Timed
 
     # Prints the batches with their estimates, why each starts where it does,
     # and the planner's warnings. Estimates ending in `?` are fallbacks, as in
-    # `brew build-times stats`.
+    # `brew build-times stats`. With `dependencies_only` (`brew install
+    # --only-dependencies`), each row is the dependencies of a formula, which
+    # have no estimates yet.
     sig {
-      params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String])
-        .void
+      params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String],
+             dependencies_only: T::Boolean).void
     }
-    def self.show_plan(verb, result, estimates, excluded:)
+    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false)
       result.warnings.each { |warning| opoo warning }
       batches = result.batches
       if batches.empty?
         ohai "No formulae to #{verb}"
       else
-        seconds = ->(names) { names.sum { |name| estimates.fetch(name).seconds } }
-        count = batches.sum { |batch| batch.names.length }
-        oh1 "Would #{verb} #{Utils.pluralize("formula", count, include_count: true)} in " \
-            "#{Utils.pluralize("batch", batches.length, plural: "es", include_count: true)}, " \
-            "estimated #{BuildLog.format_duration(seconds.call(batches.flat_map(&:names)))}"
+        duration = lambda do |names|
+          BuildLog.format_duration(names.sum { |name| estimates.fetch(name).seconds }) unless dependencies_only
+        end
+        count = Utils.pluralize("formula", batches.sum { |batch| batch.names.length }, include_count: true)
+        total = duration.call(batches.flat_map(&:names))
+        oh1 "Would #{verb} #{"the dependencies of " if dependencies_only}#{count} in " \
+            "#{Utils.pluralize("batch", batches.length, plural: "es", include_count: true)}" \
+            "#{", estimated #{total}" if total}"
         batches.each.with_index(1) do |batch, index|
           reason = batch.reason if batch.reason != "--last"
-          ohai "Batch #{index} of #{batches.length}#{" (--last)" if batch.label == "last"}: " \
-               "#{BuildLog.format_duration(seconds.call(batch.names))}#{", #{reason}" if reason}"
+          time = duration.call(batch.names)
+          ohai "Batch #{index} of #{batches.length}#{" (--last)" if batch.label == "last"}" \
+               "#{": #{time}" if time}#{", #{reason}" if reason}"
           batch.names.each do |name|
+            next puts "dependencies of #{name}" if dependencies_only
+
             estimate = estimates.fetch(name)
             puts format("%<name>-28s %<kind>-5s %<estimate>9s", name:, kind: estimate.pour ? "pour" : "build",
                         estimate: "#{BuildLog.format_duration(estimate.seconds)}#{"?" if estimate.fallback}")

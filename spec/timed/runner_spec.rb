@@ -422,6 +422,46 @@ RSpec.describe Timed::Runner do
       end
     end
 
+    describe "with `dependencies_only`" do
+      it "logs only what brew installed for the formulae, never them, failed or skipped, and says whose " \
+         "dependencies failed", :aggregate_failures do
+        %w[lib app other].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[zlib], silent: %w[lib app other],
+                  alongside: { %w[lib] => %w[zlib], %w[other] => %w[pcre] })
+        succeeded = ->(formula) { ->(_since) { formula.name != "lib" } }
+        expect do
+          run([batch("lib"), batch("app", "other")], verb: "install", deps: { "app" => %w[lib] }, succeeded:,
+              dependencies_only: true)
+        end.to output(<<~EOS).to_stderr
+          Warning: Skipping app: the dependencies of lib did not install
+          Error: The dependencies of 1 formula did not install: lib
+        EOS
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
+          .to eq("zlib" => ["failed"], "pcre" => ["built"])
+        expect(calls.map(&:last)).to eq(%w[lib other])
+      end
+
+      it "logs and stamps a formula brew installs as another one's dependency, but not that one",
+         :aggregate_failures do
+        %w[lib app].each { |name| stub_formula(name) }
+        allow(described_class).to receive(:stream) do |_argv, &on_line|
+          on_line.call("==> Installing app dependency: lib\n")
+          keg = HOMEBREW_CELLAR/"lib/2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+          true
+        end
+        succeeded = ->(_formula) { ->(_since) { true } }
+        expect { run([batch("lib", "app")], verb: "install", succeeded:, dependencies_only: true) }
+          .not_to output.to_stderr
+        expect(builds.transform_values { |entries| entries.map { |entry| entry.slice("status", "build_seconds") } })
+          .to eq("lib" => [{ "status" => "built", "build_seconds" => 9.0 }])
+        expect(JSON.parse((HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json").read)["build_times"])
+          .to include("verb" => "install", "build_seconds" => 9.0)
+      end
+    end
+
     describe "with `stops_at_failure`" do
       it "logs the formulae of a failed call that brew never started as skipped, not failed, and warns",
          :aggregate_failures do
@@ -463,6 +503,25 @@ RSpec.describe Timed::Runner do
           .to raise_error(Interrupt).and output("Warning: Interrupted; not finished or logged: app tool\n").to_stderr
         expect(builds.keys).to eq(%w[lib])
         File.open("#{database}.lock") { |lock| expect(lock.flock(File::LOCK_EX | File::LOCK_NB)).to eq(0) }
+      end
+
+      it "says whose dependencies didn't finish with `dependencies_only`, logging what brew finished",
+         :aggregate_failures do
+        %w[lib app].each { |name| stub_formula(name) }
+        fake_brew(silent: %w[lib], alongside: { %w[lib] => %w[zlib] }) { |names| interrupt if names == %w[lib] }
+        expect { run([batch("lib"), batch("app")], verb: "install", dependencies_only: true) }
+          .to raise_error(Interrupt)
+          .and output("Warning: Interrupted; not finished or logged: the dependencies of lib app\n").to_stderr
+        expect(builds.keys).to eq(%w[zlib])
+      end
+
+      it "leaves out a formula whose dependencies brew finished in the stopped batch, with `dependencies_only`" do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew(silent: %w[lib app], alongside: { %w[lib app] => %w[zlib] }) { interrupt }
+        succeeded = ->(formula) { ->(_since) { formula.name == "lib" } }
+        expect { run([batch("lib", "app"), batch("tool")], verb: "install", succeeded:, dependencies_only: true) }
+          .to raise_error(Interrupt)
+          .and output("Warning: Interrupted; not finished or logged: the dependencies of app tool\n").to_stderr
       end
 
       it "logs and stamps the formulae of the stopped batch that brew finished", :aggregate_failures do
