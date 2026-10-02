@@ -383,6 +383,15 @@ RSpec.describe Timed::Command do
         EOS
     end
 
+    it "says there are no formulae only for a run without casks, as brew says nothing like it",
+       :aggregate_failures do
+      result = Timed::Planner::Result.new(batches: [], warnings: [])
+      expect { described_class.show_plan("upgrade", result, estimates, excluded: []) }
+        .to output("==> No formulae to upgrade\n").to_stdout
+      expect { described_class.show_plan("upgrade", result, estimates, excluded: [], casks: true) }
+        .not_to output.to_stdout
+    end
+
     it "prints the planner's warnings" do
       result = Timed::Planner::Result.new(batches: [batch("main", nil, "a")], warnings: ["dependency cycle among a"])
       expect { described_class.show_plan("upgrade", result, estimates, excluded: []) }

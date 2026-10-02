@@ -356,7 +356,6 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       expect { run_command("--dry-run", "firefox", "iterm2", "pinned-app") }.to output(<<~EOS).to_stdout
         ==> Would reinstall 2 casks:
         firefox iterm2
-        ==> No formulae to reinstall
         ==> Would reinstall 1 cask first
         firefox
         ==> Would reinstall 1 cask last

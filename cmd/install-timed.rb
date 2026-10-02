@@ -212,7 +212,8 @@ module Homebrew
         Install.ask_formulae(planned_installers, dependants, prompt: false, flags: args.flags_only,
                                                              **installer_options)
         Timed::Command.show_plan("install", result, estimates, excluded:          set & exclude,
-                                                               dependencies_only: args.only_dependencies?)
+                                                               dependencies_only: args.only_dependencies?,
+                                                               casks:             args.cask? || casks.any?)
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
                                              in_run: planned, force: args.force?)
         Timed::Command.show_casks("install", cask_plan, named: args.named)

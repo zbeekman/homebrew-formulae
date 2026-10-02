@@ -43,8 +43,9 @@ module Homebrew
         estimator = Timed::Command.estimator(args.estimator)
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
         items = args.named.to_formulae_and_casks_and_unavailable(method: :resolve)
+        named_casks = items.grep(Cask::Cask)
         # As `brew reinstall` does, first.
-        casks = items.grep(Cask::Cask).reject do |cask|
+        casks = named_casks.reject do |cask|
           next false unless cask.pinned?
 
           onoe "#{cask.full_name} is pinned. You must unpin it to reinstall."
@@ -56,19 +57,21 @@ module Homebrew
         exclude = (args.exclude || []).map { |name| Timed::Command.resolve("--exclude", name) }
 
         named = items.grep(Formula)
-        reinstall(named, casks, estimator:, guesses:, exclude:)
+        reinstall(named, casks, casks_named: args.cask? || named_casks.any?, estimator:, guesses:, exclude:)
         # As `brew reinstall` does, last.
         items.each { |item| ofail item if item.is_a?(Exception) }
       end
 
       private
 
-      # Plans and runs the reinstall of the `named` formulae and the `casks`.
+      # Plans and runs the reinstall of the `named` formulae and the `casks`,
+      # which pinned ones are left out of: `casks_named` says whether any were
+      # named, or `--cask` was given.
       sig {
-        params(named: T::Array[Formula], casks: T::Array[Cask::Cask], estimator: Symbol,
+        params(named: T::Array[Formula], casks: T::Array[Cask::Cask], casks_named: T::Boolean, estimator: Symbol,
                guesses: T::Hash[String, Float], exclude: T::Array[String]).void
       }
-      def reinstall(named, casks, estimator:, guesses:, exclude:)
+      def reinstall(named, casks, casks_named:, estimator:, guesses:, exclude:)
         # What `brew reinstall` prints about the casks before it asks about
         # them: the dependencies it would install.
         cask_dependencies = Install.print_dry_run_casks(casks, action:         "reinstall",
@@ -102,7 +105,7 @@ module Homebrew
         dependants = Upgrade.dependants(named, flags: args.flags_only, **installer_options)
         Install.ask_formulae(installers.values, dependants, action: "reinstallation", prompt: false,
                              flags: args.flags_only, **installer_options)
-        Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude)
+        Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude, casks: casks_named)
         # Brew installs a cask that isn't installed.
         installed, new_casks = casks.partition(&:installed?)
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },

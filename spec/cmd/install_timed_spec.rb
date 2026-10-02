@@ -685,7 +685,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect { run_command("--dry-run", "firefox", "iterm2", "current-app") }.to output(<<~EOS).to_stdout
         ==> Would install 1 cask:
         firefox
-        ==> No formulae to install
         ==> Would install 1 cask first
         firefox
         ==> Would install 1 cask last
@@ -704,6 +703,11 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([%w[install --cask --yes --verbose --adopt --no-binaries firefox current-app],
                                 %w[install --formula --yes --display-times --verbose --keep-tmp cmake],
                                 %w[install --cask --yes --verbose --adopt --no-binaries iterm2]])
+    end
+
+    it "prints nothing with `--dry-run` for a named cask that is installed and current, as brew doesn't" do
+      stub_cask("current-app", "2.0")
+      expect { run_command("--dry-run", "current-app") }.not_to output.to_stdout
     end
 
     it "leaves an installed, outdated cask to install as brew does with `HOMEBREW_NO_INSTALL_UPGRADE`" do

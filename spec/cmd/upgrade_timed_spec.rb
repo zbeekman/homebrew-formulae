@@ -299,9 +299,9 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(Homebrew).to be_failed
     end
 
-    it "plans no formulae with `--cask`" do
+    it "plans no formulae with `--cask`, and doesn't say so, as brew doesn't" do
       stub_formula("cmake")
-      expect { run_command("--dry-run", "--cask") }.to output("==> No formulae to upgrade\n").to_stdout
+      expect { run_command("--dry-run", "--cask") }.not_to output.to_stdout
     end
 
     it "checks HEAD formulae against upstream with `--fetch-HEAD`, as `brew upgrade` does" do
@@ -581,12 +581,16 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_cask("current-app", "2.0")
       stub_cask("manual-app", stanzas: 'installer manual: "Manual.app"')
       expect { run_command("--dry-run") }.to output(<<~EOS).to_stdout
-        ==> No formulae to upgrade
         ==> Would upgrade 1 cask first
         firefox
         ==> Would upgrade 1 cask last
         iterm2: `pkg` requires sudo
       EOS
+    end
+
+    it "prints nothing of its own for a named cask brew won't upgrade, as brew's preview says why" do
+      stub_cask("current-app", "2.0")
+      expect { run_command("--dry-run", "current-app") }.not_to output.to_stdout
     end
 
     it "runs only the preview with `--dry-run`" do

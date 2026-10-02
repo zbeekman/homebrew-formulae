@@ -246,16 +246,17 @@ module Timed
     # and the planner's warnings. Estimates ending in `?` are fallbacks, as in
     # `brew build-times stats`. With `dependencies_only` (`brew install
     # --only-dependencies`), each row is the dependencies of a formula, which
-    # have no estimates yet.
+    # have no estimates yet. Without batches, it says so only if the run has no
+    # `casks` (named, planned or `--cask`), whose lists say what it does.
     sig {
       params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String],
-             dependencies_only: T::Boolean).void
+             dependencies_only: T::Boolean, casks: T::Boolean).void
     }
-    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false)
+    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false)
       result.warnings.each { |warning| opoo warning }
       batches = result.batches
       if batches.empty?
-        ohai "No formulae to #{verb}"
+        ohai "No formulae to #{verb}" unless casks
       else
         duration = lambda do |names|
           BuildLog.format_duration(names.sum { |name| estimates.fetch(name).seconds }) unless dependencies_only

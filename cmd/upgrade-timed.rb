@@ -100,7 +100,10 @@ module Homebrew
         preview = T.let([], T::Array[String])
         Homebrew.failed = true unless Timed::Runner.stream(preview_argv) { |line| preview << line }
         excluded = set & exclude
-        Timed::Command.show_plan("upgrade", result, estimates, excluded:)
+        named_casks = items.grep(Cask::Cask)
+        outdated = outdated_casks(named_casks)
+        any_casks = args.cask? || named_casks.any? || outdated.any?
+        Timed::Command.show_plan("upgrade", result, estimates, excluded:, casks: any_casks)
         planned = result.batches.flat_map(&:names)
         # Without names, brew's preview lists every formula and cask it would
         # upgrade, casks by token.
@@ -111,7 +114,7 @@ module Homebrew
           extra = planned - listed
           opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
         end
-        cask_plan = Timed::Command.cask_plan({ upgrade: outdated_casks(items.grep(Cask::Cask)) }, in_run: planned)
+        cask_plan = Timed::Command.cask_plan({ upgrade: outdated }, in_run: planned)
         Timed::Command.show_casks("upgrade", cask_plan, named: args.named)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)
