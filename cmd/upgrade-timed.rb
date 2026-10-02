@@ -27,7 +27,8 @@ module Homebrew
           Takes every `brew upgrade` option. Prints the plan from `brew upgrade --dry-run` and the
           batches with their estimates, then asks for confirmation once for the whole run, as
           `brew upgrade` does. With `--dry-run`, stops after printing the plan. Otherwise runs
-          `brew upgrade` once per batch and logs how long each formula took.
+          `brew upgrade` once per batch and logs how long each formula took. Upgrades outdated casks with
+          `brew upgrade --cask` before the batches, or after them if they may prompt or need the run.
         EOS
         Timed::Command.define_flags(self)
       end
@@ -52,7 +53,8 @@ module Homebrew
         estimator = Timed::Command.estimator(args.estimator)
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
 
-        named = named_formulae
+        items = named_items
+        named = items.grep(Formula)
         guesses = Timed::Command.guesses(args.guess || [],
                                          resolve: ->(name) { Timed::Command.resolve("--guess", name) })
         last = (args.last || []).map { |name| Timed::Command.resolve("--last", name) }
@@ -90,8 +92,10 @@ module Homebrew
           exclude:,
         )
 
-        # Brew's own plan, which also reports named formulae it won't upgrade.
-        forwarded = Timed::Command.forward(args.options_only, conflicts: self.class.parser.conflicts)
+        # Brew's own plan, which also reports named formulae and casks it won't
+        # upgrade.
+        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
+                                           conflicts: self.class.parser.conflicts)
         preview_argv = ["upgrade", "--dry-run", *forwarded.preview, *Timed::Command.named_argv(args.named)]
         preview = T.let([], T::Array[String])
         Homebrew.failed = true unless Timed::Runner.stream(preview_argv) { |line| preview << line }
@@ -107,17 +111,21 @@ module Homebrew
           extra = planned - listed
           opoo "The batches include #{extra.join(", ")}, which `brew upgrade` wouldn't upgrade." if extra.any?
         end
-        return if args.dry_run? || planned.empty?
+        cask_plan = Timed::Command.cask_plan({ upgrade: outdated_casks(items.grep(Cask::Cask)) }, in_run: planned)
+        Timed::Command.show_casks("upgrade", cask_plan)
+        casks = (cask_plan.first + cask_plan.last).map(&:cask)
+        return if args.dry_run? || (planned.empty? && casks.empty?)
 
-        # Once for the whole run, by brew's rules: with named formulae, only if
-        # the plan has others than the names as given, or brew would install
-        # dependencies of the named ones it plans, or upgrade dependents of
+        # Once for the whole run, by brew's rules: with named arguments, only
+        # if the plan has others than the names as given, or brew would install
+        # dependencies of the named formulae it plans, or upgrade dependents of
         # any of them (brew checks those before refusing any).
         upgrading = roots.select { |formula| needs.key?(formula.full_name) }
         force = args.named.present? &&
                 (upgrading.any? { |formula| needs.fetch(formula.full_name).any? } || outdated_dependents?(roots))
         ask = !args.no_ask? && Install.ask_prompt_needed?(
-          planned_names: planned, requested_names: args.named, force:, named: args.named.present?,
+          planned_names: planned + casks.map(&:full_name), requested_names: args.named, force:,
+          named: args.named.present?
         )
         # Exits on "n"; returns false without a terminal, where brew carries on
         # unasked.
@@ -125,15 +133,23 @@ module Homebrew
 
         # `brew upgrade` takes `--minimum-version` with one name only, which
         # planning has already applied to.
-        flags = forwarded.formula.reject { |option| option.start_with?("--minimum-version=") }
-        # `brew upgrade` builds only the named formulae from source with
-        # `--build-from-source`, but gives `--debug-symbols` to every build in
-        # a call; formulae planned as pours go in a call without either.
-        pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
-        Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
-                                          pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                          stamp: !args.no_stamp_receipts?,
-                                          arguments: Timed::Command.path_arguments(args.named, formulae))
+        without_minimum_version = ->(options) { options.reject { |option| option.start_with?("--minimum-version=") } }
+        flags = without_minimum_version.call(forwarded.formula)
+        cask_flags = without_minimum_version.call(forwarded.cask)
+        Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
+                                flags: cask_flags, label: "first")
+        if result.batches.any?
+          # `brew upgrade` builds only the named formulae from source with
+          # `--build-from-source`, but gives `--debug-symbols` to every build
+          # in a call; formulae planned as pours go in a call without either.
+          pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
+          Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
+                                            pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
+                                            stamp: !args.no_stamp_receipts?,
+                                            arguments: Timed::Command.path_arguments(args.named, formulae))
+        end
+        Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.last.map(&:cask)),
+                                flags: cask_flags, label: "last")
       end
 
       private
@@ -141,14 +157,40 @@ module Homebrew
       sig { returns(T.nilable(String)) }
       def minimum_version = args.minimum_version || args.min_version
 
-      # The named formulae. Brew's preview reports unavailable names, and
-      # named casks are left to it.
-      sig { returns(T::Array[Formula]) }
-      def named_formulae
+      # The named formulae and casks. Brew's preview reports unavailable names.
+      sig { returns(T::Array[T.any(Formula, Cask::Cask)]) }
+      def named_items
         return [] if args.named.empty?
 
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
-        args.named.to_formulae_and_casks_and_unavailable(method: :resolve).grep(Formula)
+        items = args.named.to_formulae_and_casks_and_unavailable(method: :resolve)
+        items.grep(Formula) + items.grep(Cask::Cask)
+      end
+
+      # The casks `brew upgrade` would upgrade, as it works them out: the
+      # `named` ones, or every installed one with no names, unless only
+      # formulae are named or with `--formula`; not pinned, not below
+      # `--minimum-version` or `installer manual`. Brew's preview reports those
+      # it won't upgrade.
+      sig { params(named: T::Array[Cask::Cask]).returns(T::Array[Cask::Cask]) }
+      def outdated_casks(named)
+        return [] if args.formula? || (args.named.present? && named.empty?)
+
+        version = minimum_version
+        named = named.select { |cask| MinimumVersion.cask_installed_below?(cask, version) } if version.present?
+        # Brew reports pinned ones itself.
+        named = named.reject(&:pinned?)
+        return [] if args.named.present? && named.empty?
+
+        outdated = Cask::Upgrade.outdated_casks(named, args:, force: args.force?, quiet: true, greedy: args.greedy?,
+                                                       greedy_latest:       args.greedy_latest?,
+                                                       greedy_auto_updates: args.greedy_auto_updates?)
+        outdated.reject do |cask|
+          cask.artifacts.any? { |artifact| artifact.is_a?(Cask::Artifact::Installer) && artifact.manual_install }
+        end
+      rescue Cask::CaskError
+        # E.g. a named cask that isn't installed.
+        []
       end
 
       # What brew would install or upgrade before each formula it upgrades,

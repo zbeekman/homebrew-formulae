@@ -899,5 +899,73 @@ RSpec.describe Timed::Casks do
     end
   end
 
+  describe Timed::Casks::DiskFacts do
+    subject(:disk) { described_class.new }
+
+    let(:dir) { mktmpdir.realpath }
+
+    sig { params(path: Pathname).returns(T.nilable([Integer, T::Boolean, T::Boolean])) }
+    def entry(path) = disk.lstat(path)&.then { |found| [found.uid, found.readable, found.directory] }
+
+    it "reads each entry with `lstat`, as the current user, a directory a symlink names counting as one" do
+      (dir/"app").mkpath
+      FileUtils.touch dir/"file"
+      FileUtils.ln_s dir/"app", dir/"link"
+      FileUtils.ln_s dir/"gone", dir/"dangling"
+      uid = Process.euid
+      expect(%w[app file link dangling gone].to_h { |name| [name, entry(dir/name)] })
+        .to eq("app" => [uid, true, true], "file" => [uid, true, false], "link" => [uid, true, true],
+               "dangling" => [uid, true, false], "gone" => nil)
+    end
+
+    it "takes an entry the user can't read, or a directory they can't search, as unreadable" do
+      (dir/"locked").mkpath
+      FileUtils.touch dir/"secret"
+      (dir/"secret").chmod(0200)
+      (dir/"locked").chmod(0600)
+      expect([entry(dir/"secret")&.fetch(1), entry(dir/"locked")&.fetch(1)]).to eq([false, false])
+    ensure
+      (dir/"locked").chmod(0755)
+    end
+
+    it "walks a tree without following symlinks, and nothing for a missing path", :aggregate_failures do
+      (dir/"outside").mkpath
+      FileUtils.touch dir/"outside/hidden"
+      (dir/"app/Contents").mkpath
+      FileUtils.touch dir/"app/Contents/binary"
+      FileUtils.ln_s dir/"outside", dir/"app/Contents/link"
+      expect(disk.walk(dir/"app").map { |found| found.path.relative_path_from(dir).to_s }.sort)
+        .to eq(%w[app app/Contents app/Contents/binary app/Contents/link])
+      expect(disk.walk(dir/"gone")).to eq([])
+    end
+
+    it "says what is writable as `Pathname#writable?` does, and resolves paths and links, `nil` when missing" do
+      (dir/"readonly").mkpath
+      (dir/"readonly").chmod(0555)
+      FileUtils.touch dir/"file"
+      FileUtils.ln_s dir/"file", dir/"link"
+      expect([disk.writable?(dir/"file"), disk.writable?(dir/"readonly"), disk.writable?(dir/"gone"),
+              disk.realpath(dir/"link"), disk.realpath(dir/"gone"), disk.readlink(dir/"link"),
+              disk.readlink(dir/"file"), disk.readlink(dir/"gone"), disk.uid])
+        .to eq([true, false, false, dir/"file", nil, dir/"file", nil, nil, Process.euid])
+    ensure
+      (dir/"readonly").chmod(0755)
+    end
+  end
+
+  describe ".terminal?" do
+    it "is whether `/dev/tty` opens, where sudo asks for a password" do
+      opens = [true, false].to_h do |works|
+        allow(File).to receive(:open).with("/dev/tty") do |&block|
+          raise Errno::ENXIO, "/dev/tty" unless works
+
+          block.call(StringIO.new)
+        end
+        [works, described_class.terminal?]
+      end
+      expect(opens).to eq(true => true, false => false)
+    end
+  end
+
   # rubocop:enable Sorbet/BlockMethodDefinition
 end

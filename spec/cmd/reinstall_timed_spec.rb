@@ -8,8 +8,11 @@
 
 require "cmd/reinstall"
 require_relative "../../cmd/reinstall-timed"
+require_relative "../support/casks"
 
 RSpec.describe Homebrew::Cmd::ReinstallTimed do
+  include TimedCaskHelper
+
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
   let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
@@ -59,9 +62,15 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
 
   # Brew: a call reinstalls each formula it is given, by name or file,
   # writing a new receipt and printing its summary line, except `failing`
-  # ones, where it stops.
+  # ones, where it stops; a cask call succeeds. There is a terminal for sudo.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
+    allow(Cask::CaskLoader).to receive(:for).and_call_original
+    allow(Timed::Command).to receive(:brew) do |_env, argv|
+      brew_calls << argv
+      true
+    end
+    allow(Timed::Casks).to receive(:terminal?).and_return(true)
     allow(Timed::Runner).to receive(:stream) do |argv, &block|
       brew_calls << argv
       success = argv.drop(1).reject { |arg| arg.start_with?("-") }.all? do |arg|
@@ -117,13 +126,6 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       expect { run_command("--interactive", "cmake") }
         .to raise_error(UsageError, "Invalid usage: `--interactive` needs a terminal; " \
                                     "use `brew reinstall --interactive` instead.")
-    end
-
-    it "refuses casks, naming them" do
-      stub_cask_loader(Cask::Cask.new("firefox"))
-      expect { run_command("--dry-run", "--cask", "firefox") }
-        .to raise_error(UsageError, "Invalid usage: `brew reinstall-timed` doesn't reinstall casks yet; " \
-                                    "use `brew reinstall --cask firefox` instead.")
     end
 
     it "fails on unknown `--exclude` and `--guess` names, naming the flag" do
@@ -342,6 +344,66 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       run_command("--yes", "--no-stamp-receipts", "cmake")
       expect(JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)).not_to have_key("build_times")
       expect(builds.fetch("cmake").last).to include("status" => "built", "verb" => "reinstall")
+    end
+  end
+
+  describe "casks" do
+    it "prints what brew would reinstall, leaving out pinned casks as brew does, then which to run first and " \
+       "last, judging the uninstall side of installed casks only", :aggregate_failures do
+      stub_cask("firefox", nil, stanzas: 'uninstall pkgutil: "org.mozilla"')
+      stub_cask("iterm2", "2.0", installed_stanzas: 'uninstall pkgutil: "com.iterm2"')
+      allow(stub_cask("pinned-app", "2.0")).to receive(:pinned?).and_return(true)
+      expect { run_command("--dry-run", "firefox", "iterm2", "pinned-app") }.to output(<<~EOS).to_stdout
+        ==> Would reinstall 2 casks:
+        firefox iterm2
+        ==> No formulae to reinstall
+        ==> Would reinstall 1 cask first
+        firefox
+        ==> Would reinstall 1 cask last
+        iterm2: `uninstall pkgutil` runs as root
+      EOS
+      expect(brew_calls).to eq([])
+    end
+
+    it "reinstalls casks first and last around the formulae with the cask flags, zapping with `--zap`" do
+      stub_formula("cmake")
+      stub_cask("firefox", "2.0")
+      stub_cask("iterm2", "2.0", installed_stanzas: 'zap quit: "com.iterm2"')
+      run_command("--yes", "--zap", "--no-binaries", "--keep-tmp", "cmake", "firefox", "iterm2")
+      expect(brew_calls).to eq([%w[reinstall --cask --yes --zap --no-binaries firefox],
+                                %w[reinstall --formula --yes --display-times --keep-tmp cmake],
+                                %w[reinstall --cask --yes --zap --no-binaries iterm2]])
+    end
+
+    describe "after the formulae failed" do
+      before do
+        stub_formula("cmake")
+        stub_cask("firefox", "2.0")
+        stub_cask("iterm2", "2.0", stanzas: 'pkg "iTerm2.pkg"')
+      end
+
+      it "doesn't reinstall the last casks after a failed build, which ends `brew reinstall`", :aggregate_failures do
+        allow(Timed::Runner).to receive(:run).and_return(true)
+        expect { run_command("--yes", "cmake", "firefox", "iterm2") }.to output(<<~EOS).to_stderr
+          Warning: `brew reinstall` stopped early, so the last cask didn't run: iterm2
+          Reinstall it later with `brew reinstall --cask iterm2`.
+        EOS
+        expect(brew_calls.map(&:last)).to eq(%w[firefox])
+      end
+
+      it "reinstalls the last casks after another failure, where brew carries on" do
+        allow(Timed::Runner).to receive(:run).and_return(false)
+        run_command("--yes", "cmake", "firefox", "iterm2")
+        expect(brew_calls.map(&:last)).to eq(%w[firefox iterm2])
+      end
+    end
+
+    it "asks, as brew does, when brew would install a cask's dependencies" do
+      stub_cask("dep-app", nil)
+      stub_cask("firefox", "2.0", stanzas: 'depends_on cask: "dep-app"')
+      expect(Homebrew::Ask).to receive(:confirm?).with(action: "reinstallation").once.and_return(true)
+      run_to_end("firefox")
+      expect(brew_calls).to eq([%w[reinstall --cask --yes firefox]])
     end
   end
 end

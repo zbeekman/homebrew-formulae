@@ -8,6 +8,7 @@
 
 require "cmd/upgrade"
 require_relative "../../lib/timed/command"
+require_relative "../support/casks"
 
 RSpec.describe Timed::Command do
   describe ".builtin" do
@@ -42,6 +43,166 @@ RSpec.describe Timed::Command do
       forwarded = described_class.forward(options, conflicts:)
       expect(forwarded.formula).to eq(%w[--verbose --force --build-from-source --keep-tmp --display-times])
       expect(forwarded.cask).to eq(%w[--verbose --force --greedy --appdir=/Apps --language=en,de --display-times])
+    end
+
+    it "takes `--no-…` of a `--[no-]…` switch as that switch", :aggregate_failures do
+      forwarded = described_class.forward(%w[--no-binaries --no-quit], conflicts:)
+      expect(forwarded.formula).to eq([])
+      expect(forwarded.cask).to eq(%w[--no-binaries --no-quit])
+    end
+  end
+
+  describe ".options" do
+    it "adds a `--[no-]…` switch, which `args.options_only` leaves out, as `--…` or `--no-…` when it differs " \
+       "from what a sub-call would take from the environment" do
+      command = described_class.builtin("upgrade")
+      runs = { [nil, %w[--no-bin --verbose]] => %w[--verbose --no-binaries], [nil, %w[--binaries]] => [],
+               [nil, []] => [], ["--no-binaries", %w[--binaries]] => %w[--binaries],
+               ["--no-binaries", []] => [], ["--no-binaries", %w[--formula]] => [] }
+      options = runs.keys.to_h do |cask_opts, argv|
+        ENV["HOMEBREW_CASK_OPTS"] = cask_opts
+        [[cask_opts, argv], described_class.options(command.new(argv).args, command.parser)
+                                           .grep(/\A--(?:no-)?(?:binaries|verbose)\z/)]
+      end
+      expect(options).to eq(runs)
+    end
+  end
+
+  describe "casks" do
+    include TimedCaskHelper
+
+    before { allow(Cask::CaskLoader).to receive(:for).and_call_original }
+
+    describe ".installed_cask" do
+      it "loads the installed caskfile, as brew does before it uninstalls the cask, and nothing when not installed" do
+        expect([described_class.installed_cask(stub_cask("foo", installed_stanzas: 'pkg "Old.pkg"'))&.version,
+                described_class.installed_cask(stub_cask("bar", nil))]).to eq(["1.0", nil])
+      end
+
+      it "leaves the installed caskfile of a cask from a tap that isn't trusted unloaded for a reinstall only, " \
+         "as brew does, while tap trust is on" do
+        cask = stub_cask("foo", installed_stanzas: 'pkg "Old.pkg"')
+        allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
+        # `[tap trust on, cask trusted, reinstall]`
+        runs = [[true, true, true], [true, true, false], [true, false, true], [true, false, false],
+                [false, false, true]]
+        loaded = runs.to_h do |trust_on, trusted, reinstall|
+          allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(trust_on)
+          allow(Homebrew::Trust).to receive(:trusted?).with(:cask, "user/tap/foo").and_return(trusted)
+          [[trust_on, trusted, reinstall], described_class.installed_cask(cask, reinstall:)&.version]
+        end
+        expect(loaded).to eq(runs.to_h { |run| [run, (run == [true, false, true]) ? nil : "1.0"] })
+      end
+
+      it "rebuilds the installed version from the new cask when brew can't load its caskfile, as brew does" do
+        cask = stub_cask("foo", stanzas: 'app "Foo.app"', installed_stanzas: "no_such_stanza")
+        installed = described_class.installed_cask(cask)
+        expect([installed&.version, installed&.artifacts&.map { |artifact| artifact.class.dsl_key }])
+          .to eq(["1.0", [:app]])
+      end
+    end
+
+    describe ".cask_plan" do
+      def plan(casks, in_run: [], tty: true, **options)
+        described_class.cask_plan(casks, in_run:, facts: Timed::Casks::DiskFacts.new, tty: -> { tty }, **options)
+      end
+
+      def placed(result)
+        { first: result.first, last: result.last, skipped: result.skipped }.transform_values do |entries|
+          entries.to_h { |entry| [entry.cask.token, entry.reasons.map(&:message)] }
+        end
+      end
+
+      it "classifies each cask by the verb brew acts on it with, judging the uninstall side on its installed " \
+         "cask and counting the casks and formulae of the run as in it" do
+        casks = { install: [stub_cask("new", nil, stanzas: 'depends_on cask: "old"'),
+                            stub_cask("tool", nil, stanzas: 'depends_on formula: "llvm"')],
+                  upgrade: [stub_cask("old", installed_stanzas: 'uninstall quit: "com.old"')] }
+        expect(placed(plan(casks, in_run: %w[llvm])))
+          .to eq(first: {}, skipped: {},
+                 last:  { "new"  => ["depends on `old`, which is in this run"],
+                          "tool" => ["depends on `llvm`, which is in this run"],
+                          "old"  => ["`uninstall quit` may raise a dialog"] })
+      end
+
+      it "passes `zap` on to a reinstall and `force` to an install, reading the disk" do
+        target = mktmpdir/"Foo.app"
+        target.mkpath
+        target.chmod(0555)
+        casks = { reinstall: [stub_cask("old", installed_stanzas: 'zap signal: ["TERM", "com.old"]')],
+                  install:   [stub_cask("new", nil, stanzas: "app \"Foo.app\", target: \"#{target}\"")] }
+        expect([true, false].to_h { |given| [given, placed(plan(casks, zap: given, force: given))[:last]] })
+          .to eq(true  => { "old" => ["`zap signal` may raise a dialog"],
+                            "new" => ["`app` target `#{target}` is not writable"] },
+                 false => {})
+      ensure
+        target&.chmod(0755)
+      end
+
+      it "judges a reinstall of a cask from a tap that isn't trusted on the new cask, but an upgrade on the " \
+         "installed one, as brew does" do
+        allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(true)
+        allow(Homebrew::Trust).to receive(:trusted?).and_return(false)
+        placed = [:reinstall, :upgrade].to_h do |verb|
+          cask = stub_cask("old", installed_stanzas: 'uninstall quit: "com.old"')
+          allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
+          [verb, placed(plan({ verb => [cask] }))[:last]]
+        end
+        expect(placed).to eq(reinstall: {}, upgrade: { "old" => ["`uninstall quit` may raise a dialog"] })
+      end
+
+      it "skips the casks that need sudo without a terminal" do
+        casks = { upgrade: [stub_cask("old", stanzas: 'pkg "Old.pkg"', installed_stanzas: "")] }
+        expect(placed(plan(casks, tty: false)))
+          .to eq(first: {}, last: {}, skipped: { "old" => ["`pkg` requires sudo"] })
+      end
+    end
+
+    describe ".show_casks" do
+      def entry(token, *messages)
+        reasons = messages.map { |message| Timed::Casks::Reason.new(kind: :sudo, message:) }
+        Timed::Casks::Entry.new(cask: Cask::Cask.new(token), reasons:)
+      end
+
+      it "lists the casks to run first, and those to run last with why", :aggregate_failures do
+        last = [entry("baz", "`pkg` requires sudo", "`postflight` block may call sudo")]
+        plan = Timed::Casks::Plan.new(first: [entry("foo"), entry("bar")], last:, skipped: [])
+        expect { described_class.show_casks("upgrade", plan) }.to output(<<~EOS).to_stdout.and not_to_output.to_stderr
+          ==> Would upgrade 2 casks first
+          foo bar
+          ==> Would upgrade 1 cask last
+          baz: `pkg` requires sudo; `postflight` block may call sudo
+        EOS
+      end
+
+      it "warns once about the casks skipped without a terminal, with the command to run them later" do
+        plan = Timed::Casks::Plan.new(first: [], last: [],
+                                      skipped: [entry("foo", "`pkg` requires sudo"), entry("bar", "`kext` x")])
+        expect { described_class.show_casks("install", plan) }.to output(<<~EOS).to_stderr
+          Warning: Skipping 2 casks, as sudo can't ask for a password without a terminal:
+          foo: `pkg` requires sudo
+          bar: `kext` x
+          Install them later with `brew install --cask foo bar`.
+        EOS
+      end
+
+      it "prints nothing without casks" do
+        expect { described_class.show_casks("upgrade", Timed::Casks::Plan.new(first: [], last: [], skipped: [])) }
+          .not_to output.to_stdout
+      end
+    end
+
+    describe ".cask_arguments" do
+      it "gives each cask named by a path that path, made absolute, and the others their full names" do
+        dir = mktmpdir
+        (dir/"foo.rb").write(cask_source("foo", "2.0"))
+        bar = Cask::Cask.new("bar", tap: Tap.fetch("user", "tap"))
+        Dir.chdir(dir) do
+          foo = Cask::CaskLoader.load("foo.rb")
+          expect(described_class.cask_arguments(%w[foo.rb user/tap/bar], [foo, bar]))
+            .to eq([(dir/"foo.rb").realpath.to_s, "user/tap/bar"])
+        end
+      end
     end
   end
 

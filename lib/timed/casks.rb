@@ -1,6 +1,7 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "find"
 require "sorbet-runtime"
 
 module Timed
@@ -19,8 +20,8 @@ module Timed
       const :directory, T::Boolean, default: false
     end
 
-    # What the classifier needs to know about the disk. Real implementation
-    # elsewhere; specs pass fakes.
+    # What the classifier needs to know about the disk: `DiskFacts` reads it;
+    # specs pass fakes.
     module Facts
       extend T::Helpers
 
@@ -50,6 +51,59 @@ module Timed
       # Like `Pathname#readlink`, `nil` when `path` isn't a symlink.
       sig { abstract.params(path: Pathname).returns(T.nilable(Pathname)) }
       def readlink(path); end
+    end
+
+    # `Facts` as the disk has them.
+    class DiskFacts
+      include Facts
+
+      sig { override.returns(Integer) }
+      def uid = Process.euid
+
+      # A directory that can't be searched can't be read whole either.
+      sig { override.params(path: Pathname).returns(T.nilable(FileEntry)) }
+      def lstat(path)
+        stat = path.lstat
+        FileEntry.new(path:, uid: stat.uid, readable: stat.readable? && (!stat.directory? || stat.executable?),
+                      directory: path.directory?)
+      rescue SystemCallError
+        nil
+      end
+
+      sig { override.params(path: Pathname).returns(T::Array[FileEntry]) }
+      def walk(path)
+        return [] unless lstat(path)
+
+        entries = T.let([], T::Array[FileEntry])
+        Find.find(path.to_s) { |file| lstat(Pathname(file))&.then { |entry| entries << entry } }
+        entries
+      end
+
+      sig { override.params(path: Pathname).returns(T::Boolean) }
+      def writable?(path) = path.writable?
+
+      sig { override.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def realpath(path)
+        path.realpath
+      rescue SystemCallError
+        nil
+      end
+
+      sig { override.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def readlink(path)
+        path.readlink
+      rescue SystemCallError
+        nil
+      end
+    end
+
+    # Whether `/dev/tty` opens, where sudo asks for a password: not without a
+    # controlling terminal, e.g. under `launchd` or `cron`.
+    sig { returns(T::Boolean) }
+    def self.terminal?
+      File.open("/dev/tty") { true }
+    rescue SystemCallError
+      false
     end
 
     # Why a cask goes last. `kind` is `:dependency` (waits for the run),

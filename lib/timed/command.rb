@@ -2,9 +2,12 @@
 # frozen_string_literal: true
 
 require "abstract_command"
+require "cask/cask_loader"
 require "formulary"
+require "trust"
 require "utils/output"
 require_relative "build_log"
+require_relative "casks"
 require_relative "planner"
 
 module Timed
@@ -86,11 +89,13 @@ module Timed
       end
       formula_only = only_with.call(%w[cask casks])
       cask_only = only_with.call(%w[formula formulae])
+      # A `--[no-]…` switch is named without `no_` in the conflicts.
+      names = ->(option) { [option_name(option), option_name(option).delete_prefix("no_")] }
       split = preview.reject { |option| KIND_FLAGS.include?(option_name(option)) }
       Forwarded.new(
         preview:,
-        formula: split.reject { |option| cask_only.include?(option_name(option)) },
-        cask:    split.reject { |option| formula_only.include?(option_name(option)) },
+        formula: split.reject { |option| cask_only.intersect?(names.call(option)) },
+        cask:    split.reject { |option| formula_only.intersect?(names.call(option)) },
       )
     end
 
@@ -278,6 +283,101 @@ module Timed
 
       ohai "Excluded"
       puts excluded.join(" ")
+    end
+
+    # `args.options_only`, with each `--[no-]…` switch, which brew leaves out
+    # of it, added as `--…` or `--no-…` (e.g. `--no-binaries`) where `args`
+    # differs from what `parser` takes from the environment alone, as a
+    # sub-call would.
+    sig { params(args: Homebrew::CLI::Args, parser: Homebrew::CLI::Parser).returns(T::Array[String]) }
+    def self.options(args, parser)
+      defaults = T.let(nil, T.nilable(Homebrew::CLI::Args))
+      switches = parser.processed_options.filter_map do |_short, long|
+        next if long.nil? || !long.start_with?("--[no-]")
+
+        name = long.delete_prefix("--[no-]")
+        method = :"#{option_name(name)}?"
+        value = args.public_send(method)
+        defaults ||= parser.parse(["--", *args.named])
+        "--#{"no-" unless value}#{name}" if !value.nil? && value != defaults.public_send(method)
+      end
+      args.options_only + switches
+    end
+
+    # The cask brew uninstalls before it upgrades or reinstalls `cask`: the one
+    # its installed caskfile defines, or one rebuilt from that file's version
+    # and `cask`'s artifacts if that can't be loaded, as `Cask::Upgrade` does;
+    # nil if that fails too or `cask` isn't installed. To `reinstall`, with tap
+    # trust on, brew loads a Ruby caskfile only for a trusted cask, and
+    # otherwise uninstalls the artifacts the cask recorded and zaps with
+    # `cask`'s `zap` stanza (`Installer#load_installed_caskfile!`): nil then,
+    # so `cask` stands in.
+    sig { params(cask: Cask::Cask, reinstall: T::Boolean).returns(T.nilable(Cask::Cask)) }
+    def self.installed_cask(cask, reinstall: false)
+      return unless (caskfile = cask.installed_caskfile)
+      return if reinstall && caskfile.extname == ".rb" && Homebrew::EnvConfig.require_tap_trust? &&
+                (tap = Cask::CaskLoader.load_installed_tab(cask).tap || cask.tap) &&
+                !Homebrew::Trust.trusted?(:cask, "#{tap.name}/#{cask.token}")
+
+      begin
+        Cask::CaskLoader.load_from_installed_caskfile(caskfile)
+      rescue Cask::CaskInvalidError, Cask::CaskUnavailableError, MethodDeprecatedError
+        Cask::CaskLoader.recover_from_installed_caskfile(caskfile, fallback_cask: cask)
+      end
+    end
+
+    # Sorts the casks of a run, given by the verb brew acts on each with, into
+    # those to run before the formulae, after them and not at all, by what is
+    # on disk and whether sudo can prompt. `in_run` names the formulae in the
+    # run; the casks are in it too. `zap` and `force` are the wrapped
+    # command's.
+    sig {
+      params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String], zap: T::Boolean,
+             force: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean)).returns(Casks::Plan)
+    }
+    def self.cask_plan(casks, in_run:, zap: false, force: false, facts: Casks::DiskFacts.new,
+                       tty: -> { Casks.terminal? })
+      in_run += casks.values.flatten.map(&:full_name)
+      plans = casks.map do |verb, list|
+        installed = list.filter_map do |cask|
+          installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.token, old] }
+        end.to_h
+        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:)
+      end
+      Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
+                      skipped: plans.flat_map(&:skipped))
+    end
+
+    # Lists the casks to run before the formulae and those to run after them,
+    # with why, and warns about those skipped for want of a terminal.
+    sig { params(verb: String, plan: Casks::Plan).void }
+    def self.show_casks(verb, plan)
+      rows = lambda do |entries|
+        entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
+      end
+      { "first" => plan.first, "last" => plan.last }.each do |label, entries|
+        next if entries.empty?
+
+        ohai "Would #{verb} #{Utils.pluralize("cask", entries.length, include_count: true)} #{label}"
+        puts((label == "first") ? entries.map { |entry| entry.cask.full_name }.join(" ") : rows.call(entries))
+      end
+      return if plan.skipped.empty?
+
+      names = plan.skipped.map { |entry| entry.cask.full_name }
+      opoo <<~EOS
+        Skipping #{Utils.pluralize("cask", names.length, include_count: true)}, as sudo can't ask for a password without a terminal:
+        #{rows.call(plan.skipped).join("\n")}
+        #{verb.capitalize} #{(names.length == 1) ? "it" : "them"} later with `brew #{verb} --cask #{names.join(" ")}`.
+      EOS
+    end
+
+    # The argument that names each of `casks` in a sub-call: the file it was
+    # loaded from if `names` gave it as a path, as `named_argv` makes it,
+    # otherwise its full name.
+    sig { params(names: T::Array[String], casks: T::Array[Cask::Cask]).returns(T::Array[String]) }
+    def self.cask_arguments(names, casks)
+      paths = named_argv(names)
+      casks.map { |cask| paths.find { |path| path == cask.sourcefile_path.to_s } || cask.full_name }
     end
 
     sig { params(option: String).returns(String) }

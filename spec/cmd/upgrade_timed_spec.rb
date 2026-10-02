@@ -8,8 +8,11 @@
 
 require "cmd/upgrade"
 require_relative "../../cmd/upgrade-timed"
+require_relative "../support/casks"
 
 RSpec.describe Homebrew::Cmd::UpgradeTimed do
+  include TimedCaskHelper
+
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
   let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
@@ -64,11 +67,17 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
   # Brew: `brew upgrade --dry-run` prints `preview`; a batch installs each
   # formula, by name or file, at 2.0, with a receipt, and prints its summary
-  # line.
+  # line; a cask call succeeds. There is a terminal for sudo.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
+    allow(Cask::CaskLoader).to receive(:for).and_call_original
     allow(Formula).to receive(:installed) { installed }
     allow(Timed::Command).to receive(:auto_update)
+    allow(Timed::Command).to receive(:brew) do |_env, argv|
+      brew_calls << argv
+      true
+    end
+    allow(Timed::Casks).to receive(:terminal?).and_return(true)
     allow(Timed::Runner).to receive(:stream) do |argv, &block|
       brew_calls << argv
       if argv.include?("--dry-run")
@@ -556,6 +565,112 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("cmake", "2.0")
       run_command("--yes")
       expect(brew_calls).to eq([%w[upgrade --dry-run]])
+    end
+  end
+
+  describe "casks" do
+    def run_to_end(*argv)
+      run_command(*argv)
+    rescue SystemExit
+      nil
+    end
+
+    it "lists the outdated casks to upgrade first, and last with why, with no names, as brew picks them" do
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'pkg "Bar.pkg"')
+      stub_cask("current-app", "2.0")
+      stub_cask("manual-app", stanzas: 'installer manual: "Manual.app"')
+      expect { run_command("--dry-run") }.to output(<<~EOS).to_stdout
+        ==> No formulae to upgrade
+        ==> Would upgrade 1 cask first
+        firefox
+        ==> Would upgrade 1 cask last
+        iterm2: `pkg` requires sudo
+      EOS
+    end
+
+    it "runs only the preview with `--dry-run`" do
+      stub_cask("firefox")
+      run_command("--dry-run")
+      expect(brew_calls).to eq([%w[upgrade --dry-run]])
+    end
+
+    it "upgrades casks first and last around the batches, with the cask flags but not `--minimum-version`" do
+      stub_formula("cmake")
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      run_command("--yes", "--verbose", "--no-binaries", "--greedy")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes --verbose --greedy --no-binaries firefox],
+                                        %w[upgrade --formula --yes --display-times --verbose cmake],
+                                        %w[upgrade --cask --yes --verbose --greedy --no-binaries iterm2]])
+    end
+
+    it "reports a failed first cask call and still runs the batches and the last call", :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Command).to receive(:brew) do |_env, argv|
+        brew_calls << argv
+        argv.last != "firefox"
+      end
+      expect { run_command("--yes", "cmake", "firefox", "iterm2") }
+        .to output("Error: `brew upgrade --cask firefox` failed.\n").to_stderr
+      expect(brew_calls.drop(1).map(&:last)).to eq(%w[firefox cmake iterm2])
+      expect(Homebrew).to be_failed
+    end
+
+    it "upgrades a cask named with `--minimum-version`, without it, as planning applied it" do
+      stub_cask("firefox")
+      run_command("--yes", "--minimum-version=1.5", "firefox")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox]])
+    end
+
+    it "asks once, counting the casks, with no names" do
+      stub_cask("firefox")
+      expect(Homebrew::Ask).to receive(:confirm?).with(action: "upgrade").once.and_return(true)
+      run_to_end
+      expect(brew_calls.last).to eq(%w[upgrade --cask --yes firefox])
+    end
+
+    it "doesn't ask when only the named casks would be upgraded" do
+      stub_cask("firefox")
+      expect(Homebrew::Ask).not_to receive(:confirm?)
+      run_command("firefox")
+    end
+
+    it "upgrades only the named casks, and none when only formulae are named or with `--formula`",
+       :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("firefox")
+      stub_cask("iterm2")
+      upgraded = [%w[--yes iterm2], %w[--yes cmake], %w[--yes --formula]].to_h do |argv|
+        brew_calls.clear
+        run_command(*argv)
+        [argv, brew_calls.select { |call| call.include?("--cask") }.map(&:last)]
+      end
+      expect(upgraded).to eq(%w[--yes iterm2] => %w[iterm2], %w[--yes cmake] => [], %w[--yes --formula] => [])
+    end
+
+    it "leaves named casks it won't upgrade to brew's preview: pinned, not installed or not below " \
+       "`--minimum-version`", :aggregate_failures do
+      allow(stub_cask("pinned-app")).to receive(:pinned?).and_return(true)
+      stub_cask("missing-app", nil)
+      stub_cask("current-app", "1.5")
+      runs = [%w[pinned-app], %w[missing-app], %w[--minimum-version=1.2 current-app]]
+      expect { runs.each { |argv| run_command("--yes", *argv) } }.not_to output.to_stderr
+      expect([brew_calls.reject { |call| call.include?("--dry-run") }, Homebrew.failed?]).to eq([[], false])
+    end
+
+    it "skips the casks that need sudo without a terminal, with a warning", :aggregate_failures do
+      allow(Timed::Casks).to receive(:terminal?).and_return(false)
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'pkg "Bar.pkg"')
+      expect { run_command("--yes") }.to output(<<~EOS).to_stderr
+        Warning: Skipping 1 cask, as sudo can't ask for a password without a terminal:
+        iterm2: `pkg` requires sudo
+        Upgrade it later with `brew upgrade --cask iterm2`.
+      EOS
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox]])
     end
   end
 
