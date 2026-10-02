@@ -132,7 +132,8 @@ check, still makes it skip the last casks, with its warning. Without
 patch prints neither, so the last casks still run then. A failed reinstall
 puts the old keg back, so a last cask that needs that formula still runs;
 only one that needs a formula that isn't installed (e.g. one that wasn't
-installed before) is left out, as for
+installed before, or a dependency Homebrew would have installed for it) is left
+out, as for
 [`brew upgrade-timed`](upgrade-timed.md#casks).
 
 ## Output

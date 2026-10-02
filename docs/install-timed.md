@@ -163,9 +163,9 @@ say why. Without a terminal, a cask that depends on a skipped one, following
 its dependencies through other casks, is skipped too, as Homebrew would install
 the skipped one first, except with `--skip-cask-deps`, with which Homebrew
 installs no cask dependency. A last cask that needs a formula that failed to
-install or was skipped and isn't installed is left out, with a warning, as for
-`brew upgrade-timed`: Homebrew would install that formula for it, without the
-options given for it.
+install or was skipped, or a dependency Homebrew would have installed for one,
+and isn't installed is left out, with a warning, as for `brew upgrade-timed`:
+Homebrew would install that formula for it, without the options given for it.
 
 ## Output
 

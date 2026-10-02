@@ -108,8 +108,10 @@ module Homebrew
         Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude, casks: casks_named)
         # Brew installs a cask that isn't installed.
         installed, new_casks = casks.partition(&:installed?)
+        planned = result.batches.flat_map(&:names)
+        run_dependencies = Timed::Command.run_dependencies(installers.values_at(*planned))
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },
-                                             in_run: result.batches.flat_map(&:names), zap: args.zap?,
+                                             in_run: planned, run_dependencies:, zap: args.zap?,
                                              force: args.force?, skip_cask_deps: args.skip_cask_deps?)
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
@@ -151,7 +153,8 @@ module Homebrew
           EOS
         else
           last = Timed::Command.last_casks("reinstall", last, named: args.named, flags: forwarded.cask,
-                                                              unfinished: outcome&.unfinished || [])
+                                                              unfinished: outcome&.unfinished || [],
+                                                              run_dependencies:)
           Timed::Runner.run_casks("reinstall", last, flags: forwarded.cask, label: "last")
         end
       end

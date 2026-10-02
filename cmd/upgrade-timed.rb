@@ -123,8 +123,10 @@ module Homebrew
         end
         flags = without_minimum_version.call(forwarded.formula)
         cask_flags = without_minimum_version.call(forwarded.cask)
-        cask_plan = Timed::Command.cask_plan({ upgrade: outdated },
-                                             in_run: planned, skip_cask_deps: args.skip_cask_deps?)
+        # What brew installs or upgrades in each formula's call.
+        run_dependencies = deps.slice(*planned)
+        cask_plan = Timed::Command.cask_plan({ upgrade: outdated }, in_run: planned, run_dependencies:,
+                                                                    skip_cask_deps: args.skip_cask_deps?)
         Timed::Command.show_casks("upgrade", cask_plan, named: args.named, flags: cask_flags)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)
@@ -157,7 +159,8 @@ module Homebrew
                                             arguments: Timed::Command.path_arguments(args.named, formulae))
         end
         last = Timed::Command.last_casks("upgrade", cask_plan.last.map(&:cask), named: args.named, flags: cask_flags,
-                                                                                unfinished: outcome&.unfinished || [])
+                                                                                unfinished: outcome&.unfinished || [],
+                                                                                run_dependencies:)
         Timed::Runner.run_casks("upgrade", last, flags: cask_flags, label: "last")
       end
 

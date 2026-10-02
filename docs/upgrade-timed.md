@@ -132,7 +132,9 @@ it was given other than `--minimum-version`, with `--binaries` or
     Homebrew reads it (e.g. `.tar.xz`, a tarball, needs nothing). What a cask
     needs is matched with the run by full name, after aliases and renames,
     so another tap's formula of the same name doesn't count, except for a
-    dependency that can't be loaded, which is matched by name alone;
+    dependency that can't be loaded, which is matched by name alone. The run
+    includes the dependencies Homebrew installs or upgrades in the calls for
+    the formulae of the batches; the plan names the formulae each is for;
   - casks with a cask dependency that isn't installed, which Homebrew would
     install first, whose install may need sudo or raise a dialog by the rules
     below (each reason names the dependency). With `--skip-cask-deps`,
@@ -158,7 +160,8 @@ call is reported and fails the command; the batches still run. Ctrl-C during a
 cask call stops the run.
 
 A cask for the last call that needs, in the same way, a formula of the
-batches that failed or was skipped and isn't installed is not run: Homebrew
+batches that failed or was skipped, or a dependency Homebrew would have
+installed in that formula's call, and isn't installed is not run: Homebrew
 would install that formula for it, without the formula options given for it
 (e.g. pour a bottle of a formula whose source build failed). Unlike
 `brew upgrade`, which would, the command leaves it out with a warning naming

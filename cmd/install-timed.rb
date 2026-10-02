@@ -216,8 +216,9 @@ module Homebrew
                                                                casks:             args.cask? || casks.any?)
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
+        run_dependencies = Timed::Command.run_dependencies(planned_installers)
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
-                                             in_run: planned, force: args.force?,
+                                             in_run: planned, run_dependencies:, force: args.force?,
                                              skip_cask_deps: args.skip_cask_deps?)
         Timed::Command.show_casks("install", cask_plan, named: args.named, flags: forwarded.cask)
         # The installed casks brew won't upgrade, which it only reports on.
@@ -259,7 +260,8 @@ module Homebrew
                                             arguments: Timed::Command.path_arguments(args.named, formulae))
         end
         last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
-                                                                unfinished: outcome&.unfinished || [])
+                                                                unfinished: outcome&.unfinished || [],
+                                                                run_dependencies:)
         Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
       end
 

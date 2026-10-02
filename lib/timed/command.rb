@@ -182,6 +182,28 @@ module Timed
       end.map(&:name)
     end
 
+    # What brew installs or upgrades as dependencies in the call for each of
+    # `installers`' formulae, by full name, keyed by the formula's
+    # (`FormulaInstaller#compute_dependencies`, which brew's plan has worked
+    # out); nothing with `--ignore-dependencies`. Where brew can't work them
+    # out (e.g. a dependency can't be loaded, for brew to report), every
+    # dependency that loads (see `dependency_names`), to be safe.
+    sig { params(installers: T::Array[FormulaInstaller]).returns(T::Hash[String, T::Array[String]]) }
+    def self.run_dependencies(installers)
+      installers.to_h do |installer|
+        dependencies = if installer.ignore_deps?
+          []
+        else
+          begin
+            installer.compute_dependencies.map { |dependency| dependency.to_formula.full_name }
+          rescue
+            dependency_names(installer.formula)
+          end
+        end
+        [installer.formula.full_name, dependencies]
+      end
+    end
+
     # The lookahead asks for at least one of hours, minutes or seconds.
     GUESS = /\A(?<name>[^=]+)=(?=\d)(?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?\z/
 
@@ -386,15 +408,22 @@ module Timed
     # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
     # which brew installs only formula dependencies, those of skipped casks
     # included, so a cask isn't skipped for a skipped cask it depends on.
-    # `zap` and `force` are the wrapped command's.
+    # The run includes what brew installs for its formulae as dependencies,
+    # given by `run_dependencies` (see `run_dependencies`). `zap` and `force`
+    # are the wrapped command's.
     sig {
-      params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String], zap: T::Boolean,
-             force: T::Boolean, skip_cask_deps: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean))
+      params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String],
+             run_dependencies: T::Hash[String, T::Array[String]], zap: T::Boolean, force: T::Boolean,
+             skip_cask_deps: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean))
         .returns(Casks::Plan)
     }
-    def self.cask_plan(casks, in_run:, zap: false, force: false, skip_cask_deps: false, facts: Casks::DiskFacts.new,
-                       tty: -> { Casks.terminal? })
-      in_run += casks.values.flatten.map(&:full_name)
+    def self.cask_plan(casks, in_run:, run_dependencies: {}, zap: false, force: false, skip_cask_deps: false,
+                       facts: Casks::DiskFacts.new, tty: -> { Casks.terminal? })
+      installed_for = T.let({}, T::Hash[String, T::Array[String]])
+      run_dependencies.each do |formula, dependencies|
+        (dependencies - in_run).each { |dependency| (installed_for[dependency] ||= []) << formula }
+      end
+      in_run += installed_for.keys + casks.values.flatten.map(&:full_name)
       plans = casks.map do |verb, list|
         installed = list.filter_map do |cask|
           installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.full_name, old] }
@@ -409,7 +438,7 @@ module Timed
           [skip_cask_deps ? [] : needed.casks.map(&:full_name), needed.unresolved]
         end
         Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
-                         cask_dependencies:)
+                         cask_dependencies:, installed_for:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
                       skipped: plans.flat_map(&:skipped))
@@ -540,12 +569,16 @@ module Timed
     # installed and linked into `opt` either: brew's cask installer would
     # install it for them, without the formula options given for it, e.g.
     # pour a bottle of a formula whose source build failed. One left installed
-    # (e.g. by a failed upgrade) brew leaves alone.
+    # (e.g. by a failed upgrade) brew leaves alone. What brew installs for an
+    # unfinished formula (`run_dependencies`, as for `cask_plan`) counts as
+    # unfinished too, as its call may have failed at one of those.
     sig {
       params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
-             unfinished: T::Array[String]).returns(T::Array[String])
+             unfinished: T::Array[String], run_dependencies: T::Hash[String, T::Array[String]])
+        .returns(T::Array[String])
     }
-    def self.last_casks(verb, casks, named:, flags:, unfinished:)
+    def self.last_casks(verb, casks, named:, flags:, unfinished:, run_dependencies: {})
+      unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
       # Loaded by full name, so another tap's formula of the same name isn't.
       missing = lambda do |name|
         formula = Formulary.factory(name)

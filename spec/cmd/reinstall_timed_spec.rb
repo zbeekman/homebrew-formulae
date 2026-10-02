@@ -420,6 +420,17 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         EOS
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
+
+      it "reinstalls a cask that needs a formula brew installs for one in the batch last, and not when that " \
+         "formula didn't install", :aggregate_failures do
+        stub_formula("lib", installed: false)
+        stub_formula("app", deps: %w[lib])
+        stub_cask("app-for-lib", "2.0", stanzas: 'depends_on formula: "lib"')
+        allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[app]))
+        expect { run_command("--yes", "app", "firefox", "app-for-lib") }.to output(/^app-for-lib: needs lib$/)
+          .to_stderr
+        expect(brew_calls.map(&:last)).to eq(%w[firefox])
+      end
     end
 
     it "asks, as brew does, when brew would install a cask's dependencies" do

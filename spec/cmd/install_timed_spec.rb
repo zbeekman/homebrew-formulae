@@ -743,6 +743,17 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake]])
     end
 
+    it "installs a cask that needs a formula brew installs for one in the batches last, and not when that " \
+       "formula didn't install", :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
+      installs["app"] = %w[lib]
+      failing << "lib"
+      expect { run_command("--yes", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times app]])
+    end
+
     it "counts what a missing cask dependency's install needs, but not with `--skip-cask-deps`" do
       stub_cask("helper", nil, stanzas: 'pkg "Helper.pkg"')
       stub_cask("firefox", nil, stanzas: 'depends_on cask: "helper"')

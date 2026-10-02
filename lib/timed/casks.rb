@@ -127,7 +127,9 @@ module Timed
       const :skipped, T::Array[Entry]
     end
 
-    # `in_run` names everything (formulae and casks) in this run. `macos`
+    # `in_run` names everything (formulae and casks) in this run, and
+    # `installed_for` maps each formula in it that brew installs only as a
+    # dependency to the formulae it installs it for. `macos`
     # says whether brew runs `add_altname_metadata`. `tty` says whether
     # `/dev/tty` can be opened, where sudo reads the password.
     #
@@ -176,16 +178,17 @@ module Timed
         needs:             T::Hash[String, T::Array[String]],
         missing:           T::Hash[String, T::Array[Cask::Cask]],
         cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]],
+        installed_for:     T::Hash[String, T::Array[String]],
       ).returns(Plan)
     }
     def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
-                  force: false, needs: {}, missing: {}, cask_dependencies: {})
+                  force: false, needs: {}, missing: {}, cask_dependencies: {}, installed_for: {})
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
         old = installed[cask.full_name] if upgrading
         needed = needs.fetch(cask.full_name) { cask.depends_on.formula + cask.depends_on.cask }
-        own = reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:)
+        own = reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:, installed_for:)
         # Brew installs a dependency without `force`, as on request.
         dependencies = missing.fetch(cask.full_name, []).flat_map do |dependency|
           reasons(dependency, old: nil, upgrading: false, zap: false, force: false, in_run: [], needed: [], facts:,
@@ -246,20 +249,22 @@ module Timed
 
     sig {
       params(
-        cask:      Cask::Cask,
-        old:       T.nilable(Cask::Cask),
-        upgrading: T::Boolean,
-        zap:       T::Boolean,
-        force:     T::Boolean,
-        in_run:    T::Array[String],
-        needed:    T::Array[String],
-        facts:     Facts,
-        macos:     T::Boolean,
+        cask:          Cask::Cask,
+        old:           T.nilable(Cask::Cask),
+        upgrading:     T::Boolean,
+        zap:           T::Boolean,
+        force:         T::Boolean,
+        in_run:        T::Array[String],
+        needed:        T::Array[String],
+        facts:         Facts,
+        macos:         T::Boolean,
+        installed_for: T::Hash[String, T::Array[String]],
       ).returns(T::Array[Reason])
     }
-    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:)
+    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:, installed_for: {})
       cask.config = cask.default_config.merge(old.config) if old
-      reasons = depends_on_run(needed, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
+      reasons = depends_on_run(needed, in_run:, installed_for:) + requires_sudo(cask) +
+                flight_blocks(cask, uninstall: false)
       # Upgrade and reinstall uninstall the old version first.
       if upgrading
         uninstalled = old || cask
@@ -283,14 +288,23 @@ module Timed
       end
     end
 
-    # What a cask `needed` that is in this run.
-    sig { params(needed: T::Array[String], in_run: T::Array[String]).returns(T::Array[Reason]) }
-    def self.depends_on_run(needed, in_run:)
+    # What a cask `needed` that is in this run (see `plan`).
+    sig {
+      params(needed: T::Array[String], in_run: T::Array[String], installed_for: T::Hash[String, T::Array[String]])
+        .returns(T::Array[Reason])
+    }
+    def self.depends_on_run(needed, in_run:, installed_for: {})
       names = in_run.map { |name| Utils.name_from_full_name(name) }
       needed.filter_map do |name|
         next unless names.include?(Utils.name_from_full_name(name))
 
-        Reason.new(kind: :dependency, message: "depends on `#{name}`, which is in this run")
+        dependents = installed_for[name]
+        where = if dependents
+          "this run installs for #{dependents.map { |dependent| "`#{dependent}`" }.join(", ")}"
+        else
+          "is in this run"
+        end
+        Reason.new(kind: :dependency, message: "depends on `#{name}`, which #{where}")
       end
     end
 

@@ -634,6 +634,17 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes --greedy iterm2]])
     end
 
+    it "upgrades a cask that needs a formula brew installs for one in the batches last, and not when that " \
+       "formula didn't install", :aggregate_failures do
+      stub_formula("lib", nil)
+      stub_formula("app", deps: %w[lib])
+      stub_cask("lib-app", stanzas: 'depends_on formula: "lib"')
+      allow(Timed::Runner).to receive(:run)
+        .and_return(Timed::Runner::Outcome.new(unfinished: %w[app], stopped_early: false))
+      expect { run_command("--yes", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
+      expect(brew_calls.drop(1)).to eq([])
+    end
+
     it "upgrades a cask named with `--minimum-version` or `--min-version`, without it, as planning applied it" do
       stub_cask("firefox")
       flags = %w[--minimum-version=1.5 --min-version=1.5]

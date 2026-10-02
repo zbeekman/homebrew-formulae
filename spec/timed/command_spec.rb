@@ -358,6 +358,36 @@ RSpec.describe Timed::Command do
           .to output(/^xz-app: needs xz$/).to_stderr
       end
 
+      it "puts a cask last when it needs a formula brew installs for one in the run, saying for which" do
+        stub_lib_and_app
+        cask = stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
+        result = described_class.cask_plan({ install: [cask] }, in_run:           %w[app],
+                                                                run_dependencies: { "app" => %w[lib] },
+                                                                facts:            Timed::Casks::DiskFacts.new,
+                                                                tty:              -> { true })
+        expect(result.last.map { |entry| entry.reasons.map(&:message) })
+          .to eq([["depends on `lib`, which this run installs for `app`"]])
+      end
+
+      it "takes what brew installs in each formula's call from its installer, and nothing with " \
+         "`--ignore-dependencies`" do
+        stub_lib_and_app
+        app = Formulary.factory("app")
+        dependencies = [false, true].to_h do |ignore_deps|
+          [ignore_deps, described_class.run_dependencies([FormulaInstaller.new(app, ignore_deps:)])]
+        end
+        expect(dependencies).to eq(false => { "app" => %w[lib] }, true => { "app" => [] })
+      end
+
+      it "holds back a last cask for what brew would have installed for a formula that didn't install" do
+        stub_lib_and_app
+        cask = stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
+        expect do
+          described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[app],
+                                                        run_dependencies: { "app" => %w[lib] })
+        end.to output(/^lib-app: needs lib$/).to_stderr
+      end
+
       it "puts a cask last when what it needs through its formulae's dependencies or other casks is in the run" do
         stub_lib_and_app
         stub_cask("dep-app", nil, stanzas: 'depends_on formula: "app"')
