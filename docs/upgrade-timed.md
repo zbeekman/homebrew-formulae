@@ -126,6 +126,12 @@ it was given other than `--minimum-version`, with `--binaries` or
   - casks that need a formula or cask in the run, directly or through the
     dependencies of the formulae and casks they need, which Homebrew may
     install for them;
+  - casks with a cask dependency that isn't installed, which Homebrew would
+    install first, whose install may need sudo or raise a dialog by the rules
+    below (each reason names the dependency). With `--skip-cask-deps`,
+    Homebrew installs no cask dependency, so neither these nor a cask
+    dependency in the run count, but it still installs the formulae those
+    need, which do;
   - casks that may need sudo: those Homebrew itself says need it (e.g. `pkg`,
     `installer script:` with `sudo: true`), any `preflight` or `postflight`
     block and the install steps or file permissions that make Homebrew fall
@@ -160,7 +166,8 @@ back, but the rollback may need sudo too and then fails, leaving the cask
 half-upgraded; `brew upgrade` would try them anyway.
 
 Each command it suggests to run casks later has the cask options the call
-would have been given, and names a cask given as a file by that file.
+would have been given, and names a cask given as a file by that file, with
+every argument escaped for the shell.
 
 ## Output
 

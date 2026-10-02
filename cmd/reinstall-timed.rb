@@ -110,7 +110,7 @@ module Homebrew
         installed, new_casks = casks.partition(&:installed?)
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },
                                              in_run: result.batches.flat_map(&:names), zap: args.zap?,
-                                             force: args.force?)
+                                             force: args.force?, skip_cask_deps: args.skip_cask_deps?)
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
         Timed::Command.show_casks("reinstall", cask_plan, named: args.named, flags: forwarded.cask)

@@ -217,7 +217,8 @@ module Homebrew
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
-                                             in_run: planned, force: args.force?)
+                                             in_run: planned, force: args.force?,
+                                             skip_cask_deps: args.skip_cask_deps?)
         Timed::Command.show_casks("install", cask_plan, named: args.named, flags: forwarded.cask)
         # The installed casks brew won't upgrade, which it only reports on.
         first_casks = cask_plan.first.map(&:cask) + (casks - new_casks - upgrading)

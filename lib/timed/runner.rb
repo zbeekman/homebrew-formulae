@@ -331,7 +331,7 @@ module Timed
       end
       raise Interrupt if interrupts.any?
 
-      ofail "`brew #{verb} --cask #{casks.join(" ")}` failed." unless success
+      ofail "`#{Shellwords.join(["brew", verb, "--cask", *casks])}` failed." unless success
     end
 
     # Runs `brew` with `argv` from the home directory (source builds that

@@ -4,6 +4,7 @@
 require "abstract_command"
 require "cask/cask_loader"
 require "formulary"
+require "shellwords"
 require "trust"
 require "utils/output"
 require_relative "build_log"
@@ -330,21 +331,29 @@ module Timed
     # Sorts the casks of a run, given by the verb brew acts on each with, into
     # those to run before the formulae, after them and not at all, by what is
     # on disk and whether sudo can prompt. `in_run` names the formulae in the
-    # run; the casks are in it too. `zap` and `force` are the wrapped
-    # command's.
+    # run; the casks are in it too. Each cask counts what brew may install
+    # before it (see `cask_needs`), and what installing its missing cask
+    # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
+    # which brew installs only formula dependencies, those of skipped casks
+    # included. `zap` and `force` are the wrapped command's.
     sig {
       params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String], zap: T::Boolean,
-             force: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean)).returns(Casks::Plan)
+             force: T::Boolean, skip_cask_deps: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean))
+        .returns(Casks::Plan)
     }
-    def self.cask_plan(casks, in_run:, zap: false, force: false, facts: Casks::DiskFacts.new,
+    def self.cask_plan(casks, in_run:, zap: false, force: false, skip_cask_deps: false, facts: Casks::DiskFacts.new,
                        tty: -> { Casks.terminal? })
       in_run += casks.values.flatten.map(&:full_name)
       plans = casks.map do |verb, list|
         installed = list.filter_map do |cask|
           installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.token, old] }
         end.to_h
-        needs = list.to_h { |cask| [cask.token, cask_needs(cask)] }
-        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:)
+        all_needs = list.to_h { |cask| [cask.token, cask_needs(cask)] }
+        needs = all_needs.transform_values { |needed| skip_cask_deps ? needed.formulae : needed.names }
+        missing = all_needs.transform_values do |needed|
+          skip_cask_deps ? [] : needed.casks.grep(Cask::Cask).reject(&:installed?)
+        end
+        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
                       skipped: plans.flat_map(&:skipped))
@@ -374,27 +383,56 @@ module Timed
       EOS
     end
 
-    # Everything brew may install before `cask` (formulae and casks, as named):
-    # what it depends on, and in turn what those formulae and casks need, as
-    # brew's cask installer works it out. A formula or cask that can't be
-    # loaded (e.g. from a tap that isn't trusted) counts by its name alone.
-    sig { params(cask: Cask::Cask, seen: T::Array[String]).returns(T::Array[String]) }
-    def self.cask_needs(cask, seen: [cask.token])
-      formulae = cask.depends_on.formula.flat_map do |name|
-        [name, *dependency_names(Formulary.factory(name))]
-      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
-        [name]
-      end
-      casks = cask.depends_on.cask.flat_map do |name|
-        token = Utils.name_from_full_name(name)
-        next [] if seen.include?(token)
+    # Everything brew may install before a cask: formulae by full name and
+    # casks, by name if they can't be loaded (e.g. from a tap that isn't
+    # trusted).
+    class Needs < T::Struct
+      const :formulae, T::Array[String], default: []
+      const :casks, T::Array[T.any(Cask::Cask, String)], default: []
 
-        seen << token
-        [name, *cask_needs(Cask::CaskLoader.load(name, warn: false), seen:)]
-      rescue Cask::CaskError, Homebrew::UntrustedTapError
-        [name]
+      sig { returns(T::Array[String]) }
+      def names = formulae + casks.map { |cask| cask.is_a?(Cask::Cask) ? cask.full_name : cask }
+    end
+
+    # What brew's cask installer may install before `cask`
+    # (`Cask::Installer#cask_and_formula_dependencies`): what it depends on,
+    # following formulae through their dependencies other than build and test
+    # ones, and the casks those require, and casks through what they depend on.
+    sig { params(cask: Cask::Cask).returns(Needs) }
+    def self.cask_needs(cask)
+      formulae = T.let([], T::Array[String])
+      casks = T.let([], T::Array[T.any(Cask::Cask, String)])
+      seen = [cask.token]
+      pending = cask.depends_on.formula.map { |name| [:formula, name] } +
+                cask.depends_on.cask.map { |name| [:cask, name] }
+      while (kind, name = pending.shift)
+        if kind == :formula
+          begin
+            formula = Formulary.factory(name)
+            next if formulae.include?(formula.full_name)
+
+            formulae << formula.full_name
+            pending.concat(formula.deps.reject { |dep| dep.build? || dep.test? }.map { |dep| [:formula, dep.name] })
+            pending.concat(formula.requirements.filter_map(&:cask).map { |token| [:cask, token] })
+          rescue FormulaUnavailableError, Homebrew::UntrustedTapError
+            formulae << name unless formulae.include?(name)
+          end
+        else
+          token = Utils.name_from_full_name(name)
+          next if seen.include?(token)
+
+          seen << token
+          begin
+            dependency = Cask::CaskLoader.load(name, warn: false)
+            casks << dependency
+            pending.concat(dependency.depends_on.formula.map { |formula_name| [:formula, formula_name] } +
+                           dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] })
+          rescue Cask::CaskError, Homebrew::UntrustedTapError
+            casks << name
+          end
+        end
       end
-      (formulae + casks).uniq
+      Needs.new(formulae:, casks:)
     end
 
     # The arguments for the `casks` to run after the formulae, as
@@ -420,7 +458,8 @@ module Timed
         true
       end
       needs = casks.to_h do |cask|
-        needed = cask_needs(cask).map { |name| Utils.name_from_full_name(name) }.uniq & unfinished.keys
+        # Brew installs formula dependencies even with `--skip-cask-deps`.
+        needed = cask_needs(cask).formulae.map { |name| Utils.name_from_full_name(name) }.uniq & unfinished.keys
         [cask, needed.select { |name| missing.call(unfinished.fetch(name)) }]
       end
       blocked = needs.select { |_, needed| needed.any? }
@@ -435,10 +474,11 @@ module Timed
     end
 
     # How to run `casks` later, with the cask `flags` their call was given,
-    # naming each as `cask_arguments` does for the `named` arguments.
+    # naming each as `cask_arguments` does for the `named` arguments, each
+    # argument escaped for the shell.
     sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
     def self.later(verb, casks, named:, flags:)
-      command = ["brew", verb, "--cask", *flags, *cask_arguments(named, casks)].join(" ")
+      command = Shellwords.join(["brew", verb, "--cask", *flags, *cask_arguments(named, casks)])
       "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with `#{command}`."
     end
 

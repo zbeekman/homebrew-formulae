@@ -743,6 +743,16 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake]])
     end
 
+    it "counts what a missing cask dependency's install needs, but not with `--skip-cask-deps`" do
+      stub_cask("helper", nil, stanzas: 'pkg "Helper.pkg"')
+      stub_cask("firefox", nil, stanzas: 'depends_on cask: "helper"')
+      plans = []
+      allow(Timed::Command).to receive(:show_casks) { |_verb, plan, **| plans << plan }
+      [[], %w[--skip-cask-deps]].each { |flags| run_command("--dry-run", *flags, "firefox") }
+      expect(plans.map { |plan| [plan.first.length, plan.last.flat_map { |entry| entry.reasons.map(&:message) }] })
+        .to eq([[0, ["dependency `helper`: `pkg` requires sudo"]], [1, []]])
+    end
+
     it "gives the cask classifier `--force`" do
       stub_cask("firefox", nil)
       expect(Timed::Command).to receive(:cask_plan).with(anything, hash_including(force: true)).and_call_original

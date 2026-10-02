@@ -239,6 +239,29 @@ RSpec.describe Timed::Command do
           .to eq("via-formula" => ["depends on `lib`, which is in this run"],
                  "via-cask"    => ["depends on `lib`, which is in this run"])
       end
+
+      it "counts what the cask dependencies brew would install need, but no cask dependency with " \
+         "`--skip-cask-deps`, though the formulae those need still count, as brew installs them anyway" do
+        stub_lib_and_app
+        stub_cask("helper", nil, stanzas: "pkg \"Helper.pkg\"\ndepends_on formula: \"app\"")
+        stub_cask("old", installed_stanzas: "")
+        casks = { install: [stub_cask("needs-helper", nil, stanzas: 'depends_on cask: "helper"'),
+                            stub_cask("needs-old", nil, stanzas: 'depends_on cask: "old"')],
+                  upgrade: [stub_cask("old", installed_stanzas: "")] }
+        placed = [false, true].to_h do |skip_cask_deps|
+          result = described_class.cask_plan(casks, in_run: %w[lib], skip_cask_deps:,
+                                                    facts: Timed::Casks::DiskFacts.new, tty: -> { true })
+          entries = result.first + result.last
+          [skip_cask_deps, entries.to_h { |entry| [entry.cask.token, entry.reasons.map(&:message)] }]
+        end
+        expect(placed).to eq(
+          false => { "old"          => [],
+                     "needs-helper" => ["depends on `lib`, which is in this run",
+                                        "dependency `helper`: `pkg` requires sudo"],
+                     "needs-old"    => ["depends on `old`, which is in this run"] },
+          true  => { "old" => [], "needs-helper" => ["depends on `lib`, which is in this run"], "needs-old" => [] },
+        )
+      end
     end
 
     describe ".cask_needs" do
@@ -248,7 +271,22 @@ RSpec.describe Timed::Command do
                                                  .and_raise(Cask::CaskInvalidError.new("bad-app", "nope"))
         stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app", "bad-app"]')
         loop_a = stub_cask("loop-a", nil, stanzas: 'depends_on cask: "loop-b"')
-        expect(described_class.cask_needs(loop_a)).to eq(%w[loop-b gone-app bad-app])
+        needs = described_class.cask_needs(loop_a)
+        expect([needs.formulae, needs.casks.map { |cask| cask.is_a?(Cask::Cask) ? cask.token : cask }])
+          .to eq([[], %w[loop-b gone-app bad-app]])
+      end
+
+      it "follows formulae through their runtime dependencies only, as brew does, and the casks they require" do
+        allow(Formulary).to receive(:loader_for).and_call_original
+        { "lib" => {}, "tool" => {}, "app" => { "lib" => [], "tool" => [:build] } }.each do |name, deps|
+          stub_formula_loader(formula(name) do
+            T.bind(self, T.class_of(Formula))
+            url "https://brew.sh/#{name}-1.0.tgz"
+            deps.each { |dep, tags| depends_on dep => tags }
+          end)
+        end
+        needs = described_class.cask_needs(stub_cask("needs-app", nil, stanzas: 'depends_on formula: "app"'))
+        expect([needs.formulae, needs.casks]).to eq([%w[app lib], []])
       end
     end
 
@@ -287,6 +325,20 @@ RSpec.describe Timed::Command do
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "user/tap/evil"')]
         expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []))
           .to eq(%w[direct-app])
+      end
+    end
+
+    describe ".later" do
+      it "shell-escapes every argument of the command, e.g. a path or flag value with a space" do
+        dir = mktmpdir/"My Casks"
+        dir.mkpath
+        (dir/"foo.rb").write(cask_source("foo", "2.0"))
+        Dir.chdir(dir) do
+          casks = [Cask::CaskLoader.load("foo.rb")]
+          command = described_class.later("install", casks, named: %w[foo.rb], flags: ["--appdir=/My Apps"])
+          expect(command).to eq("Install it later with `brew install --cask --appdir\\=/My\\ Apps " \
+                                "#{(dir/"foo.rb").realpath.to_s.gsub(" ", "\\ ")}`.")
+        end
       end
     end
 

@@ -76,12 +76,13 @@ RSpec.describe Timed::Casks do
       zap:       T::Boolean,
       force:     T::Boolean,
       needs:     T::Hash[String, T::Array[String]],
+      missing:   T::Hash[String, T::Array[Cask::Cask]],
     ).returns(Timed::Casks::Plan)
   }
   def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {},
-           zap: false, force: false, needs: {})
+           zap: false, force: false, needs: {}, missing: {})
     described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:, force:,
-                                needs:)
+                                needs:, missing:)
   end
 
   sig { params(entries: T::Array[Timed::Casks::Entry]).returns(T::Array[String]) }
@@ -127,6 +128,16 @@ RSpec.describe Timed::Casks do
     it "puts a cask last when what it needs in `needs`, e.g. through its formulae's dependencies, is in the run" do
       result = plan(cask { depends_on formula: "app" }, in_run: ["lib"], needs: { "foo" => %w[app lib] })
       expect(messages(result.last)).to eq(["depends on `lib`, which is in this run"])
+    end
+
+    it "counts what installing a missing cask dependency in `missing` needs for the cask, naming the dependency" do
+      helper = cask("helper") { pkg "Helper.pkg" }
+      results = [true, false].to_h do |tty|
+        result = plan(cask, verb: :install, missing: { "foo" => [helper] }, tty: -> { tty })
+        [tty, { last: messages(result.last), skipped: messages(result.skipped) }]
+      end
+      expect(results).to eq(true  => { last: ["dependency `helper`: `pkg` requires sudo"], skipped: [] },
+                            false => { last: [], skipped: ["dependency `helper`: `pkg` requires sudo"] })
     end
 
     it "leaves a cask depending on something not in the run first" do

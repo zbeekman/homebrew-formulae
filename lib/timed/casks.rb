@@ -149,6 +149,10 @@ module Timed
     # `needs` maps a token to everything the cask needs, e.g. through its
     # formulae's dependencies, which brew may install before it; without an
     # entry, only its own `depends_on` counts.
+    #
+    # `missing` maps a token to the casks brew's cask installer would install
+    # before the cask as they aren't installed: what their installs need (sudo,
+    # a dialog) counts for the cask, naming the dependency.
     sig {
       params(
         casks:     T::Array[Cask::Cask],
@@ -162,16 +166,25 @@ module Timed
         zap:       T::Boolean,
         force:     T::Boolean,
         needs:     T::Hash[String, T::Array[String]],
+        missing:   T::Hash[String, T::Array[Cask::Cask]],
       ).returns(Plan)
     }
     def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
-                  force: false, needs: {})
+                  force: false, needs: {}, missing: {})
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
         old = installed[cask.token] if upgrading
         needed = needs.fetch(cask.token) { cask.depends_on.formula + cask.depends_on.cask }
-        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:))
+        own = reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:)
+        # Brew installs a dependency without `force`, as on request.
+        dependencies = missing.fetch(cask.token, []).flat_map do |dependency|
+          reasons(dependency, old: nil, upgrading: false, zap: false, force: false, in_run: [], needed: [], facts:,
+                              macos:).map do |reason|
+            Reason.new(kind: reason.kind, message: "dependency `#{dependency.full_name}`: #{reason.message}")
+          end
+        end
+        Entry.new(cask:, reasons: own + dependencies)
       end
       first, last = entries.partition { |entry| entry.reasons.empty? }
       # A cask upgrade that fails partway is rolled back, and the rollback may

@@ -119,7 +119,8 @@ module Homebrew
         without_minimum_version = ->(options) { options.reject { |option| option.start_with?("--minimum-version=") } }
         flags = without_minimum_version.call(forwarded.formula)
         cask_flags = without_minimum_version.call(forwarded.cask)
-        cask_plan = Timed::Command.cask_plan({ upgrade: outdated }, in_run: planned)
+        cask_plan = Timed::Command.cask_plan({ upgrade: outdated },
+                                             in_run: planned, skip_cask_deps: args.skip_cask_deps?)
         Timed::Command.show_casks("upgrade", cask_plan, named: args.named, flags: cask_flags)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)

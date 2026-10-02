@@ -669,8 +669,9 @@ RSpec.describe Timed::Runner do
       expect(calls).to eq([])
     end
 
-    it "reports a failed call and carries on", :aggregate_failures do
-      expect { run_casks(%w[foo], success: false) }.to output("Error: `brew upgrade --cask foo` failed.\n").to_stderr
+    it "reports a failed call, shell-escaping its arguments, and carries on", :aggregate_failures do
+      expect { run_casks(["foo", "/My Casks/bar.rb"], success: false) }
+        .to output("Error: `brew upgrade --cask foo /My\\ Casks/bar.rb` failed.\n").to_stderr
       expect(Homebrew).to be_failed
     end
 
