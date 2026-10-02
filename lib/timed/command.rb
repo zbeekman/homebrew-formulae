@@ -464,7 +464,7 @@ module Timed
       formulae = T.let([], T::Array[String])
       casks = T.let([], T::Array[Cask::Cask])
       unresolved = T.let([], T::Array[String])
-      seen = [cask.token]
+      seen = [cask.full_name]
       pending = cask.depends_on.formula.map { |name| [:formula, name] } +
                 cask.depends_on.cask.map { |name| [:cask, name] } + container_needs(cask)
       while (kind, name = pending.shift)
@@ -480,19 +480,20 @@ module Timed
             unresolved << name unless unresolved.include?(name)
           end
         else
-          token = Utils.name_from_full_name(name)
-          next if seen.include?(token)
-
-          seen << token
           begin
             dependency = Cask::CaskLoader.load(name, warn: false)
-            casks << dependency
-            pending.concat(dependency.depends_on.formula.map { |formula_name| [:formula, formula_name] } +
-                           dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] } +
-                           container_needs(dependency))
           rescue Cask::CaskError, Homebrew::UntrustedTapError
-            unresolved << name
+            unresolved << name unless unresolved.include?(name)
+            next
           end
+          # By full name, as another tap's cask may share a token.
+          next if seen.include?(dependency.full_name)
+
+          seen << dependency.full_name
+          casks << dependency
+          pending.concat(dependency.depends_on.formula.map { |formula_name| [:formula, formula_name] } +
+                         dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] } +
+                         container_needs(dependency))
         end
       end
       Needs.new(formulae:, casks:, unresolved:)

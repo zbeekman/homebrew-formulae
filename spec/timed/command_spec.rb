@@ -360,6 +360,21 @@ RSpec.describe Timed::Command do
     end
 
     describe ".cask_needs" do
+      it "follows another tap's cask with the same token as the cask, by full name, but not the cask itself" do
+        stub_lib_and_app
+        other = Cask::Cask.new("foo", tap: Tap.fetch("user", "tap")) do
+          T.bind(self, Cask::DSL)
+          version "1.0"
+          sha256 :no_check
+          url "file:///dev/null"
+          depends_on formula: "lib"
+        end
+        stub_cask_loader(other, "user/tap/foo")
+        cask = stub_cask("foo", nil, stanzas: 'depends_on cask: ["user/tap/foo", "foo"]')
+        needs = described_class.cask_needs(cask)
+        expect([needs.casks.map(&:full_name), needs.formulae]).to eq([%w[user/tap/foo], %w[lib]])
+      end
+
       it "follows casks through a cycle once and takes one it can't load, missing or invalid, by its name" do
         allow(Cask::CaskLoader).to receive(:load).and_call_original
         allow(Cask::CaskLoader).to receive(:load).with("bad-app", any_args)
