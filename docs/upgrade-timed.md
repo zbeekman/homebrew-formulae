@@ -123,7 +123,9 @@ it was given other than `--minimum-version`, with `--binaries` or
   and shouldn't prompt;
 - the last, after the batches, for the rest, so that a password prompt or a
   macOS dialog only waits once the builds are done:
-  - casks that depend on a formula or cask in the run;
+  - casks that need a formula or cask in the run, directly or through the
+    dependencies of the formulae and casks they need, which Homebrew may
+    install for them;
   - casks that may need sudo: those Homebrew itself says need it (e.g. `pkg`,
     `installer script:` with `sudo: true`), any `preflight` or `postflight`
     block and the install steps or file permissions that make Homebrew fall
@@ -142,12 +144,13 @@ The plan lists the casks of each call, with why each goes last. A failed cask
 call is reported and fails the command; the batches still run. Ctrl-C during a
 cask call stops the run.
 
-A cask for the last call that needs, directly or through its formulae'
-dependencies, a formula of the batches that failed or was skipped is not
-run: Homebrew would install that formula for it, without the formula options
-given for it (e.g. pour a bottle of a formula whose source build failed).
-Unlike `brew upgrade`, which would, the command leaves it out with a warning
-naming it, what it needs and the command to run it later.
+A cask for the last call that needs, in the same way, a formula of the
+batches that failed or was skipped and isn't installed is not run: Homebrew
+would install that formula for it, without the formula options given for it
+(e.g. pour a bottle of a formula whose source build failed). Unlike
+`brew upgrade`, which would, the command leaves it out with a warning naming
+it, what it needs and the command to run it later. A formula that failed to
+upgrade is still installed, so Homebrew leaves it alone and the cask runs.
 
 Without a terminal (`/dev/tty` can't be opened, e.g. under `launchd` or
 `cron`) and with `$SUDO_ASKPASS` unset, sudo can't ask for a password, so the

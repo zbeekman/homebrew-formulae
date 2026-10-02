@@ -400,13 +400,23 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         expect(brew_calls.map(&:last)).to eq(%w[firefox iterm2])
       end
 
-      it "doesn't reinstall a last cask that needs a formula that failed, saying so", :aggregate_failures do
+      it "reinstalls a last cask that needs a formula that failed, whose old keg brew put back and leaves alone",
+         :aggregate_failures do
         stub_cask("app-for-cmake", "2.0", stanzas: 'depends_on formula: "cmake"')
         allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake]))
-        expect { run_command("--yes", "--zap", "cmake", "firefox", "app-for-cmake") }.to output(<<~EOS).to_stderr
-          Warning: Not reinstalling 1 cask, as formulae it needs didn't reinstall:
-          app-for-cmake: needs cmake
-          Reinstall it later with `brew reinstall --cask --zap app-for-cmake`.
+        expect { run_command("--yes", "--zap", "cmake", "firefox", "app-for-cmake") }.not_to output.to_stderr
+        expect(brew_calls.map(&:last)).to eq(%w[firefox app-for-cmake])
+      end
+
+      it "doesn't reinstall a last cask that needs a formula brew would install for it, saying so",
+         :aggregate_failures do
+        stub_formula("lib", installed: false)
+        stub_cask("app-for-lib", "2.0", stanzas: 'depends_on formula: "lib"')
+        allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[lib]))
+        expect { run_command("--yes", "--zap", "lib", "firefox", "app-for-lib") }.to output(<<~EOS).to_stderr
+          Warning: Not reinstalling 1 cask, which needs formulae that didn't reinstall and aren't installed:
+          app-for-lib: needs lib
+          Reinstall it later with `brew reinstall --cask --zap app-for-lib`.
         EOS
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end

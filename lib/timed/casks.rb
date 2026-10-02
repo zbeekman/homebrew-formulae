@@ -145,6 +145,10 @@ module Timed
     #
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
     # installed cask without a successor and dispatches its `zap` stanza.
+    #
+    # `needs` maps a token to everything the cask needs, e.g. through its
+    # formulae's dependencies, which brew may install before it; without an
+    # entry, only its own `depends_on` counts.
     sig {
       params(
         casks:     T::Array[Cask::Cask],
@@ -157,15 +161,17 @@ module Timed
         installed: T::Hash[String, Cask::Cask],
         zap:       T::Boolean,
         force:     T::Boolean,
+        needs:     T::Hash[String, T::Array[String]],
       ).returns(Plan)
     }
     def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
-                  force: false)
+                  force: false, needs: {})
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
         old = installed[cask.token] if upgrading
-        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:))
+        needed = needs.fetch(cask.token) { cask.depends_on.formula + cask.depends_on.cask }
+        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:))
       end
       first, last = entries.partition { |entry| entry.reasons.empty? }
       # A cask upgrade that fails partway is rolled back, and the rollback may
@@ -218,13 +224,14 @@ module Timed
         zap:       T::Boolean,
         force:     T::Boolean,
         in_run:    T::Array[String],
+        needed:    T::Array[String],
         facts:     Facts,
         macos:     T::Boolean,
       ).returns(T::Array[Reason])
     }
-    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:)
+    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, needed:, facts:, macos:)
       cask.config = cask.default_config.merge(old.config) if old
-      reasons = depends_on_run(cask, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
+      reasons = depends_on_run(needed, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
       # Upgrade and reinstall uninstall the old version first.
       if upgrading
         uninstalled = old || cask
@@ -248,10 +255,11 @@ module Timed
       end
     end
 
-    sig { params(cask: Cask::Cask, in_run: T::Array[String]).returns(T::Array[Reason]) }
-    def self.depends_on_run(cask, in_run:)
+    # What a cask `needed` that is in this run.
+    sig { params(needed: T::Array[String], in_run: T::Array[String]).returns(T::Array[Reason]) }
+    def self.depends_on_run(needed, in_run:)
       names = in_run.map { |name| Utils.name_from_full_name(name) }
-      (cask.depends_on.formula + cask.depends_on.cask).filter_map do |name|
+      needed.filter_map do |name|
         next unless names.include?(Utils.name_from_full_name(name))
 
         Reason.new(kind: :dependency, message: "depends on `#{name}`, which is in this run")

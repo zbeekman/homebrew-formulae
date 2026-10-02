@@ -736,7 +736,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       failing << "cmake"
       expect { run_command("--yes", "--keep-tmp", "cmake", "app-for-cmake") }.to output(<<~EOS).to_stderr
         Error: 1 formula did not install: cmake
-        Warning: Not installing 1 cask, as formulae it needs didn't install:
+        Warning: Not installing 1 cask, which needs formulae that didn't install and aren't installed:
         app-for-cmake: needs cmake
         Install it later with `brew install --cask app-for-cmake`.
       EOS

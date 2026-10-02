@@ -161,9 +161,9 @@ way of a cask it installs, so that counts as a file it may need sudo for. The
 installed casks Homebrew won't upgrade go in the first call, for Homebrew to
 say why. Without a terminal, a cask that depends on a skipped one is skipped
 too, as Homebrew would install the skipped one first. A last cask that needs a
-formula that failed or was skipped is left out, with a warning, as for
-`brew upgrade-timed`: Homebrew would install that formula for it, without the
-options given for it.
+formula that failed to install or was skipped and isn't installed is left
+out, with a warning, as for `brew upgrade-timed`: Homebrew would install that
+formula for it, without the options given for it.
 
 ## Output
 

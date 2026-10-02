@@ -208,35 +208,82 @@ RSpec.describe Timed::Command do
       end
     end
 
+    # Formulae lib and app, which needs lib, at 1.0, loadable by name; lib
+    # installed, with a receipt, and linked into `opt` if `installed_lib`.
+    def stub_lib_and_app(installed_lib: false)
+      allow(Formulary).to receive(:loader_for).and_call_original
+      %w[lib app].each do |name|
+        stub_formula_loader(formula(name) do
+          T.bind(self, T.class_of(Formula))
+          url "https://brew.sh/#{name}-1.0.tgz"
+          depends_on "lib" if name == "app"
+        end)
+      end
+      return unless installed_lib
+
+      (HOMEBREW_CELLAR/"lib/1.0").mkpath
+      (HOMEBREW_CELLAR/"lib/1.0"/AbstractTab::FILENAME).write("{}")
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s HOMEBREW_CELLAR/"lib/1.0", HOMEBREW_PREFIX/"opt/lib"
+    end
+
+    describe ".cask_plan's needs" do
+      it "puts a cask last when what it needs through its formulae's dependencies or other casks is in the run" do
+        stub_lib_and_app
+        stub_cask("dep-app", nil, stanzas: 'depends_on formula: "app"')
+        casks = [stub_cask("via-formula", nil, stanzas: 'depends_on formula: "app"'),
+                 stub_cask("via-cask", nil, stanzas: 'depends_on cask: "dep-app"')]
+        result = described_class.cask_plan({ install: casks }, in_run: %w[lib], facts: Timed::Casks::DiskFacts.new,
+                                                               tty: -> { true })
+        expect(result.last.to_h { |entry| [entry.cask.token, entry.reasons.map(&:message)] })
+          .to eq("via-formula" => ["depends on `lib`, which is in this run"],
+                 "via-cask"    => ["depends on `lib`, which is in this run"])
+      end
+    end
+
+    describe ".cask_needs" do
+      it "follows casks through a cycle once and takes one it can't load by its name" do
+        stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app"]')
+        loop_a = stub_cask("loop-a", nil, stanzas: 'depends_on cask: "loop-b"')
+        expect(described_class.cask_needs(loop_a)).to eq(%w[loop-b gone-app])
+      end
+    end
+
     describe ".last_casks" do
-      it "leaves out, with one warning, the casks that need a formula brew didn't install, directly or through " \
-         "their formulae, as brew would install it for them without the options given for it", :aggregate_failures do
-        allow(Formulary).to receive(:loader_for).and_call_original
-        %w[lib app].each do |name|
-          stub_formula_loader(formula(name) do
-            T.bind(self, T.class_of(Formula))
-            url "https://brew.sh/#{name}-1.0.tgz"
-            depends_on "lib" if name == "app"
-          end)
-        end
+      it "leaves out, with one warning, the casks that need a formula brew didn't install and isn't installed, " \
+         "directly, through their formulae or through other casks, as brew would install it for them without " \
+         "the options given for it", :aggregate_failures do
+        stub_lib_and_app
+        stub_cask("dep-app", nil, stanzas: 'depends_on formula: "lib"')
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"'),
-                 stub_cask("through-app", nil, stanzas: 'depends_on formula: "app"'), stub_cask("free-app", nil)]
+                 stub_cask("through-app", nil, stanzas: 'depends_on formula: "app"'),
+                 stub_cask("via-cask", nil, stanzas: 'depends_on cask: "dep-app"'), stub_cask("free-app", nil)]
         kept = T.let(nil, T.nilable(T::Array[String]))
         expect do
           kept = described_class.last_casks("install", casks, named: [], flags: %w[--force], unfinished: %w[lib])
         end.to output(<<~EOS).to_stderr
-          Warning: Not installing 2 casks, as formulae they need didn't install:
+          Warning: Not installing 3 casks, which need formulae that didn't install and aren't installed:
           direct-app: needs lib
           through-app: needs lib
-          Install them later with `brew install --cask --force direct-app through-app`.
+          via-cask: needs lib
+          Install them later with `brew install --cask --force direct-app through-app via-cask`.
         EOS
         expect(kept).to eq(%w[free-app])
       end
 
-      it "keeps every cask, without a warning, when brew installed every formula" do
+      it "keeps a cask that needs a formula brew didn't upgrade but left installed, as brew won't touch it" do
+        stub_lib_and_app(installed_lib: true)
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
-        expect { described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []) }
+        expect { described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib]) }
           .not_to output.to_stderr
+      end
+
+      it "takes a formula it can't load, e.g. from a tap that isn't trusted, as needed by name only" do
+        allow(Formulary).to receive(:factory).and_call_original
+        allow(Formulary).to receive(:factory).with("user/tap/evil").and_raise(Homebrew::UntrustedTapError, "no")
+        casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "user/tap/evil"')]
+        expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []))
+          .to eq(%w[direct-app])
       end
     end
 

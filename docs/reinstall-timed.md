@@ -126,8 +126,10 @@ log, or with `--verbose` its `did not build` error. So when nothing in the call
 was installed, a formula brew left out before installing it, for a failed
 check, still makes it skip the last casks, with its warning. Without
 `--verbose`, a last formula that fails at an `inreplace` or while applying a
-patch prints neither, so the last casks still run then, apart from those that
-need a formula that failed, which are left out as for
+patch prints neither, so the last casks still run then. A failed reinstall
+puts the old keg back, so a last cask that needs that formula still runs;
+only one that needs a formula that isn't installed (e.g. one that wasn't
+installed before) is left out, as for
 [`brew upgrade-timed`](upgrade-timed.md#casks).
 
 ## Output

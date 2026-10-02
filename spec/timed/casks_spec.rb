@@ -75,11 +75,13 @@ RSpec.describe Timed::Casks do
       installed: T::Hash[String, Cask::Cask],
       zap:       T::Boolean,
       force:     T::Boolean,
+      needs:     T::Hash[String, T::Array[String]],
     ).returns(Timed::Casks::Plan)
   }
   def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {},
-           zap: false, force: false)
-    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:, force:)
+           zap: false, force: false, needs: {})
+    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:, force:,
+                                needs:)
   end
 
   sig { params(entries: T::Array[Timed::Casks::Entry]).returns(T::Array[String]) }
@@ -120,6 +122,11 @@ RSpec.describe Timed::Casks do
     it "puts a cask depending on a cask in the run last, whatever the tap prefix" do
       result = plan(cask { depends_on cask: "other" }, in_run: ["homebrew/cask/other"])
       expect(kinds(result.last)).to eq([:dependency])
+    end
+
+    it "puts a cask last when what it needs in `needs`, e.g. through its formulae's dependencies, is in the run" do
+      result = plan(cask { depends_on formula: "app" }, in_run: ["lib"], needs: { "foo" => %w[app lib] })
+      expect(messages(result.last)).to eq(["depends on `lib`, which is in this run"])
     end
 
     it "leaves a cask depending on something not in the run first" do

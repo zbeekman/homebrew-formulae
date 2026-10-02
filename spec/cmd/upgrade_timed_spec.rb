@@ -623,17 +623,15 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(Homebrew).to be_failed
     end
 
-    it "doesn't upgrade a last cask that needs a formula that failed to upgrade, saying so", :aggregate_failures do
+    it "upgrades a last cask that needs a formula that failed to upgrade, which brew leaves installed and alone",
+       :aggregate_failures do
       stub_formula("cmake")
+      FileUtils.cp receipt, HOMEBREW_CELLAR/"cmake/1.0/INSTALL_RECEIPT.json"
       stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
       allow(Timed::Runner).to receive(:run)
         .and_return(Timed::Runner::Outcome.new(unfinished: %w[cmake], stopped_early: false))
-      expect { run_command("--yes", "--greedy", "cmake", "iterm2") }.to output(<<~EOS).to_stderr
-        Warning: Not upgrading 1 cask, as formulae it needs didn't upgrade:
-        iterm2: needs cmake
-        Upgrade it later with `brew upgrade --cask --greedy iterm2`.
-      EOS
-      expect(brew_calls.drop(1)).to eq([])
+      expect { run_command("--yes", "--greedy", "cmake", "iterm2") }.not_to output.to_stderr
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes --greedy iterm2]])
     end
 
     it "upgrades a cask named with `--minimum-version`, without it, as planning applied it" do

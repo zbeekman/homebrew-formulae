@@ -343,7 +343,8 @@ module Timed
         installed = list.filter_map do |cask|
           installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.token, old] }
         end.to_h
-        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:)
+        needs = list.to_h { |cask| [cask.token, cask_needs(cask)] }
+        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
                       skipped: plans.flat_map(&:skipped))
@@ -373,31 +374,57 @@ module Timed
       EOS
     end
 
+    # Everything brew may install before `cask` (formulae and casks, as named):
+    # what it depends on, and in turn what those formulae and casks need, as
+    # brew's cask installer works it out. A formula or cask that can't be
+    # loaded (e.g. from a tap that isn't trusted) counts by its name alone.
+    sig { params(cask: Cask::Cask, seen: T::Array[String]).returns(T::Array[String]) }
+    def self.cask_needs(cask, seen: [cask.token])
+      formulae = cask.depends_on.formula.flat_map do |name|
+        [name, *dependency_names(Formulary.factory(name))]
+      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
+        [name]
+      end
+      casks = cask.depends_on.cask.flat_map do |name|
+        token = Utils.name_from_full_name(name)
+        next [] if seen.include?(token)
+
+        seen << token
+        [name, *cask_needs(Cask::CaskLoader.load(name, warn: false), seen:)]
+      rescue Cask::CaskUnavailableError, Homebrew::UntrustedTapError
+        [name]
+      end
+      (formulae + casks).uniq
+    end
+
     # The arguments for the `casks` to run after the formulae, as
     # `cask_arguments` names them for the `named` arguments, leaving out, with
-    # one warning (see `later`), those that need, directly or through their
-    # formula dependencies, one of the `unfinished` formulae (by full name)
-    # brew didn't install: brew's cask installer would install it for them,
-    # without the formula options given for it, e.g. pour a bottle of a
-    # formula whose source build failed.
+    # one warning (see `later`), those that need (see `cask_needs`) one of the
+    # `unfinished` formulae (by full name) brew didn't install that isn't
+    # installed and linked into `opt` either: brew's cask installer would
+    # install it for them, without the formula options given for it, e.g.
+    # pour a bottle of a formula whose source build failed. One left installed
+    # (e.g. by a failed upgrade) brew leaves alone.
     sig {
       params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
              unfinished: T::Array[String]).returns(T::Array[String])
     }
     def self.last_casks(verb, casks, named:, flags:, unfinished:)
       unfinished = unfinished.map { |name| Utils.name_from_full_name(name) }
+      missing = lambda do |name|
+        formula = Formulary.factory(name)
+        !(formula.any_version_installed? && formula.optlinked?)
+      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
+        true
+      end
       needs = casks.to_h do |cask|
-        needed = cask.depends_on.formula.flat_map do |name|
-          [name, *dependency_names(Formulary.factory(name))]
-        rescue FormulaUnavailableError
-          [name]
-        end
-        [cask, needed.map { |name| Utils.name_from_full_name(name) }.uniq & unfinished]
+        needed = cask_needs(cask).map { |name| Utils.name_from_full_name(name) }.uniq & unfinished
+        [cask, needed.select { |name| missing.call(name) }]
       end
       blocked = needs.select { |_, needed| needed.any? }
       if blocked.any?
         opoo <<~EOS
-          Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, as formulae #{(blocked.length == 1) ? "it needs" : "they need"} didn't #{verb}:
+          Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
           #{blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" }.join("\n")}
           #{later(verb, blocked.keys, named:, flags:)}
         EOS
