@@ -125,7 +125,11 @@ it was given other than `--minimum-version`, with `--binaries` or
   macOS dialog only waits once the builds are done:
   - casks that need a formula or cask in the run, directly or through the
     dependencies of the formulae and casks they need, which Homebrew may
-    install for them;
+    install for them. That includes what Homebrew needs to unpack a cask's
+    download (e.g. `xz`), which it only knows once it has the download; the
+    command, which downloads nothing, goes by the cask's `container type:`,
+    else its download if already cached, else the download's extension, as
+    Homebrew reads it (e.g. `.tar.xz`, a tarball, needs nothing);
   - casks with a cask dependency that isn't installed, which Homebrew would
     install first, whose install may need sudo or raise a dialog by the rules
     below (each reason names the dependency). With `--skip-cask-deps`,

@@ -3,9 +3,11 @@
 
 require "abstract_command"
 require "cask/cask_loader"
+require "cask/download"
 require "formulary"
 require "shellwords"
 require "trust"
+require "unpack_strategy"
 require "utils/output"
 require_relative "build_log"
 require_relative "casks"
@@ -395,16 +397,18 @@ module Timed
     end
 
     # What brew's cask installer may install before `cask`
-    # (`Cask::Installer#cask_and_formula_dependencies`): what it depends on,
-    # following formulae through their dependencies other than build and test
-    # ones, and the casks those require, and casks through what they depend on.
+    # (`Cask::Installer#cask_and_formula_dependencies`): what it and its
+    # download's container (see `container_needs`) depend on, following
+    # formulae through their dependencies other than build and test ones, and
+    # the casks those require, and casks through what they and their
+    # containers depend on.
     sig { params(cask: Cask::Cask).returns(Needs) }
     def self.cask_needs(cask)
       formulae = T.let([], T::Array[String])
       casks = T.let([], T::Array[T.any(Cask::Cask, String)])
       seen = [cask.token]
       pending = cask.depends_on.formula.map { |name| [:formula, name] } +
-                cask.depends_on.cask.map { |name| [:cask, name] }
+                cask.depends_on.cask.map { |name| [:cask, name] } + container_needs(cask)
       while (kind, name = pending.shift)
         if kind == :formula
           begin
@@ -426,13 +430,40 @@ module Timed
             dependency = Cask::CaskLoader.load(name, warn: false)
             casks << dependency
             pending.concat(dependency.depends_on.formula.map { |formula_name| [:formula, formula_name] } +
-                           dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] })
+                           dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] } +
+                           container_needs(dependency))
           rescue Cask::CaskError, Homebrew::UntrustedTapError
             casks << name
           end
         end
       end
       Needs.new(formulae:, casks:)
+    end
+
+    # What brew needs to unpack `cask`'s download (`UnpackStrategy#dependencies`,
+    # e.g. `xz`), as `[:formula, name]` and `[:cask, name]`. Brew only knows the
+    # container once it has the download, so, without downloading, this goes
+    # by the cask's `container type:`, else its download if already cached,
+    # else the extension of the file it would download to, as brew reads it
+    # (`.tar.xz` is a tarball, which needs nothing); nothing if none of those
+    # works out.
+    sig { params(cask: Cask::Cask).returns(T::Array[[Symbol, String]]) }
+    def self.container_needs(cask)
+      cached = Cask::Download.new(cask).cached_download
+      strategy = if (type = cask.container&.type)
+        UnpackStrategy.from_type(type)&.new(cached)
+      elsif cached.exist?
+        UnpackStrategy.detect(cached)
+      else
+        # Under-counts a tarball the system `tar` can't list (e.g. some
+        # `.tar.zst`), which brew unpacks by its compressor.
+        UnpackStrategy.from_extension(cached.extname)&.new(cached)
+      end
+      Array(strategy&.dependencies).map do |dependency|
+        dependency.is_a?(Formula) ? [:formula, dependency.full_name] : [:cask, dependency.full_name]
+      end
+    rescue
+      []
     end
 
     # The arguments for the `casks` to run after the formulae, as

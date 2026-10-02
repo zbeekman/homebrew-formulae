@@ -227,7 +227,28 @@ RSpec.describe Timed::Command do
       FileUtils.ln_s HOMEBREW_CELLAR/"lib/1.0", HOMEBREW_PREFIX/"opt/lib"
     end
 
+    # The formula `xz`, loadable by name.
+    def stub_xz
+      allow(Formulary).to receive(:loader_for).and_call_original
+      stub_formula_loader(formula("xz") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/xz-1.0.tgz"
+      end)
+    end
+
     describe ".cask_plan's needs" do
+      it "puts a cask whose download needs a formula in the run to unpack last, and holds it back when that " \
+         "formula didn't install and isn't installed", :aggregate_failures do
+        stub_xz
+        cask = stub_cask("xz-app", nil, url: "https://brew.sh/xz-app.xz")
+        result = described_class.cask_plan({ install: [cask] }, in_run: %w[xz], facts: Timed::Casks::DiskFacts.new,
+                                                                tty: -> { true })
+        expect(result.last.map { |entry| entry.reasons.map(&:message) })
+          .to eq([["depends on `xz`, which is in this run"]])
+        expect { described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[xz]) }
+          .to output(/^xz-app: needs xz$/).to_stderr
+      end
+
       it "puts a cask last when what it needs through its formulae's dependencies or other casks is in the run" do
         stub_lib_and_app
         stub_cask("dep-app", nil, stanzas: 'depends_on formula: "app"')
@@ -274,6 +295,31 @@ RSpec.describe Timed::Command do
         needs = described_class.cask_needs(loop_a)
         expect([needs.formulae, needs.casks.map { |cask| cask.is_a?(Cask::Cask) ? cask.token : cask }])
           .to eq([[], %w[loop-b gone-app bad-app]])
+      end
+
+      it "adds what brew needs to unpack the download, by its container type, its cached file or its " \
+         "extension as brew reads it, without downloading, and nothing if that can't be worked out" do
+        stub_xz
+        cached = stub_cask("cached-app", nil, url: "https://brew.sh/cached-app")
+        cached_file = Cask::Download.new(cached).cached_download
+        cached_file.dirname.mkpath
+        cached_file.binwrite("\xFD7zXZ\x00rest".b)
+        casks = { "type"    => stub_cask("typed-app", nil, stanzas: "container type: :xz"),
+                  "cached"  => cached,
+                  "xz"      => stub_cask("xz-app", nil, url: "https://brew.sh/xz-app.xz?download=1"),
+                  "tarball" => stub_cask("tar-app", nil, url: "https://brew.sh/tar-app.tar.xz"),
+                  "plain"   => stub_cask("plain-app", nil, url: "https://brew.sh/plain-app.zip") }
+        casks["dependency"] = stub_cask("via-app", nil, stanzas: 'depends_on cask: "typed-app"',
+                                                        url:     "https://brew.sh/via-app.zip")
+        expect(casks.transform_values { |cask| described_class.cask_needs(cask).formulae })
+          .to eq("type" => %w[xz], "cached" => %w[xz], "xz" => %w[xz], "tarball" => [], "plain" => [],
+                 "dependency" => %w[xz])
+      end
+
+      it "adds nothing for the download when working out its container fails" do
+        cask = stub_cask("typed-app", nil, stanzas: "container type: :xz")
+        allow(UnpackStrategy).to receive(:from_type).and_raise(RuntimeError, "boom")
+        expect(described_class.cask_needs(cask).formulae).to eq([])
       end
 
       it "follows formulae through their runtime dependencies only, as brew does, and the casks they require" do
