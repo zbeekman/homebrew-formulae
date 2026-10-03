@@ -1,6 +1,7 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "find"
 require "sorbet-runtime"
 
 module Timed
@@ -19,8 +20,8 @@ module Timed
       const :directory, T::Boolean, default: false
     end
 
-    # What the classifier needs to know about the disk. Real implementation
-    # elsewhere; specs pass fakes.
+    # What the classifier needs to know about the disk: `DiskFacts` reads it;
+    # specs pass fakes.
     module Facts
       extend T::Helpers
 
@@ -52,6 +53,59 @@ module Timed
       def readlink(path); end
     end
 
+    # `Facts` as the disk has them.
+    class DiskFacts
+      include Facts
+
+      sig { override.returns(Integer) }
+      def uid = Process.euid
+
+      # A directory that can't be searched can't be read whole either.
+      sig { override.params(path: Pathname).returns(T.nilable(FileEntry)) }
+      def lstat(path)
+        stat = path.lstat
+        FileEntry.new(path:, uid: stat.uid, readable: stat.readable? && (!stat.directory? || stat.executable?),
+                      directory: path.directory?)
+      rescue SystemCallError
+        nil
+      end
+
+      sig { override.params(path: Pathname).returns(T::Array[FileEntry]) }
+      def walk(path)
+        return [] unless lstat(path)
+
+        entries = T.let([], T::Array[FileEntry])
+        Find.find(path.to_s) { |file| lstat(Pathname(file))&.then { |entry| entries << entry } }
+        entries
+      end
+
+      sig { override.params(path: Pathname).returns(T::Boolean) }
+      def writable?(path) = path.writable?
+
+      sig { override.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def realpath(path)
+        path.realpath
+      rescue SystemCallError
+        nil
+      end
+
+      sig { override.params(path: Pathname).returns(T.nilable(Pathname)) }
+      def readlink(path)
+        path.readlink
+      rescue SystemCallError
+        nil
+      end
+    end
+
+    # Whether `/dev/tty` opens, where sudo asks for a password: not without a
+    # controlling terminal, e.g. under `launchd` or `cron`.
+    sig { returns(T::Boolean) }
+    def self.terminal?
+      File.open("/dev/tty") { true }
+    rescue SystemCallError
+      false
+    end
+
     # Why a cask goes last. `kind` is `:dependency` (waits for the run),
     # `:sudo` (may prompt for a password) or `:dialog` (may raise a macOS
     # dialog or permission prompt, but needs no sudo).
@@ -73,11 +127,17 @@ module Timed
       const :skipped, T::Array[Entry]
     end
 
-    # `in_run` names everything (formulae and casks) in this run. `macos`
+    # `in_run` names the formulae in this run and `casks_in_run` its casks, as
+    # a formula and a cask may share a name. `installed_for` maps each formula
+    # in it that brew installs only as a dependency to the formulae it installs
+    # it for. `macos`
     # says whether brew runs `add_altname_metadata`. `tty` says whether
     # `/dev/tty` can be opened, where sudo reads the password.
     #
-    # `installed` maps a token to the cask loaded from its installed caskfile.
+    # `installed`, `needs` and `missing` are keyed by the cask's full name, as
+    # casks from different taps may share a token.
+    #
+    # `installed` maps a cask to the one loaded from its installed caskfile.
     # On upgrade and reinstall brew runs the `uninstall_phase` of every artifact
     # of that cask, so the uninstall side (`uninstall` directives, uninstall
     # flight blocks and steps, and its bundles and links) applies to it (to the
@@ -91,27 +151,57 @@ module Timed
     #
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
     # installed cask without a successor and dispatches its `zap` stanza.
+    #
+    # `needs` maps a cask to the formulae and the casks it needs that are in
+    # the run, e.g. through its formulae's dependencies, which brew may install
+    # before it, as the run names them (the caller matches them by full name);
+    # without an entry, its own `depends_on` counts, matched by name.
+    #
+    # `missing` maps a cask to those brew's cask installer would install
+    # before it as they aren't installed: what their installs need (sudo,
+    # a dialog) counts for the cask, naming the dependency.
+    #
+    # `cask_dependencies` maps a cask to the casks brew may install before it,
+    # by full name, and the casks among those that can't be loaded, as named
+    # (formulae never count); without an entry, its own `depends_on cask:`, as
+    # named. See `skip_dependents`.
     sig {
       params(
-        casks:     T::Array[Cask::Cask],
-        verb:      Symbol,
-        in_run:    T::Array[String],
-        facts:     Facts,
-        tty:       T.proc.returns(T::Boolean),
-        macos:     T::Boolean,
-        env:       T::Hash[String, String],
-        installed: T::Hash[String, Cask::Cask],
-        zap:       T::Boolean,
-        force:     T::Boolean,
+        casks:             T::Array[Cask::Cask],
+        verb:              Symbol,
+        in_run:            T::Array[String],
+        facts:             Facts,
+        tty:               T.proc.returns(T::Boolean),
+        casks_in_run:      T::Array[String],
+        macos:             T::Boolean,
+        env:               T::Hash[String, String],
+        installed:         T::Hash[String, Cask::Cask],
+        zap:               T::Boolean,
+        force:             T::Boolean,
+        needs:             T::Hash[String, [T::Array[String], T::Array[String]]],
+        missing:           T::Hash[String, T::Array[Cask::Cask]],
+        cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]],
+        installed_for:     T::Hash[String, T::Array[String]],
       ).returns(Plan)
     }
-    def self.plan(casks, verb:, in_run:, facts:, tty:, macos: OS.mac?, env: ENV.to_h, installed: {}, zap: false,
-                  force: false)
+    def self.plan(casks, verb:, in_run:, facts:, tty:, casks_in_run: [], macos: OS.mac?, env: ENV.to_h,
+                  installed: {}, zap: false, force: false, needs: {}, missing: {}, cask_dependencies: {},
+                  installed_for: {})
       upgrading = [:upgrade, :reinstall].include?(verb)
       zap &&= verb == :reinstall
       entries = casks.map do |cask|
-        old = installed[cask.token] if upgrading
-        Entry.new(cask:, reasons: reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:))
+        old = installed[cask.full_name] if upgrading
+        formulae, needed_casks = needs.fetch(cask.full_name) { [cask.depends_on.formula, cask.depends_on.cask] }
+        own = depends_on_run(formulae, in_run:, installed_for:) +
+              depends_on_run(needed_casks, in_run: casks_in_run, casks: true) +
+              reasons(cask, old:, upgrading:, zap:, force:, facts:, macos:)
+        # Brew installs a dependency without `force`, as on request.
+        dependencies = missing.fetch(cask.full_name, []).flat_map do |dependency|
+          reasons(dependency, old: nil, upgrading: false, zap: false, force: false, facts:, macos:).map do |reason|
+            Reason.new(kind: reason.kind, message: "dependency `#{dependency.full_name}`: #{reason.message}")
+          end
+        end
+        Entry.new(cask:, reasons: own + dependencies)
       end
       first, last = entries.partition { |entry| entry.reasons.empty? }
       # A cask upgrade that fails partway is rolled back, and the rollback may
@@ -121,7 +211,7 @@ module Timed
         last = entries - first
         skipped = []
       elsif verb == :install
-        skipped, first, last = skip_dependents(skipped, first, last)
+        skipped, first, last = skip_dependents(skipped, first, last, cask_dependencies:)
       end
       Plan.new(first:, last:, skipped:)
     end
@@ -133,17 +223,24 @@ module Timed
     # dependency that is in an `upgrade` or `reinstall` run is installed
     # already, so its dependents are left alone there (the caller classifies
     # the install of an installed, outdated cask as `:upgrade`).
+    # A dependent is matched by its cask dependencies only (see `plan`'s
+    # `cask_dependencies`): by full name, or, for one that can't be loaded, by
+    # name alone, which may skip it for another tap's cask of that name, to be
+    # safe.
     sig {
-      params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry])
+      params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry],
+             cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]])
         .returns([T::Array[Entry], T::Array[Entry], T::Array[Entry]])
     }
-    def self.skip_dependents(skipped, first, last)
+    def self.skip_dependents(skipped, first, last, cask_dependencies: {})
       remaining = first + last
       queue = skipped.dup
       while (current = queue.shift)
-        dependency = current.cask.token
+        dependency = current.cask.full_name
         dependents = remaining.select do |entry|
-          entry.cask.depends_on.cask.any? { |name| Utils.name_from_full_name(name) == dependency }
+          resolved, unresolved = cask_dependencies.fetch(entry.cask.full_name) { [[], entry.cask.depends_on.cask] }
+          resolved.include?(dependency) ||
+            unresolved.any? { |name| Utils.name_from_full_name(name) == current.cask.token }
         end
         remaining -= dependents
         moved = dependents.map do |entry|
@@ -163,14 +260,13 @@ module Timed
         upgrading: T::Boolean,
         zap:       T::Boolean,
         force:     T::Boolean,
-        in_run:    T::Array[String],
         facts:     Facts,
         macos:     T::Boolean,
       ).returns(T::Array[Reason])
     }
-    def self.reasons(cask, old:, upgrading:, zap:, force:, in_run:, facts:, macos:)
+    def self.reasons(cask, old:, upgrading:, zap:, force:, facts:, macos:)
       cask.config = cask.default_config.merge(old.config) if old
-      reasons = depends_on_run(cask, in_run:) + requires_sudo(cask) + flight_blocks(cask, uninstall: false)
+      reasons = requires_sudo(cask) + flight_blocks(cask, uninstall: false)
       # Upgrade and reinstall uninstall the old version first.
       if upgrading
         uninstalled = old || cask
@@ -194,13 +290,25 @@ module Timed
       end
     end
 
-    sig { params(cask: Cask::Cask, in_run: T::Array[String]).returns(T::Array[Reason]) }
-    def self.depends_on_run(cask, in_run:)
+    # What a cask `needed` that is in this run (see `plan`): formulae, or,
+    # with `casks`, casks, which the reason says.
+    sig {
+      params(needed: T::Array[String], in_run: T::Array[String], installed_for: T::Hash[String, T::Array[String]],
+             casks: T::Boolean).returns(T::Array[Reason])
+    }
+    def self.depends_on_run(needed, in_run:, installed_for: {}, casks: false)
       names = in_run.map { |name| Utils.name_from_full_name(name) }
-      (cask.depends_on.formula + cask.depends_on.cask).filter_map do |name|
+      needed.filter_map do |name|
         next unless names.include?(Utils.name_from_full_name(name))
 
-        Reason.new(kind: :dependency, message: "depends on `#{name}`, which is in this run")
+        dependents = installed_for[name]
+        where = if dependents
+          "this run installs for #{dependents.map { |dependent| "`#{dependent}`" }.join(", ")}"
+        else
+          "is in this run"
+        end
+        what = casks ? "the `#{name}` cask" : "`#{name}`"
+        Reason.new(kind: :dependency, message: "depends on #{what}, which #{where}")
       end
     end
 

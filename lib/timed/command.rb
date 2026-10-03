@@ -2,9 +2,15 @@
 # frozen_string_literal: true
 
 require "abstract_command"
+require "cask/cask_loader"
+require "cask/download"
 require "formulary"
+require "shellwords"
+require "trust"
+require "unpack_strategy"
 require "utils/output"
 require_relative "build_log"
+require_relative "casks"
 require_relative "planner"
 
 module Timed
@@ -86,11 +92,13 @@ module Timed
       end
       formula_only = only_with.call(%w[cask casks])
       cask_only = only_with.call(%w[formula formulae])
+      # A `--[no-]…` switch is named without `no_` in the conflicts.
+      names = ->(option) { [option_name(option), option_name(option).delete_prefix("no_")] }
       split = preview.reject { |option| KIND_FLAGS.include?(option_name(option)) }
       Forwarded.new(
         preview:,
-        formula: split.reject { |option| cask_only.include?(option_name(option)) },
-        cask:    split.reject { |option| formula_only.include?(option_name(option)) },
+        formula: split.reject { |option| cask_only.intersect?(names.call(option)) },
+        cask:    split.reject { |option| formula_only.intersect?(names.call(option)) },
       )
     end
 
@@ -174,6 +182,29 @@ module Timed
       end.map(&:name)
     end
 
+    # What brew installs or upgrades as dependencies in the call for each of
+    # `installers`' formulae, by full name, keyed by the formula's
+    # (`FormulaInstaller#compute_dependencies`, which brew's plan has worked
+    # out); nothing with `--ignore-dependencies`. Where brew can't work them
+    # out (e.g. a dependency can't be loaded, for brew to report), every
+    # dependency that loads, also by full name (see `dependency_names`), to be
+    # safe.
+    sig { params(installers: T::Array[FormulaInstaller]).returns(T::Hash[String, T::Array[String]]) }
+    def self.run_dependencies(installers)
+      installers.to_h do |installer|
+        dependencies = if installer.ignore_deps?
+          []
+        else
+          begin
+            installer.compute_dependencies.map { |dependency| dependency.to_formula.full_name }
+          rescue
+            dependency_names(installer.formula)
+          end
+        end
+        [installer.formula.full_name, dependencies]
+      end
+    end
+
     # The lookahead asks for at least one of hours, minutes or seconds.
     GUESS = /\A(?<name>[^=]+)=(?=\d)(?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?\z/
 
@@ -241,16 +272,17 @@ module Timed
     # and the planner's warnings. Estimates ending in `?` are fallbacks, as in
     # `brew build-times stats`. With `dependencies_only` (`brew install
     # --only-dependencies`), each row is the dependencies of a formula, which
-    # have no estimates yet.
+    # have no estimates yet. Without batches, it says so only if the run has no
+    # `casks` (named, planned or `--cask`), whose lists say what it does.
     sig {
       params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String],
-             dependencies_only: T::Boolean).void
+             dependencies_only: T::Boolean, casks: T::Boolean).void
     }
-    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false)
+    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false)
       result.warnings.each { |warning| opoo warning }
       batches = result.batches
       if batches.empty?
-        ohai "No formulae to #{verb}"
+        ohai "No formulae to #{verb}" unless casks
       else
         duration = lambda do |names|
           BuildLog.format_duration(names.sum { |name| estimates.fetch(name).seconds }) unless dependencies_only
@@ -278,6 +310,327 @@ module Timed
 
       ohai "Excluded"
       puts excluded.join(" ")
+    end
+
+    # `args.options_only`, with each `--[no-]…` switch, which brew leaves out
+    # of it, added as `--…` or `--no-…` (e.g. `--no-binaries`) where `args`
+    # differs from what `parser` takes from the environment alone, as a
+    # sub-call would.
+    sig { params(args: Homebrew::CLI::Args, parser: Homebrew::CLI::Parser).returns(T::Array[String]) }
+    def self.options(args, parser)
+      defaults = T.let(nil, T.nilable(Homebrew::CLI::Args))
+      switches = parser.processed_options.filter_map do |_short, long|
+        next if long.nil? || !long.start_with?("--[no-]")
+
+        name = long.delete_prefix("--[no-]")
+        method = :"#{option_name(name)}?"
+        value = args.public_send(method)
+        defaults ||= parser.parse(["--", *args.named])
+        "--#{"no-" unless value}#{name}" if !value.nil? && value != defaults.public_send(method)
+      end
+      args.options_only + switches
+    end
+
+    # The cask brew uninstalls before it upgrades or reinstalls `cask`: the one
+    # its installed caskfile defines, or one rebuilt from that file's version
+    # and `cask`'s artifacts if that can't be loaded, as `Cask::Upgrade` does;
+    # nil if that fails too or `cask` isn't installed. To `reinstall`, with tap
+    # trust on, brew loads a Ruby caskfile only for a trusted cask, and
+    # otherwise uninstalls the artifacts the cask recorded and zaps with
+    # `cask`'s `zap` stanza (`Installer#load_installed_caskfile!`): see
+    # `recorded_cask` then.
+    sig { params(cask: Cask::Cask, reinstall: T::Boolean).returns(T.nilable(Cask::Cask)) }
+    def self.installed_cask(cask, reinstall: false)
+      return unless (caskfile = cask.installed_caskfile)
+
+      tab = Cask::CaskLoader.load_installed_tab(cask)
+      if reinstall && caskfile.extname == ".rb" && Homebrew::EnvConfig.require_tap_trust? &&
+         (tap = tab.tap || cask.tap) && !Homebrew::Trust.trusted?(:cask, "#{tap.name}/#{cask.token}")
+        begin
+          return recorded_cask(cask, tab)
+        rescue
+          # `cask` stands in.
+          return
+        end
+      end
+
+      begin
+        Cask::CaskLoader.load_from_installed_caskfile(caskfile)
+      rescue Cask::CaskInvalidError, Cask::CaskUnavailableError, MethodDeprecatedError
+        Cask::CaskLoader.recover_from_installed_caskfile(caskfile, fallback_cask: cask)
+      end
+    end
+
+    # `cask` with the uninstall artifacts its `tab` recorded, as brew replays
+    # them to uninstall a cask it won't load (`Installer#load_installed_caskfile!`
+    # without its migration and warning): only the artifact kinds that have an
+    # uninstall phase, other than `uninstall` and `zap`. Brew never runs the
+    # new cask's `uninstall` stanza then, but this keeps it, to be safe, and its
+    # `zap`, which brew does run for `--zap`.
+    sig { params(cask: Cask::Cask, tab: Cask::Tab).returns(Cask::Cask) }
+    def self.recorded_cask(cask, tab)
+      keys = Cask::DSL::ACTIVATABLE_ARTIFACT_CLASSES.filter_map do |klass|
+        next if [Cask::Artifact::Uninstall, Cask::Artifact::Zap].include?(klass)
+        next if !klass.method_defined?(:uninstall_phase) && !klass.method_defined?(:post_uninstall_phase)
+
+        klass.dsl_key
+      end
+      entries = Array(tab.uninstall_artifacts).grep(Hash)
+      kept = cask.artifacts.grep(Cask::Artifact::AbstractUninstall)
+      version = cask.version.to_s
+      Cask::Cask.new(cask.token, tap: cask.tap, config: cask.config) do
+        T.bind(self, Cask::DSL)
+        self.version version
+        entries.each do |entry|
+          entry.each do |raw_key, raw_args|
+            dsl_key = raw_key.to_sym
+            next unless keys.include?(dsl_key)
+
+            args = Array(raw_args)
+            last = args.last
+            if last.is_a?(Hash)
+              public_send(dsl_key, *args[...-1], **last.transform_keys(&:to_sym))
+            else
+              public_send(dsl_key, *args)
+            end
+          end
+        end
+        kept.each { |artifact| artifacts.add(artifact) }
+      end
+    end
+
+    # Sorts the casks of a run, given by the verb brew acts on each with, into
+    # those to run before the formulae, after them and not at all, by what is
+    # on disk and whether sudo can prompt. `in_run` names the formulae in the
+    # run, by full name; the casks are in it too, kept apart, as a formula and
+    # a cask may share a name. Each cask counts what brew may install before
+    # it that is in the run (see `cask_needs`, `Needs#formulae_among` and
+    # `Needs#casks_among`), handed to `Casks.plan` by full name, and what installing
+    # its missing cask
+    # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
+    # which brew installs only formula dependencies, those of skipped casks
+    # included, so a cask isn't skipped for a skipped cask it depends on.
+    # The run includes what brew installs for its formulae as dependencies,
+    # given by `run_dependencies` (see `run_dependencies`). `zap` and `force`
+    # are the wrapped command's.
+    sig {
+      params(casks: T::Hash[Symbol, T::Array[Cask::Cask]], in_run: T::Array[String],
+             run_dependencies: T::Hash[String, T::Array[String]], zap: T::Boolean, force: T::Boolean,
+             skip_cask_deps: T::Boolean, facts: Casks::Facts, tty: T.proc.returns(T::Boolean))
+        .returns(Casks::Plan)
+    }
+    def self.cask_plan(casks, in_run:, run_dependencies: {}, zap: false, force: false, skip_cask_deps: false,
+                       facts: Casks::DiskFacts.new, tty: -> { Casks.terminal? })
+      installed_for = T.let({}, T::Hash[String, T::Array[String]])
+      run_dependencies.each do |formula, dependencies|
+        (dependencies - in_run).each { |dependency| (installed_for[dependency] ||= []) << formula }
+      end
+      in_run += installed_for.keys
+      casks_in_run = casks.values.flatten.map(&:full_name)
+      plans = casks.map do |verb, list|
+        installed = list.filter_map do |cask|
+          installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.full_name, old] }
+        end.to_h
+        # Keyed by full name, as casks from different taps may share a token.
+        all_needs = list.to_h { |cask| [cask.full_name, cask_needs(cask)] }
+        needs = all_needs.transform_values do |needed|
+          [needed.formulae_among(in_run), skip_cask_deps ? [] : needed.casks_among(casks_in_run)]
+        end
+        missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
+        # Only a cask dependency runs a skipped cask's sudo, and none with
+        # `--skip-cask-deps`, when brew fails a cask whose dependency can't
+        # be loaded with its own error.
+        cask_dependencies = all_needs.transform_values do |needed|
+          skip_cask_deps ? [[], []] : [needed.casks.map(&:full_name), needed.unresolved_casks]
+        end
+        Casks.plan(list, verb:, in_run:, casks_in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
+                         cask_dependencies:, installed_for:)
+      end
+      Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
+                      skipped: plans.flat_map(&:skipped))
+    end
+
+    # Lists the casks to run before the formulae and those to run after them,
+    # with why, and warns about those skipped for want of a terminal, with the
+    # command to run them later (see `later`).
+    sig { params(verb: String, plan: Casks::Plan, named: T::Array[String], flags: T::Array[String]).void }
+    def self.show_casks(verb, plan, named:, flags:)
+      rows = lambda do |entries|
+        entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
+      end
+      { "first" => plan.first, "last" => plan.last }.each do |label, entries|
+        next if entries.empty?
+
+        ohai "Would #{verb} #{Utils.pluralize("cask", entries.length, include_count: true)} #{label}"
+        puts((label == "first") ? entries.map { |entry| entry.cask.full_name }.join(" ") : rows.call(entries))
+      end
+      return if plan.skipped.empty?
+
+      casks = plan.skipped.map(&:cask)
+      opoo <<~EOS
+        Skipping #{Utils.pluralize("cask", casks.length, include_count: true)}, as sudo can't ask for a password without a terminal:
+        #{rows.call(plan.skipped).join("\n")}
+        #{later(verb, casks, named:, flags:)}
+      EOS
+    end
+
+    # Everything brew may install before a cask: formulae by full name and
+    # casks, by name if they can't be loaded (e.g. from a tap that isn't
+    # trusted).
+    class Needs < T::Struct
+      # Formulae by full name, so aliases and renames are resolved.
+      const :formulae, T::Array[String], default: []
+      const :casks, T::Array[Cask::Cask], default: []
+      # Formulae and casks that can't be loaded, as named.
+      const :unresolved_formulae, T::Array[String], default: []
+      const :unresolved_casks, T::Array[String], default: []
+
+      # Those of the formulae `names` (full names, e.g. of formulae in the run)
+      # this needs: by full name, or, for one that can't be loaded, by name
+      # alone, which may match another tap's formula of that name, to be safe.
+      sig { params(names: T::Array[String]).returns(T::Array[String]) }
+      def formulae_among(names) = Needs.among(names, formulae, unresolved_formulae)
+
+      # Those of the casks `names` this needs, as `formulae_among` matches
+      # formulae, as a formula and a cask may share a name.
+      sig { params(names: T::Array[String]).returns(T::Array[String]) }
+      def casks_among(names) = Needs.among(names, casks.map(&:full_name), unresolved_casks)
+
+      sig { params(names: T::Array[String], full: T::Array[String], unresolved: T::Array[String]).returns(T::Array[String]) }
+      def self.among(names, full, unresolved)
+        loose = unresolved.map { |name| ::Utils.name_from_full_name(name) }
+        names.select { |name| full.include?(name) || loose.include?(::Utils.name_from_full_name(name)) }
+      end
+    end
+
+    # What brew's cask installer may install before `cask`
+    # (`Cask::Installer#cask_and_formula_dependencies`): what it and its
+    # download's container (see `container_needs`) depend on, following
+    # formulae through their dependencies other than build and test ones, and
+    # the casks those require, and casks through what they and their
+    # containers depend on.
+    sig { params(cask: Cask::Cask).returns(Needs) }
+    def self.cask_needs(cask)
+      formulae = T.let([], T::Array[String])
+      casks = T.let([], T::Array[Cask::Cask])
+      unresolved_formulae = T.let([], T::Array[String])
+      unresolved_casks = T.let([], T::Array[String])
+      seen = [cask.full_name]
+      pending = cask.depends_on.formula.map { |name| [:formula, name] } +
+                cask.depends_on.cask.map { |name| [:cask, name] } + container_needs(cask)
+      while (kind, name = pending.shift)
+        if kind == :formula
+          begin
+            formula = Formulary.factory(name)
+            next if formulae.include?(formula.full_name)
+
+            formulae << formula.full_name
+            pending.concat(formula.deps.reject { |dep| dep.build? || dep.test? }.map { |dep| [:formula, dep.name] })
+            pending.concat(formula.requirements.filter_map(&:cask).map { |token| [:cask, token] })
+          rescue FormulaUnavailableError, Homebrew::UntrustedTapError
+            unresolved_formulae |= [name]
+          end
+        else
+          begin
+            dependency = Cask::CaskLoader.load(name, warn: false)
+          rescue Cask::CaskError, Homebrew::UntrustedTapError
+            unresolved_casks |= [name]
+            next
+          end
+          # By full name, as another tap's cask may share a token.
+          next if seen.include?(dependency.full_name)
+
+          seen << dependency.full_name
+          casks << dependency
+          pending.concat(dependency.depends_on.formula.map { |formula_name| [:formula, formula_name] } +
+                         dependency.depends_on.cask.map { |cask_name| [:cask, cask_name] } +
+                         container_needs(dependency))
+        end
+      end
+      Needs.new(formulae:, casks:, unresolved_formulae:, unresolved_casks:)
+    end
+
+    # What brew needs to unpack `cask`'s download (`UnpackStrategy#dependencies`,
+    # e.g. `xz`), as `[:formula, name]` and `[:cask, name]`. Brew only knows the
+    # container once it has the download, so, without downloading, this goes
+    # by the cask's `container type:`, else its download if already cached,
+    # else the extension of the file it would download to, as brew reads it
+    # (`.tar.xz` is a tarball, which needs nothing); nothing if none of those
+    # works out.
+    sig { params(cask: Cask::Cask).returns(T::Array[[Symbol, String]]) }
+    def self.container_needs(cask)
+      cached = Cask::Download.new(cask).cached_download
+      strategy = if (type = cask.container&.type)
+        UnpackStrategy.from_type(type)&.new(cached)
+      elsif cached.exist?
+        UnpackStrategy.detect(cached)
+      else
+        # Under-counts a tarball the system `tar` can't list (e.g. some
+        # `.tar.zst`), which brew unpacks by its compressor.
+        UnpackStrategy.from_extension(cached.extname)&.new(cached)
+      end
+      Array(strategy&.dependencies).map do |dependency|
+        dependency.is_a?(Formula) ? [:formula, dependency.full_name] : [:cask, dependency.full_name]
+      end
+    rescue
+      []
+    end
+
+    # The arguments for the `casks` to run after the formulae, as
+    # `cask_arguments` names them for the `named` arguments, leaving out, with
+    # one warning (see `later`), those that need (see `cask_needs`) one of the
+    # `unfinished` formulae (by full name) brew didn't install that isn't
+    # installed and linked into `opt` either: brew's cask installer would
+    # install it for them, without the formula options given for it, e.g.
+    # pour a bottle of a formula whose source build failed. One left installed
+    # (e.g. by a failed upgrade) brew leaves alone. What brew installs for an
+    # unfinished formula (`run_dependencies`, as for `cask_plan`) counts as
+    # unfinished too, as its call may have failed at one of those.
+    sig {
+      params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
+             unfinished: T::Array[String], run_dependencies: T::Hash[String, T::Array[String]])
+        .returns(T::Array[String])
+    }
+    def self.last_casks(verb, casks, named:, flags:, unfinished:, run_dependencies: {})
+      unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
+      # Loaded by full name, so another tap's formula of the same name isn't.
+      missing = lambda do |name|
+        formula = Formulary.factory(name)
+        !(formula.any_version_installed? && formula.optlinked?)
+      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
+        true
+      end
+      needs = casks.to_h do |cask|
+        # Brew installs formula dependencies even with `--skip-cask-deps`.
+        [cask, cask_needs(cask).formulae_among(unfinished).select { |name| missing.call(name) }]
+      end
+      blocked = needs.select { |_, needed| needed.any? }
+      if blocked.any?
+        opoo <<~EOS
+          Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
+          #{blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" }.join("\n")}
+          #{later(verb, blocked.keys, named:, flags:)}
+        EOS
+      end
+      cask_arguments(named, casks - blocked.keys)
+    end
+
+    # How to run `casks` later, with the cask `flags` their call was given,
+    # naming each as `cask_arguments` does for the `named` arguments, each
+    # argument escaped for the shell.
+    sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
+    def self.later(verb, casks, named:, flags:)
+      command = Shellwords.join(["brew", verb, "--cask", *flags, *cask_arguments(named, casks)])
+      "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with `#{command}`."
+    end
+
+    # The argument that names each of `casks` in a sub-call: the file it was
+    # loaded from if `names` gave it as a path, as `named_argv` makes it,
+    # otherwise its full name.
+    sig { params(names: T::Array[String], casks: T::Array[Cask::Cask]).returns(T::Array[String]) }
+    def self.cask_arguments(names, casks)
+      paths = named_argv(names)
+      casks.map { |cask| paths.find { |path| path == cask.sourcefile_path.to_s } || cask.full_name }
     end
 
     sig { params(option: String).returns(String) }

@@ -45,8 +45,9 @@ It then prints what `brew install` would install, with the dependencies it
 would install or upgrade and the outdated dependents it would upgrade, as
 `brew install --dry-run` prints them, and the batches with their estimates.
 It then asks for confirmation once for the whole run, under `brew install`'s
-rule: only if Homebrew would also install or upgrade dependencies of the
-formulae in the batches, or upgrade outdated dependents of them. Like
+rules: only if Homebrew would also install or upgrade dependencies of the
+formulae in the batches, or upgrade outdated dependents of them, or install
+dependencies of the casks. Like
 `brew install`, it works out those dependencies before reading the bottle
 manifests, so it can list and ask about an outdated dependency that a bottle
 would accept and Homebrew then leaves alone. Without a terminal it carries on
@@ -78,8 +79,8 @@ install receipt without the build times; the command then writes them back as
 they were, unless `--no-stamp-receipts` is given. Relative paths to formula
 files are passed on as absolute paths, as Homebrew runs from the home
 directory. `--interactive` can't be used, as it needs a terminal: use
-`brew install --interactive` instead. Casks can't be installed yet: use
-`brew install --cask` for those.
+`brew install --interactive` instead. Casks are installed too, before or after
+the batches: see [Casks](#casks).
 
 `brew install-timed` is a command in this tap. Trust it once with
 `brew trust --command zbeekman/tap/install-timed`, or trust the whole tap. See
@@ -141,6 +142,31 @@ batch, none of which are logged, and exits with status 130, as Homebrew does.
 The batches that finished are logged. It exits with status 130 even if
 Homebrew finished the last batch anyway.
 
+## Casks
+
+Casks are neither timed nor logged. As `brew install` does, it installs the
+named casks that aren't installed and upgrades the installed, outdated ones,
+unless they are pinned or `$HOMEBREW_NO_INSTALL_UPGRADE` is set. Before the
+formulae, it prints what `brew install` prints about the casks: with
+`--dry-run`, those not installed; otherwise those it would install or upgrade;
+each time with the dependencies it would install for them.
+
+They run in at most two calls of
+`brew install --cask --yes` *`options`* *`cask`* ..., split into a first call
+before the batches and a last one after them as for
+[`brew upgrade-timed`](upgrade-timed.md#casks), with the cask options it was
+given (`--[no-]binaries` as there). Only the casks it upgrades have an old
+version to uninstall. With `--force`, Homebrew deletes an existing app in the
+way of a cask it installs, so that counts as a file it may need sudo for. The
+installed casks Homebrew won't upgrade go in the first call, for Homebrew to
+say why. Without a terminal, a cask that depends on a skipped one, following
+its dependencies through other casks, is skipped too, as Homebrew would install
+the skipped one first, except with `--skip-cask-deps`, with which Homebrew
+installs no cask dependency. A last cask that needs a formula that failed to
+install or was skipped, or a dependency Homebrew would have installed for one,
+and isn't installed is left out, with a warning, as for `brew upgrade-timed`:
+Homebrew would install that formula for it, without the options given for it.
+
 ## Output
 
 A heading gives the number of formulae and batches and the estimated total.
@@ -148,7 +174,8 @@ Each batch has a heading with its estimated time and why a new batch starts
 there, then a row per formula with `pour` or `build` and its estimate. An
 estimate ending in `?` has no history of that kind of build to go on, as in
 `brew build-times stats`. With `--only-dependencies`, the headings have no
-times and each row reads `dependencies of` *`formula`*.
+times and each row reads `dependencies of` *`formula`*. Then come the casks
+to install first, and those to install last, each with why.
 
 A new batch starts:
 

@@ -65,21 +65,25 @@ RSpec.describe Timed::Casks do
 
   sig {
     params(
-      casks:     Cask::Cask,
-      in_run:    T::Array[String],
-      verb:      Symbol,
-      world:     T.nilable(Timed::Casks::Facts),
-      macos:     T::Boolean,
-      tty:       T.proc.returns(T::Boolean),
-      env:       T::Hash[String, String],
-      installed: T::Hash[String, Cask::Cask],
-      zap:       T::Boolean,
-      force:     T::Boolean,
+      casks:        Cask::Cask,
+      in_run:       T::Array[String],
+      casks_in_run: T::Array[String],
+      verb:         Symbol,
+      world:        T.nilable(Timed::Casks::Facts),
+      macos:        T::Boolean,
+      tty:          T.proc.returns(T::Boolean),
+      env:          T::Hash[String, String],
+      installed:    T::Hash[String, Cask::Cask],
+      zap:          T::Boolean,
+      force:        T::Boolean,
+      needs:        T::Hash[String, [T::Array[String], T::Array[String]]],
+      missing:      T::Hash[String, T::Array[Cask::Cask]],
     ).returns(Timed::Casks::Plan)
   }
-  def plan(*casks, in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {}, installed: {},
-           zap: false, force: false)
-    described_class.plan(casks, verb:, in_run:, facts: world || facts, macos:, tty:, env:, installed:, zap:, force:)
+  def plan(*casks, in_run: [], casks_in_run: [], verb: :upgrade, world: nil, macos: true, tty: -> { true }, env: {},
+           installed: {}, zap: false, force: false, needs: {}, missing: {})
+    described_class.plan(casks, verb:, in_run:, casks_in_run:, facts: world || facts, macos:, tty:, env:, installed:,
+                                zap:, force:, needs:, missing:)
   end
 
   sig { params(entries: T::Array[Timed::Casks::Entry]).returns(T::Array[String]) }
@@ -118,8 +122,34 @@ RSpec.describe Timed::Casks do
     end
 
     it "puts a cask depending on a cask in the run last, whatever the tap prefix" do
-      result = plan(cask { depends_on cask: "other" }, in_run: ["homebrew/cask/other"])
+      result = plan(cask { depends_on cask: "other" }, casks_in_run: ["homebrew/cask/other"])
       expect(kinds(result.last)).to eq([:dependency])
+    end
+
+    it "matches a formula and a cask it depends on only with the run's formulae and casks, saying which" do
+      formula_and_cask = cask do
+        depends_on cask: "colima"
+        depends_on formula: "docker"
+      end
+      runs = { formulae: { in_run: %w[docker colima] }, casks: { casks_in_run: %w[docker colima] } }
+      expect(runs.transform_values { |run| messages(plan(formula_and_cask, **run).last) })
+        .to eq(formulae: ["depends on `docker`, which is in this run"],
+               casks:    ["depends on the `colima` cask, which is in this run"])
+    end
+
+    it "puts a cask last when what it needs in `needs`, e.g. through its formulae's dependencies, is in the run" do
+      result = plan(cask { depends_on formula: "app" }, in_run: ["lib"], needs: { "foo" => [%w[app lib], []] })
+      expect(messages(result.last)).to eq(["depends on `lib`, which is in this run"])
+    end
+
+    it "counts what installing a missing cask dependency in `missing` needs for the cask, naming the dependency" do
+      helper = cask("helper") { pkg "Helper.pkg" }
+      results = [true, false].to_h do |tty|
+        result = plan(cask, verb: :install, missing: { "foo" => [helper] }, tty: -> { tty })
+        [tty, { last: messages(result.last), skipped: messages(result.skipped) }]
+      end
+      expect(results).to eq(true  => { last: ["dependency `helper`: `pkg` requires sudo"], skipped: [] },
+                            false => { last: [], skipped: ["dependency `helper`: `pkg` requires sudo"] })
     end
 
     it "leaves a cask depending on something not in the run first" do
@@ -859,7 +889,7 @@ RSpec.describe Timed::Casks do
 
       sig { params(tty: T::Boolean, env: T::Hash[String, String], verb: Symbol).returns(T::Hash[Symbol, T::Array[String]]) }
       def placed(tty: false, env: {}, verb: :install)
-        result = plan(*casks, in_run: casks.map(&:token), verb:, tty: -> { tty }, env:)
+        result = plan(*casks, casks_in_run: casks.map(&:token), verb:, tty: -> { tty }, env:)
         { first: tokens(result.first), last: tokens(result.last), skipped: tokens(result.skipped) }
       end
 
@@ -868,12 +898,12 @@ RSpec.describe Timed::Casks do
       end
 
       it "keeps the reasons of each dependent and names the skipped dependency" do
-        skipped = plan(*casks, in_run: casks.map(&:token), verb: :install, tty: -> { false }).skipped
+        skipped = plan(*casks, casks_in_run: casks.map(&:token), verb: :install, tty: -> { false }).skipped
         expect(skipped.to_h { |entry| [entry.cask.token, entry.reasons.map { |r| [r.kind, r.message] }] }).to eq(
           "cask-a" => [[:sudo, "`pkg` requires sudo"]],
-          "cask-b" => [[:dependency, "depends on `homebrew/cask/cask-a`, which is in this run"],
+          "cask-b" => [[:dependency, "depends on the `homebrew/cask/cask-a` cask, which is in this run"],
                        [:dependency, "depends on `cask-a`, which is skipped"]],
-          "cask-c" => [[:dependency, "depends on `cask-b`, which is in this run"],
+          "cask-c" => [[:dependency, "depends on the `cask-b` cask, which is in this run"],
                        [:dependency, "depends on `cask-b`, which is skipped"]],
         )
       end
@@ -896,6 +926,74 @@ RSpec.describe Timed::Casks do
         expect([:install, :upgrade, :reinstall].to_h { |verb| [verb, placed(verb:)[:skipped]] })
           .to eq({ install: ["cask-a", "cask-b", "cask-c"], upgrade: ["cask-a"], reinstall: ["cask-a"] })
       end
+    end
+  end
+
+  describe Timed::Casks::DiskFacts do
+    subject(:disk) { described_class.new }
+
+    let(:dir) { mktmpdir.realpath }
+
+    sig { params(path: Pathname).returns(T.nilable([Integer, T::Boolean, T::Boolean])) }
+    def entry(path) = disk.lstat(path)&.then { |found| [found.uid, found.readable, found.directory] }
+
+    it "reads each entry with `lstat`, as the current user, a directory a symlink names counting as one" do
+      (dir/"app").mkpath
+      FileUtils.touch dir/"file"
+      FileUtils.ln_s dir/"app", dir/"link"
+      FileUtils.ln_s dir/"gone", dir/"dangling"
+      uid = Process.euid
+      expect(%w[app file link dangling gone].to_h { |name| [name, entry(dir/name)] })
+        .to eq("app" => [uid, true, true], "file" => [uid, true, false], "link" => [uid, true, true],
+               "dangling" => [uid, true, false], "gone" => nil)
+    end
+
+    it "takes an entry the user can't read, or a directory they can't search, as unreadable" do
+      (dir/"locked").mkpath
+      FileUtils.touch dir/"secret"
+      (dir/"secret").chmod(0200)
+      (dir/"locked").chmod(0600)
+      expect([entry(dir/"secret")&.fetch(1), entry(dir/"locked")&.fetch(1)]).to eq([false, false])
+    ensure
+      (dir/"locked").chmod(0755)
+    end
+
+    it "walks a tree without following symlinks, and nothing for a missing path", :aggregate_failures do
+      (dir/"outside").mkpath
+      FileUtils.touch dir/"outside/hidden"
+      (dir/"app/Contents").mkpath
+      FileUtils.touch dir/"app/Contents/binary"
+      FileUtils.ln_s dir/"outside", dir/"app/Contents/link"
+      expect(disk.walk(dir/"app").map { |found| found.path.relative_path_from(dir).to_s }.sort)
+        .to eq(%w[app app/Contents app/Contents/binary app/Contents/link])
+      expect(disk.walk(dir/"gone")).to eq([])
+    end
+
+    it "says what is writable as `Pathname#writable?` does, and resolves paths and links, `nil` when missing" do
+      (dir/"readonly").mkpath
+      (dir/"readonly").chmod(0555)
+      FileUtils.touch dir/"file"
+      FileUtils.ln_s dir/"file", dir/"link"
+      expect([disk.writable?(dir/"file"), disk.writable?(dir/"readonly"), disk.writable?(dir/"gone"),
+              disk.realpath(dir/"link"), disk.realpath(dir/"gone"), disk.readlink(dir/"link"),
+              disk.readlink(dir/"file"), disk.readlink(dir/"gone"), disk.uid])
+        .to eq([true, false, false, dir/"file", nil, dir/"file", nil, nil, Process.euid])
+    ensure
+      (dir/"readonly").chmod(0755)
+    end
+  end
+
+  describe ".terminal?" do
+    it "is whether `/dev/tty` opens, where sudo asks for a password" do
+      opens = [true, false].to_h do |works|
+        allow(File).to receive(:open).with("/dev/tty") do |&block|
+          raise Errno::ENXIO, "/dev/tty" unless works
+
+          block.call(StringIO.new)
+        end
+        [works, described_class.terminal?]
+      end
+      expect(opens).to eq(true => true, false => false)
     end
   end
 

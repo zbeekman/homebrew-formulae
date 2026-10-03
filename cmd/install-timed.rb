@@ -3,6 +3,7 @@
 
 require "abstract_command"
 require "ask"
+require "cask/upgrade"
 require "cmd/install"
 require "development_tools"
 require "diagnostic"
@@ -30,7 +31,8 @@ module Homebrew
           Takes every `brew install` option. Prints what `brew install` would install, as `brew install --dry-run`
           does, and the batches with their estimates, then asks for confirmation once for the whole run, as
           `brew install` does. With `--dry-run`, stops after printing the plan. Otherwise runs
-          `brew install` once per batch and logs how long each formula took.
+          `brew install` once per batch and logs how long each formula took. Installs casks with
+          `brew install --cask` before the batches, or after them if they may prompt or need the run.
         EOS
         Timed::Command.define_flags(self)
       end
@@ -70,10 +72,20 @@ module Homebrew
         # stops it.
         items = args.named.to_formulae_and_casks(warn: false)
         casks = items.grep(Cask::Cask)
-        if casks.any?
-          raise UsageError, "`brew install-timed` doesn't install casks yet; use " \
-                            "`brew install --cask #{casks.map(&:full_name).join(" ")}` instead."
+        new_casks = casks.reject(&:installed?)
+        # As `brew install` does, it upgrades the installed, outdated ones,
+        # reporting those it won't upgrade as it runs, pinned ones included.
+        unpinned = casks.reject(&:pinned?)
+        upgrading = if unpinned.empty? || Homebrew::EnvConfig.no_install_upgrade?
+          []
+        else
+          Cask::Upgrade.outdated_casks(unpinned, args:, force: true, quiet: true)
         end
+        # What `brew install --dry-run` prints about the casks, and `brew
+        # install` before it asks about them: the dependencies it would install.
+        cask_dependencies = Install.print_dry_run_casks(args.dry_run? ? casks : new_casks | upgrading,
+                                                        skip_cask_deps:    args.skip_cask_deps?,
+                                                        include_installed: !args.dry_run?)
 
         guesses = Timed::Command.guesses(args.guess || [],
                                          resolve: ->(name) { Timed::Command.resolve("--guess", name) })
@@ -200,14 +212,27 @@ module Homebrew
         Install.ask_formulae(planned_installers, dependants, prompt: false, flags: args.flags_only,
                                                              **installer_options)
         Timed::Command.show_plan("install", result, estimates, excluded:          set & exclude,
-                                                               dependencies_only: args.only_dependencies?)
-        return if args.dry_run? || planned.empty?
+                                                               dependencies_only: args.only_dependencies?,
+                                                               casks:             args.cask? || casks.any?)
+        forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
+                                           conflicts: self.class.parser.conflicts)
+        run_dependencies = Timed::Command.run_dependencies(planned_installers)
+        cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
+                                             in_run: planned, run_dependencies:, force: args.force?,
+                                             skip_cask_deps: args.skip_cask_deps?)
+        Timed::Command.show_casks("install", cask_plan, named: args.named, flags: forwarded.cask)
+        # The installed casks brew won't upgrade, which it only reports on.
+        first_casks = cask_plan.first.map(&:cask) + (casks - new_casks - upgrading)
+        last_casks = cask_plan.last.map(&:cask)
+        return if args.dry_run? || (planned.empty? && first_casks.empty? && last_casks.empty?)
 
-        # Once for the whole run, by brew's rule: if brew would install or
+        # Once for the whole run, by brew's rules: if brew would install or
         # upgrade dependencies of the formulae, or upgrade outdated dependents
-        # of them. Exits on "n"; returns false without a terminal, where brew
-        # carries on unasked.
-        if !args.no_ask? && Install.formulae_ask_prompt_needed?(planned_installers, dependants)
+        # of them, or install dependencies of the casks. Exits on "n"; returns
+        # false without a terminal, where brew carries on unasked.
+        cask_names = (new_casks | upgrading).map(&:full_name)
+        if !args.no_ask? && (Install.formulae_ask_prompt_needed?(planned_installers, dependants) ||
+           Install.ask_prompt_needed?(planned_names: cask_names + cask_dependencies, requested_names: cask_names))
           Homebrew::Ask.confirm?(action: "installation")
         end
 
@@ -223,14 +248,21 @@ module Homebrew
 
           ->(since) { Timed::Receipts.installed_since?(formula, since, before: current.fetch(formula.full_name)) }
         end
-        forwarded = Timed::Command.forward(args.options_only, conflicts: self.class.parser.conflicts)
         # Each batch's `brew install` notes the support tier of the run and
         # says it as it exits, so this command doesn't say it again.
         Homebrew::Diagnostic.support_tiers.clear
-        Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
-                                          stamp: !args.no_stamp_receipts?, succeeded:,
-                                          dependencies_only: args.only_dependencies?,
-                                          arguments: Timed::Command.path_arguments(args.named, formulae))
+        Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, first_casks),
+                                flags: forwarded.cask, label: "first")
+        outcome = if result.batches.any?
+          Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
+                                            stamp: !args.no_stamp_receipts?, succeeded:,
+                                            dependencies_only: args.only_dependencies?,
+                                            arguments: Timed::Command.path_arguments(args.named, formulae))
+        end
+        last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
+                                                                unfinished: outcome&.unfinished || [],
+                                                                run_dependencies:)
+        Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
       end
 
       private

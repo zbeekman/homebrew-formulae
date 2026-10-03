@@ -161,6 +161,13 @@ RSpec.describe Timed::Runner do
                            %w[upgrade --formula --yes --display-times --verbose app]])
     end
 
+    it "returns the formulae brew didn't install: those that failed, and those skipped as they need one" do
+      %w[lib app tool].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      outcome = run([batch("lib", "tool"), batch("app")], deps: { "app" => %w[lib] })
+      expect([outcome.unfinished, outcome.stopped_early]).to eq([%w[lib app], false])
+    end
+
     it "names a formula to brew by its argument in `arguments`, and logs it by its name", :aggregate_failures do
       stub_formula("lib")
       fake_brew
@@ -463,32 +470,91 @@ RSpec.describe Timed::Runner do
     end
 
     describe "with `stops_at_failure`" do
-      it "logs the formulae of a failed call that brew never started as skipped, not failed, and warns",
-         :aggregate_failures do
+      it "logs the formulae of a failed call that brew never started as skipped, not failed, warns and says " \
+         "brew stopped early", :aggregate_failures do
         %w[lib app tool].each { |name| stub_formula(name) }
         fake_brew(failing: %w[app], stop_at_failure: true)
-        expect { run([batch("lib", "app", "tool")], verb: "reinstall", stops_at_failure: true) }
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("lib", "app", "tool")], verb: "reinstall", stops_at_failure: true) }
           .to output(<<~EOS).to_stderr
             Warning: `brew reinstall` stopped early; not run: tool
             Error: 1 formula did not reinstall: app
           EOS
         expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
           .to eq("lib" => ["built"], "app" => ["failed"], "tool" => ["skipped"])
-        expect(Homebrew).to be_failed
+        expect([outcome&.stopped_early, outcome&.unfinished, Homebrew.failed?]).to eq([true, %w[app tool], true])
+      end
+
+      # Brew fetches everything first, then installs what downloaded:
+      # `failures` are the download failures it prints, then it reinstalls
+      # lib, and with `times` prints the installation times as it finishes.
+      def failed_downloads(failures, times: false)
+        allow(described_class).to receive(:stream) do |_argv, &on_line|
+          [*failures, "==> Reinstalling lib\n"].each(&on_line)
+          (HOMEBREW_CELLAR/"lib/2.0").mkpath
+          FileUtils.cp receipt, HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{HOMEBREW_CELLAR}/lib/2.0: 3 files, 12KB, built in 9 seconds\n")
+          ["==> Installation times\n", "lib                     9.500 s\n"].each(&on_line) if times
+          false
+        end
+      end
+
+      it "takes brew as finished when it printed the installation times, though it never started a formula it " \
+         "left out with an error, which is failed, not not run", :aggregate_failures do
+        %w[app lib].each { |name| stub_formula(name) }
+        failed_downloads(["Error: app: no bottle available!\n"], times: true)
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("app", "lib")], verb: "reinstall", stops_at_failure: true) }
+          .to output("Error: 1 formula did not reinstall: app\n").to_stderr
+        expect([outcome&.stopped_early,
+                builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
+          .to eq([false, { "app" => ["failed"], "lib" => ["built"] }])
       end
 
       it "takes a formula whose download failed as failed, not as not run" do
         %w[lib app].each { |name| stub_formula(name) }
-        # Brew fetches everything first, then installs what downloaded.
-        allow(described_class).to receive(:stream) do |_argv, &on_line|
-          ["✘ Formula app (2.0)\n", "Error: app: download failed\n", "==> Reinstalling lib\n"].each(&on_line)
-          (HOMEBREW_CELLAR/"lib/2.0").mkpath
-          FileUtils.cp receipt, HOMEBREW_CELLAR/"lib/2.0/INSTALL_RECEIPT.json"
-          on_line.call("🍺  #{HOMEBREW_CELLAR}/lib/2.0: 3 files, 12KB, built in 9 seconds\n")
-          false
-        end
+        failed_downloads(["✘ Formula app (2.0)\n", "Error: app: download failed\n"])
         expect { run([batch("app", "lib")], verb: "reinstall", stops_at_failure: true) }
           .to output("Error: 1 formula did not reinstall: app\n").to_stderr
+      end
+
+      it "takes formulae whose resource or patch failed to download, which brew leaves out and carries on " \
+         "without, as failed, not as not run", :aggregate_failures do
+        %w[app tool lib].each { |name| stub_formula(name) }
+        failed_downloads(["✘ Resource app--libfoo\n", "Error: libfoo: download failed\n", "✘ Patch fix.diff\n",
+                          "Error: fix.diff: download failed\n"])
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect { outcome = run([batch("app", "tool", "lib")], verb: "reinstall", stops_at_failure: true) }
+          .to output("Error: 2 formulae did not reinstall: app tool\n").to_stderr
+        expect([outcome&.stopped_early,
+                builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
+          .to eq([false, { "app" => ["failed"], "tool" => ["failed"], "lib" => ["built"] }])
+      end
+
+      it "says whether brew stopped at a failed build of the call's last formula, by the log tail or the " \
+         "verbose error it prints for one, but not of a dependent it rebuilt or a failed post-install" do
+        stub_formula("app")
+        started = "==> Reinstalling app\n"
+        tail = "Last 15 lines from #{HOMEBREW_LOGS}/app/01.make.log:\n"
+        outputs = {
+          "log tail"      => [started, tail, "make: *** [all] Error 1\n"],
+          "verbose error" => [started, "\e[31mError:\e[0m app 2.0 did not build\n"],
+          "other error"   => [started, "Error: app: it failed\n"],
+          "post-install"  => [started, tail, "Warning: The post-install step did not complete successfully\n"],
+          "dependent"     => [started, "==> Checking for dependents of upgraded formulae...\n",
+                              "==> Reinstalling dep\n", "Last 15 lines from #{HOMEBREW_LOGS}/dep/01.make.log:\n"],
+          "outdated"      => [started, "==> Upgrading 1 dependent of upgraded formula:\n",
+                              "Error: dep 2.0 did not build\n"],
+        }
+        stopped = outputs.transform_values do |lines|
+          allow(described_class).to receive(:stream) do |_argv, &on_line|
+            lines.each(&on_line)
+            false
+          end
+          run([batch("app")], verb: "reinstall", stops_at_failure: true).stopped_early
+        end
+        expect(stopped).to eq("log tail" => true, "verbose error" => true, "other error" => false,
+                              "post-install" => false, "dependent" => false, "outdated" => false)
       end
     end
 
@@ -572,6 +638,49 @@ RSpec.describe Timed::Runner do
         run([batch("lib")])
         expect(Signal.trap(:INT, previous)).to be(handler)
       end
+    end
+  end
+
+  describe ".run_casks" do
+    let(:calls) { [] }
+    # The calls brew returned from, by their last argument.
+    let(:returned) { [] }
+
+    # Brew as `Timed::Command.brew` runs it, succeeding unless `success` is
+    # false, after `block`.
+    def run_casks(casks, success: true, &block)
+      brew = lambda do |env, argv|
+        calls << [env, argv]
+        block&.call
+        returned << argv.last
+        success
+      end
+      described_class.run_casks("upgrade", casks, flags: %w[--verbose --force], label: "first", brew:)
+    end
+
+    it "runs `brew <verb> --cask --yes` with the flags and the casks, once, under a heading", :aggregate_failures do
+      expect { run_casks(%w[foo user/tap/bar]) }
+        .to output("==> Running the first casks: foo user/tap/bar\n").to_stdout
+      expect(calls).to eq([[{}, %w[upgrade --cask --yes --verbose --force foo user/tap/bar]]])
+    end
+
+    it "runs nothing without casks" do
+      expect { run_casks([]) }.not_to output.to_stdout
+      expect(calls).to eq([])
+    end
+
+    it "reports a failed call as it was run, shell-escaping its arguments, and carries on", :aggregate_failures do
+      expect { run_casks(["foo", "/My Casks/bar.rb"], success: false) }
+        .to output("Error: `brew upgrade --cask --yes --verbose --force foo /My\\ Casks/bar.rb` failed.\n").to_stderr
+      expect(Homebrew).to be_failed
+    end
+
+    it "waits for brew on Ctrl-C, then raises `Interrupt` and restores the interrupt handler", :aggregate_failures do
+      handler = proc {}
+      previous = Signal.trap(:INT, handler)
+      expect { run_casks(%w[foo], success: false) { Process.kill("INT", Process.pid) } }
+        .to raise_error(Interrupt).and not_to_output.to_stderr
+      expect([returned, Signal.trap(:INT, previous)]).to eq([%w[foo], handler])
     end
   end
 
