@@ -132,7 +132,8 @@ it was given other than `--minimum-version`, with `--binaries` or
     Homebrew reads it (e.g. `.tar.xz`, a tarball, needs nothing). What a cask
     needs is matched with the run by full name, after aliases and renames,
     so another tap's formula of the same name doesn't count, except for a
-    dependency that can't be loaded, which is matched by name alone. The run
+    dependency that can't be loaded, which is matched by name alone; formulae
+    are matched only with formulae and casks only with casks. The run
     includes the dependencies Homebrew installs or upgrades in the calls for
     the formulae of the batches; the plan names the formulae each is for;
   - casks with a cask dependency that isn't installed, which Homebrew would

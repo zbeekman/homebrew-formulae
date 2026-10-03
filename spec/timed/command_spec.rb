@@ -148,7 +148,7 @@ RSpec.describe Timed::Command do
                   upgrade: [stub_cask("old", installed_stanzas: 'uninstall quit: "com.old"')] }
         expect(placed(plan(casks, in_run: %w[llvm])))
           .to eq(first: {}, skipped: {},
-                 last:  { "new"  => ["depends on `old`, which is in this run"],
+                 last:  { "new"  => ["depends on the `old` cask, which is in this run"],
                           "tool" => ["depends on `llvm`, which is in this run"],
                           "old"  => ["`uninstall quit` may raise a dialog"] })
       end
@@ -278,6 +278,32 @@ RSpec.describe Timed::Command do
         T.bind(self, T.class_of(Formula))
         url "https://brew.sh/foo-2.0.tgz"
       end, "user/tap/foo")
+    end
+
+    # A core formula `docker`, not installed, sharing its name with a cask.
+    def stub_docker_formula
+      allow(Formulary).to receive(:loader_for).and_call_original
+      stub_formula_loader(formula("docker") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/docker-1.0.tgz"
+      end)
+    end
+
+    describe "a formula and a cask with the same name" do
+      it "match only what in the run is of their own kind, both ways, the reason saying which" do
+        stub_docker_formula
+        docker = stub_cask("docker", nil)
+        dependents = [stub_cask("needs-formula", nil, stanzas: 'depends_on formula: "docker"'),
+                      stub_cask("needs-cask", nil, stanzas: 'depends_on cask: "docker"')]
+        runs = { formula: [%w[docker], dependents], cask: [[], [docker, *dependents]] }
+        placed = runs.transform_values do |(in_run, casks)|
+          result = described_class.cask_plan({ install: casks }, in_run:, facts: Timed::Casks::DiskFacts.new,
+                                                                 tty: -> { true })
+          result.last.to_h { |entry| [entry.cask.token, entry.reasons.map(&:message)] }
+        end
+        expect(placed).to eq(formula: { "needs-formula" => ["depends on `docker`, which is in this run"] },
+                             cask:    { "needs-cask" => ["depends on the `docker` cask, which is in this run"] })
+      end
     end
 
     describe "casks with the same token from different taps" do
@@ -429,7 +455,7 @@ RSpec.describe Timed::Command do
           false => { "old"          => [],
                      "needs-helper" => ["depends on `lib`, which is in this run",
                                         "dependency `helper`: `pkg` requires sudo"],
-                     "needs-old"    => ["depends on `old`, which is in this run"] },
+                     "needs-old"    => ["depends on the `old` cask, which is in this run"] },
           true  => { "old" => [], "needs-helper" => ["depends on `lib`, which is in this run"], "needs-old" => [] },
         )
       end

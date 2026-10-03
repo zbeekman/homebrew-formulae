@@ -402,9 +402,10 @@ module Timed
     # Sorts the casks of a run, given by the verb brew acts on each with, into
     # those to run before the formulae, after them and not at all, by what is
     # on disk and whether sudo can prompt. `in_run` names the formulae in the
-    # run, by full name; the casks are in it too. Each cask counts what brew
-    # may install before it that is in the run (see `cask_needs` and
-    # `Needs#among`), handed to `Casks.plan` by full name, and what installing
+    # run, by full name; the casks are in it too, kept apart, as a formula and
+    # a cask may share a name. Each cask counts what brew may install before
+    # it that is in the run (see `cask_needs`, `Needs#formulae_among` and
+    # `Needs#casks_among`), handed to `Casks.plan` by full name, and what installing
     # its missing cask
     # dependencies needs, unless `skip_cask_deps` (`--skip-cask-deps`), with
     # which brew installs only formula dependencies, those of skipped casks
@@ -424,14 +425,17 @@ module Timed
       run_dependencies.each do |formula, dependencies|
         (dependencies - in_run).each { |dependency| (installed_for[dependency] ||= []) << formula }
       end
-      in_run += installed_for.keys + casks.values.flatten.map(&:full_name)
+      in_run += installed_for.keys
+      casks_in_run = casks.values.flatten.map(&:full_name)
       plans = casks.map do |verb, list|
         installed = list.filter_map do |cask|
           installed_cask(cask, reinstall: verb == :reinstall)&.then { |old| [cask.full_name, old] }
         end.to_h
         # Keyed by full name, as casks from different taps may share a token.
         all_needs = list.to_h { |cask| [cask.full_name, cask_needs(cask)] }
-        needs = all_needs.transform_values { |needed| needed.among(in_run, casks: !skip_cask_deps) }
+        needs = all_needs.transform_values do |needed|
+          [needed.formulae_among(in_run), skip_cask_deps ? [] : needed.casks_among(casks_in_run)]
+        end
         missing = all_needs.transform_values { |needed| skip_cask_deps ? [] : needed.casks.reject(&:installed?) }
         # Only a cask dependency runs a skipped cask's sudo, and none with
         # `--skip-cask-deps`, when brew fails a cask whose dependency can't
@@ -439,7 +443,7 @@ module Timed
         cask_dependencies = all_needs.transform_values do |needed|
           skip_cask_deps ? [[], []] : [needed.casks.map(&:full_name), needed.unresolved_casks]
         end
-        Casks.plan(list, verb:, in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
+        Casks.plan(list, verb:, in_run:, casks_in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
                          cask_dependencies:, installed_for:)
       end
       Casks::Plan.new(first:   plans.flat_map(&:first), last: plans.flat_map(&:last),
@@ -481,14 +485,19 @@ module Timed
       const :unresolved_formulae, T::Array[String], default: []
       const :unresolved_casks, T::Array[String], default: []
 
-      # Those of `names` (full names, e.g. of formulae in the run) this needs:
-      # by full name, or, for what can't be loaded, by name alone, which may
-      # match another tap's formula of that name, to be safe. Only formulae
-      # without `casks`.
-      sig { params(names: T::Array[String], casks: T::Boolean).returns(T::Array[String]) }
-      def among(names, casks: true)
-        full = formulae + (casks ? self.casks.map(&:full_name) : [])
-        unresolved = unresolved_formulae + (casks ? unresolved_casks : [])
+      # Those of the formulae `names` (full names, e.g. of formulae in the run)
+      # this needs: by full name, or, for one that can't be loaded, by name
+      # alone, which may match another tap's formula of that name, to be safe.
+      sig { params(names: T::Array[String]).returns(T::Array[String]) }
+      def formulae_among(names) = Needs.among(names, formulae, unresolved_formulae)
+
+      # Those of the casks `names` this needs, as `formulae_among` matches
+      # formulae, as a formula and a cask may share a name.
+      sig { params(names: T::Array[String]).returns(T::Array[String]) }
+      def casks_among(names) = Needs.among(names, casks.map(&:full_name), unresolved_casks)
+
+      sig { params(names: T::Array[String], full: T::Array[String], unresolved: T::Array[String]).returns(T::Array[String]) }
+      def self.among(names, full, unresolved)
         loose = unresolved.map { |name| ::Utils.name_from_full_name(name) }
         names.select { |name| full.include?(name) || loose.include?(::Utils.name_from_full_name(name)) }
       end
@@ -593,7 +602,7 @@ module Timed
       end
       needs = casks.to_h do |cask|
         # Brew installs formula dependencies even with `--skip-cask-deps`.
-        [cask, cask_needs(cask).among(unfinished, casks: false).select { |name| missing.call(name) }]
+        [cask, cask_needs(cask).formulae_among(unfinished).select { |name| missing.call(name) }]
       end
       blocked = needs.select { |_, needed| needed.any? }
       if blocked.any?
