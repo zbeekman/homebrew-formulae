@@ -843,7 +843,7 @@ RSpec.describe "brew internals", type: :system do
 
     it "gives its installers, dependents check and plan the options `brew install-timed` gives them" do
       ours = (Pathname(__FILE__).dirname.parent/"cmd/install-timed.rb").read
-      options = ours[/def installer_options\n(.*?)^      end$/m, 1].to_s.scan(/^\s+(\w+):/).flatten
+      options = Timed::Command.installer_options(Homebrew::Cmd::InstallTimed.new(%w[cmake]).args).keys.map(&:to_s)
       calls = ["Install.formula_installers(", "Upgrade.dependants(", "Install.ask_formulae("]
       expanded = ->(call) { keywords(ours, call).reject { |keyword| keyword == "prompt" } + options }
       expect(calls.to_h { |call| [call, keywords(install, call).sort] })
@@ -861,6 +861,62 @@ RSpec.describe "brew internals", type: :system do
               in_order.call(upgrade, ["Upgrade.formula_installers(",
                                       "Install.formulae_ask_prompt_needed?(context.formulae_installer"])])
         .to eq([true, true])
+    end
+  end
+
+  describe "brew's check for dependents with broken linkage" do
+    # `text` with each run of whitespace made one space.
+    def squished(text) = text.gsub(/\s+/, " ").strip
+
+    # The method `name` in `source`, without its `sig`.
+    def method_source(source, name) = source[/^      def #{name}\(.*?^      end$/m].to_s
+
+    let(:upgrade) { brew_source("upgrade.rb") }
+
+    it "finds them as the private `check_broken_dependents`, which `Timed::Command.broken_dependents` copies",
+       :aggregate_failures do
+      expect(Homebrew::Upgrade.private_methods).to include(:check_broken_dependents)
+      expect(squished(method_source(upgrade, "check_broken_dependents"))).to eq(squished(<<~RUBY))
+        def check_broken_dependents(installed_formulae)
+          CacheStoreDatabase.use(:linkage) do |db|
+            installed_formulae.flat_map(&:runtime_installed_formula_dependents)
+                              .uniq
+                              .select do |f|
+              keg = f.any_installed_keg
+              next unless keg
+              next unless keg.directory?
+
+              LinkageChecker.new(
+                keg,
+                cache_db: T.cast(db, CacheStoreDatabase[String, T::Hash[T.any(String, Symbol), T.anything]]),
+              ).broken_library_linkage?
+            end.compact
+          end
+        end
+      RUBY
+    end
+
+    it "orders them as the private `depends_on`, which `Timed::Command` copies", :aggregate_failures do
+      ours = (Pathname(__FILE__).dirname.parent/"lib/timed/command.rb").read
+      expect(Homebrew::Upgrade.private_methods).to include(:depends_on)
+      expect(squished(method_source(upgrade, "depends_on")))
+        .to eq(squished(ours[/^    def self.depends_on\(.*?^    end$/m].to_s.sub("def self.", "def ")))
+    end
+
+    it "checks those of the non-core formulae it installed after the bottle-filtered dependents, and reinstalls " \
+       "them from source, dependencies first, unless outdated or pinned, carrying on past a failed build" do
+      dependents = squished(method_source(upgrade, "upgrade_dependents"))
+      snippets = [
+        "filter_dependent_formula_installers( prefetched_formula_installers.select",
+        "installed_non_core_formulae = FormulaInstaller.installed.to_a.reject(&:core_formula?)",
+        "broken_dependents = check_broken_dependents(installed_non_core_formulae)",
+        "reinstallable_broken_dependents = broken_dependents.reject(&:outdated?) .reject(&:pinned?) " \
+        ".sort { |a, b| depends_on(a, b) }",
+        "build_from_source_formulae: build_from_source_formulae + [formula.full_name],",
+        "Reinstall.reinstall_formula(reinstall_context) rescue FormulaInstallationAlreadyAttemptedError",
+        "rescue BuildError => e e.dump(verbose:) puts Homebrew.failed = true rescue => e ofail e end",
+      ]
+      expect(snippets.reject { |snippet| dependents.include?(snippet) }).to eq([])
     end
   end
 

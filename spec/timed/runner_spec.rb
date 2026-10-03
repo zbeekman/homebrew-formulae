@@ -209,14 +209,6 @@ RSpec.describe Timed::Runner do
                              %w[upgrade --formula --yes --display-times --build-from-source --debug-symbols app]])
       end
 
-      it "turns off brew's installed-dependents check, and its hint, for runs of pours only" do
-        %w[lib dep app].each { |name| stub_formula(name) }
-        fake_brew
-        run([batch("lib", "dep", "app")], flags: source, pours: %w[dep], pour_flags: [])
-        no_check = { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }
-        expect(envs).to eq([{}, no_check, {}])
-      end
-
       it "skips a run's formulae that need one that failed in an earlier run of the batch", :aggregate_failures do
         %w[b p].each { |name| stub_formula(name) }
         fake_brew(failing: %w[b])
@@ -265,6 +257,269 @@ RSpec.describe Timed::Runner do
         run([batch("dep", "app")], pours: %w[dep])
         expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose dep app]])
       end
+    end
+
+    describe "with `after`" do
+      let(:no_check) { { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" } }
+
+      # A call after the batches, of `names` that aren't installed yet unless
+      # `choose` says otherwise, as upgrades of outdated dependents unless
+      # told otherwise; what each needs is in `deps`.
+      def after(*names, label: "dependents", verb: "upgrade", flags: %w[--verbose], noun: "outdated dependent",
+                deps: {}, candidates: formulae.values_at(*names),
+                choose: ->(_installed, _blocked) { formulae.values_at(*names).reject(&:latest_version_installed?) })
+        finish = ->(left) { "brew #{verb} #{left.join(" ")}" }
+        Timed::Runner::After.new(label:, verb:, flags:, noun:, candidates:, choose:, finish:,
+                                 deps: ->(formula) { deps.fetch(formula.full_name, []) })
+      end
+
+      def linkage(*names, **options)
+        after(*names, label: "linkage", verb: "reinstall", noun: "broken dependent", candidates: nil, **options)
+      end
+
+      # A `choose` that Ctrl-C stops, as a long one would be.
+      def stopped_choose
+        lambda do |_installed, _blocked|
+          Process.kill("INT", Process.pid)
+          sleep 5
+          []
+        end
+      end
+
+      # As a formula brew installed.
+      def install(name)
+        keg = HOMEBREW_CELLAR/name/"2.0"
+        keg.mkpath
+        FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+      end
+
+      it "turns off brew's installed-dependents check, and its hints, in every call, then makes each call " \
+         "after the batches, in order, with its verb and flags", :aggregate_failures do
+        %w[lib dep app tool user other broken].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("lib", "dep", "app"), batch("tool", label: "last")], verb: "install", flags: %w[-s],
+            pours: %w[dep], pour_flags: [], after: [after("user", "other"), linkage("broken", flags: %w[-s])])
+        expect(calls).to eq([%w[install --formula --yes --display-times -s lib],
+                             %w[install --formula --yes --display-times dep],
+                             %w[install --formula --yes --display-times -s app],
+                             %w[install --formula --yes --display-times -s tool],
+                             %w[upgrade --formula --yes --display-times --verbose user other],
+                             %w[reinstall --formula --yes --display-times -s broken]])
+        expect(envs).to eq([no_check] * 6)
+      end
+
+      it "turns off the check even with no calls after the batches" do
+        stub_formula("lib")
+        fake_brew
+        run([batch("lib")], after: [])
+        expect(envs).to eq([no_check])
+      end
+
+      it "logs what each call after the batches installed with its verb and label, in a log of its own" do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("lib")], verb: "install", after: [after("user")])
+        expect(builds.transform_values { |entries| entries.map { |entry| entry.slice("verb", "batch", "log") } })
+          .to eq("lib"  => [{ "verb" => "install", "batch" => "main", "log" => log(1) }],
+                 "user" => [{ "verb" => "upgrade", "batch" => "dependents", "log" => log(2) }])
+      end
+
+      it "lets each call after the batches choose its formulae once the calls before it are done, from what the " \
+         "run installed and how, and what failed or was skipped", :aggregate_failures do
+        %w[lib app top user broken].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib user], alongside: { %w[lib app] => %w[dep] })
+        chosen = []
+        choose = lambda do |name|
+          lambda do |installed, blocked|
+            chosen << [name, calls.length, installed, blocked]
+            [formulae.fetch(name)]
+          end
+        end
+        calls_after = [after(choose: choose.call("user")), linkage(choose: choose.call("broken"))]
+        expect { run([batch("lib", "app"), batch("top")], deps: { "top" => %w[lib] }, after: calls_after) }
+          .to output(/Skipping top:/).to_stderr
+        expect(chosen).to eq([["user", 1, { "dep" => "built", "app" => "built" }, %w[lib top]],
+                              ["broken", 2, { "dep" => "built", "app" => "built" }, %w[lib top user]]])
+      end
+
+      it "reports a call after the batches that can't choose its formulae, saying it did nothing, and carries on " \
+         "to the summary", :aggregate_failures do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib])
+        calls_after = [linkage(choose: ->(_installed, _blocked) { raise "no linkage" }), after("user")]
+        expect { run([batch("lib")], after: calls_after) }.to output(<<~EOS).to_stderr
+          Error: Couldn't work out the broken dependents, so none were reinstalled: no linkage
+          Error: 1 formula did not upgrade: lib
+        EOS
+        expect([calls.last, Homebrew.failed?])
+          .to eq([%w[upgrade --formula --yes --display-times --verbose user], true])
+      end
+
+      it "makes no call after the batches that chooses nothing" do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew(alongside: { %w[lib] => %w[user] })
+        run([batch("lib")], after: [after("user")])
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib]])
+      end
+
+      it "skips what a call after the batches chose that needs a formula that failed or was skipped, logging it, " \
+         "with how to finish it once that formula installs", :aggregate_failures do
+        %w[lib app user other].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib])
+        expect do
+          run([batch("lib"), batch("app")], verb: "install", deps: { "app" => %w[lib] },
+              after: [after("user", "other", deps: { "user" => %w[app] })])
+        end.to output(<<~EOS).to_stderr
+          Warning: Skipping app: dependency lib did not install
+          Warning: Skipping user: dependency app did not install
+          Once it does, run:
+            brew upgrade user
+          Error: 1 formula did not install: lib
+        EOS
+        expect(calls.last).to eq(%w[upgrade --formula --yes --display-times --verbose other])
+        expect(builds["user"]).to eq([{ "version" => "2.0", "status" => "skipped",
+                                        "started" => "2026-09-30T10:00:00-04:00", "verb" => "upgrade",
+                                        "batch" => "dependents" }])
+      end
+
+      it "says what each call after the batches didn't install, apart from the formulae, with how to finish, and " \
+         "fails the run", :aggregate_failures do
+        %w[lib user broken].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib user broken])
+        expect { run([batch("lib")], verb: "install", after: [after("user"), linkage("broken")]) }
+          .to output(<<~EOS).to_stderr
+            Error: 1 formula did not install: lib
+            Error: 1 outdated dependent did not upgrade: user
+            To finish, run:
+              brew upgrade user
+            Error: 1 broken dependent did not reinstall: broken
+            To finish, run:
+              brew reinstall broken
+          EOS
+        expect([builds["user"].map { |entry| entry["status"] }, Homebrew.failed?]).to eq([["failed"], true])
+      end
+
+      it "returns what the calls after the batches didn't install with the formulae brew didn't install" do
+        %w[lib app user other broken].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib user broken])
+        outcome = T.let(nil, T.nilable(Timed::Runner::Outcome))
+        expect do
+          calls_after = [after("user", "other", deps: { "other" => %w[lib] }), linkage("broken")]
+          outcome = run([batch("lib", "app")], after: calls_after)
+        end.to output(/Skipping other:/).to_stderr
+        expect(outcome&.unfinished).to eq(%w[lib other user broken])
+      end
+
+      it "checks what a call after the batches installed as its verb needs, not as the batches' formulae with " \
+         "`dependencies_only`", :aggregate_failures do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew(silent: %w[lib])
+        checked = []
+        succeeded = lambda do |formula|
+          checked << formula.name
+          ->(_since) { true }
+        end
+        run([batch("lib")], verb: "install", succeeded:, dependencies_only: true, after: [after("user")])
+        expect([checked, builds.transform_values { |entries| entries.map { |entry| entry["status"] } }])
+          .to eq([%w[lib], { "user" => ["built"] }])
+      end
+
+      it "reinstalls each formula in a call of its own, carrying on past a failed build, which ends a " \
+         "`brew reinstall`, and takes only a new receipt as reinstalled", :aggregate_failures do
+        %w[lib broken other].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[broken], stop_at_failure: true)
+        allow(Timed::Receipts).to receive(:installed_since?) { |formula| formula.name == "other" }
+        broken = linkage(choose: ->(_installed, _blocked) { formulae.values_at("broken", "other", "lib") })
+        expect { run([batch("lib")], verb: "install", after: [broken]) }
+          .to output(<<~EOS).to_stderr
+            Error: 2 broken dependents did not reinstall: broken lib
+            To finish, run:
+              brew reinstall broken lib
+          EOS
+        expect(calls.drop(1)).to eq([%w[reinstall --formula --yes --display-times --verbose broken],
+                                     %w[reinstall --formula --yes --display-times --verbose other],
+                                     %w[reinstall --formula --yes --display-times --verbose lib]])
+      end
+
+      it "only works out, when Ctrl-C stops a batch, what each call after the batches would still have done, " \
+         "saying how to finish it, apart from the formulae", :aggregate_failures do
+        %w[lib app user done broken].each { |name| stub_formula(name) }
+        install("done")
+        fake_brew(silent: %w[lib]) { |names| Process.kill("INT", Process.pid) if names == %w[lib] }
+        expect do
+          run([batch("lib"), batch("app")], verb: "install", dependencies_only: true,
+                                            after: [after("user", "done"), linkage("broken")])
+        end.to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Interrupted; not finished or logged: the dependencies of lib app
+          Warning: Outdated dependents not upgraded: user; to finish, run:
+            brew upgrade user
+          Warning: Broken dependents not reinstalled: broken; to finish, run:
+            brew reinstall broken
+        EOS
+        expect(calls.length).to eq(1)
+      end
+
+      it "names, when Ctrl-C stops a batch, what each call after the batches would do that needs a formula the " \
+         "run didn't finish, apart from the rest, which it tells it of", :aggregate_failures do
+        %w[lib app user other].each { |name| stub_formula(name) }
+        fake_brew { |names| Process.kill("INT", Process.pid) if names == %w[lib] }
+        told = []
+        choose = lambda do |_installed, blocked|
+          told << blocked
+          formulae.values_at("user", "other")
+        end
+        expect do
+          run([batch("lib"), batch("app")], after: [after(deps: { "user" => %w[app] }, choose:)])
+        end.to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Interrupted; not finished or logged: app
+          Warning: Outdated dependents not upgraded: other; to finish, run:
+            brew upgrade other
+          Warning: Outdated dependents not upgraded: user, as they need app, which this run didn't finish; once those are installed, run:
+            brew upgrade user
+        EOS
+        expect(told).to eq([%w[app]])
+      end
+
+      it "says what it didn't work out, and what may be left of it, when Ctrl-C stops that too" do
+        %w[lib app user].each { |name| stub_formula(name) }
+        fake_brew { |names| Process.kill("INT", Process.pid) if names == %w[lib] }
+        expect { run([batch("lib"), batch("app")], after: [linkage(choose: stopped_choose), after("user")]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Interrupted; not finished or logged: app
+            Warning: Broken dependents not worked out, as Ctrl-C stopped that.
+            Warning: Outdated dependents not worked out, as Ctrl-C stopped that; to finish what may be left, run:
+              brew upgrade user
+          EOS
+      end
+
+      it "lets Ctrl-C stop a call after the batches while it works out its formulae, saying so, then works out " \
+         "the rest", :aggregate_failures do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew
+        expect { run([batch("lib")], after: [linkage(choose: stopped_choose), after("user")]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Broken dependents not worked out, as Ctrl-C stopped that.
+            Warning: Outdated dependents not upgraded: user; to finish, run:
+              brew upgrade user
+          EOS
+        expect(calls.length).to eq(1)
+      end
+
+      it "names only what a call after the batches was running when Ctrl-C stops it" do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[user]) { |names| Process.kill("INT", Process.pid) if names == %w[user] }
+        expect { run([batch("lib")], after: [after("user")]) }.to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Outdated dependents not upgraded: user; to finish, run:
+            brew upgrade user
+        EOS
+      end
+    end
+
+    it "leaves brew's installed-dependents check on without `after`, as for one `brew reinstall`" do
+      stub_formula("lib")
+      fake_brew
+      run([batch("lib")])
+      expect(envs).to eq([{}])
     end
 
     it "keeps going after output that isn't UTF-8" do

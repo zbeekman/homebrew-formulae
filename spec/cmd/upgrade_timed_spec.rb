@@ -16,6 +16,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
   let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
+  let(:brew_envs) { [] }
   let(:installed) { [] }
   # What `brew upgrade --dry-run` prints.
   let(:preview) { [] }
@@ -78,8 +79,10 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       true
     end
     allow(Timed::Casks).to receive(:terminal?).and_return(true)
-    allow(Timed::Runner).to receive(:stream) do |argv, &block|
+    allow(Timed::Command).to receive(:broken_dependents).and_return([])
+    allow(Timed::Runner).to receive(:stream) do |argv, env: {}, &block|
       brew_calls << argv
+      brew_envs << env
       if argv.include?("--dry-run")
         preview.each { |line| block.call("#{line}\n") }
       else
@@ -200,6 +203,17 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         cmake                        build     3m20s
         ==> Batch 2 of 2: 50m00s, slow app needs slow cmake
         app                          build   50m00s?
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+      EOS
+    end
+
+    it "doesn't say it checks dependents for broken linkage when the user has turned brew's check off" do
+      ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
+      stub_formula("cmake")
+      expect { run_command("--dry-run") }.to output(<<~EOS).to_stdout
+        ==> Would upgrade 1 formula in 1 batch, estimated 3m20s
+        ==> Batch 1 of 1: 3m20s
+        cmake                        build     3m20s
       EOS
     end
 
@@ -215,6 +229,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         llvm                         build     1h23m
         ==> Batch 3 of 3 (--last): 50m00s
         gcc                          build    50m00s
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
       EOS
     end
 
@@ -228,6 +243,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
           ==> Batch 1 of 1: 4m20s
           new                          build     1m00s
           cmake                        build     3m20s
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
           ==> Excluded
           gcc
         EOS
@@ -360,6 +376,35 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("cmake")
       expect(Homebrew::Ask).not_to receive(:confirm?)
       run_command("--dry-run")
+    end
+
+    it "lists the outdated dependents brew's check finds for the formulae it upgrades, but doesn't plan or exclude" do
+      lib = stub_formula("lib")
+      app = stub_formula("app", deps: %w[lib])
+      user = stub_formula("user", bottled: true, deps: %w[app])
+      gcc = stub_formula("gcc")
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [lib, user, gcc], pinned: [], skipped: [])
+      expect(Homebrew::Upgrade).to receive(:dependants).with([app], hash_including(dry_run: true))
+                                                       .and_return(dependents)
+      expect { run_command("--dry-run", "--exclude=gcc", "app", "gcc") }
+        .to output(a_string_ending_with(<<~EOS)).to_stdout
+          app                          build   50m00s?
+          ==> Then upgrade outdated dependents
+          user
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
+          ==> Excluded
+          gcc
+        EOS
+    end
+
+    it "lists no outdated dependents when it refuses every named formula, as brew then checks none" do
+      allow(stub_formula("lib")).to receive(:pinned?).and_return(true)
+      app = stub_formula("app", deps: %w[lib])
+      dependent = stub_formula("dependent", bottled: true, deps: %w[app])
+      allow(Homebrew::Upgrade).to receive(:dependants).and_call_original
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [dependent], pinned: [], skipped: [])
+      allow(Homebrew::Upgrade).to receive(:dependants).with([app], anything).and_return(dependents)
+      expect { run_command("--dry-run", "app") }.to output("==> No formulae to upgrade\n").to_stdout
     end
   end
 
@@ -549,6 +594,49 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib app]])
     end
 
+    it "runs each call without brew's installed-dependents check, then upgrades the outdated dependents brew " \
+       "would, in a call of their own with their options only", :aggregate_failures do
+      stub_formula("lib")
+      app = stub_formula("app", deps: %w[lib])
+      user = stub_formula("user", bottled: true, deps: %w[app])
+      other = stub_formula("other", bottled: true, deps: %w[app])
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user, other], pinned: [], skipped: []))
+      installers = [user, other].map { |formula| instance_double(FormulaInstaller, formula:) }
+      # Brew's check of the bottles' dependencies, as it makes it before
+      # upgrading anything, then again after the formulae, before the call.
+      expect(Homebrew::Upgrade).to receive(:dependent_formula_installers)
+        .with(having_attributes(upgradeable: [user, other]), [app], hash_including(keep_tmp: true))
+        .and_return(installers)
+      expect(Homebrew::Upgrade).to receive(:filter_dependent_formula_installers).with(installers) do
+        expect(brew_calls.length).to eq(3)
+        installers.take(1)
+      end
+      run_command("--yes", "--keep-tmp", "--fetch-HEAD", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times --fetch-HEAD --keep-tmp lib],
+                                        %w[upgrade --formula --yes --display-times --fetch-HEAD --keep-tmp app],
+                                        %w[upgrade --formula --yes --display-times --keep-tmp user]])
+      no_check = { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }
+      expect(brew_envs.drop(1)).to eq([no_check] * 3)
+      expect(builds.fetch("user").last).to include("verb" => "upgrade", "batch" => "dependents")
+    end
+
+    it "gives the calls after the batches its `--exclude`, for the commands they give to finish what they leave" do
+      stub_formula("lib", "2.0")
+      stub_formula("cmake")
+      expect(Timed::Command).to receive(:after)
+        .with([], [having_attributes(full_name: "cmake")], hash_including(excluded: %w[lib], own: %w[--exclude=lib]))
+        .and_call_original
+      run_command("--yes", "--exclude=lib", "cmake")
+    end
+
+    it "makes no call for outdated dependents, nor checks their bottles, when brew's check finds none" do
+      stub_formula("cmake")
+      expect(Homebrew::Upgrade).not_to receive(:dependent_formula_installers)
+      run_command("--yes", "cmake")
+      expect(brew_calls.length).to eq(2)
+    end
+
     it "passes `--debug` on" do
       stub_formula("cmake")
       run_command("--yes", "--debug", "cmake")
@@ -609,6 +697,72 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
                                         %w[upgrade --cask --yes --verbose --greedy --no-binaries iterm2]])
     end
 
+    it "upgrades the last casks after the outdated dependents and the broken ones, which they may need" do
+      stub_formula("cmake")
+      user = stub_formula("user", bottled: true, deps: %w[cmake])
+      broken = stub_formula("broken", "2.0")
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: []))
+      installers = [instance_double(FormulaInstaller, formula: user)]
+      allow(Homebrew::Upgrade).to receive_messages(dependent_formula_installers:        installers,
+                                                   filter_dependent_formula_installers: installers)
+      allow(Timed::Command).to receive(:broken_dependents).and_return([broken])
+      run_command("--yes", "cmake", "firefox", "iterm2")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox],
+                                        %w[upgrade --formula --yes --display-times cmake],
+                                        %w[upgrade --formula --yes --display-times user],
+                                        %w[reinstall --formula --yes --display-times --build-from-source broken],
+                                        %w[upgrade --cask --yes iterm2]])
+    end
+
+    it "doesn't upgrade the last casks when Ctrl-C stops the calls after the batches, naming them with how to " \
+       "upgrade them later", :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("firefox")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Command).to receive(:broken_dependents).and_raise(Interrupt)
+      expect { run_command("--yes", "cmake", "firefox", "iterm2") }
+        .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: The check for broken linkage didn't finish; not all the dependents of cmake were checked.
+          Warning: Broken dependents not worked out, as Ctrl-C stopped that.
+          Warning: Interrupted, so the cask to upgrade after the formulae didn't run: iterm2
+          Upgrade it later with `brew upgrade --cask iterm2`.
+        EOS
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes firefox],
+                                        %w[upgrade --formula --yes --display-times cmake]])
+    end
+
+    it "names the formulae given to the run, not their outdated dependencies, to finish what a last cask needs " \
+       "first when Ctrl-C stops the formulae, as some flags (e.g. `--build-from-source`) are only for those given" do
+      stub_formula("newlib", nil)
+      stub_formula("lib", deps: %w[newlib])
+      stub_formula("app", deps: %w[lib])
+      stub_cask("iterm2", stanzas: 'depends_on formula: "newlib"')
+      allow(Timed::Runner).to receive(:run).and_raise(Interrupt)
+      expect { run_command("--yes", "--keep-tmp", "app", "iterm2") }
+        .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Interrupted, so the cask to upgrade after the formulae didn't run: iterm2
+          1 cask needs formulae of this run that aren't installed, which brew would
+          install for it, but not as this run would:
+          iterm2: needs newlib
+          Finish those first with `brew upgrade-timed --keep-tmp app`, then upgrade it with `brew upgrade --cask iterm2`.
+        EOS
+    end
+
+    it "names a formula upgraded to its alias's new target as given, with `--exclude`, to finish what a last " \
+       "cask needs first, as `brew upgrade-timed` wouldn't upgrade the new target, which isn't installed" do
+      stub_formula("lib", "2.0")
+      target = stub_formula("cmake", nil)
+      allow(stub_formula("old")).to receive(:latest_formula).and_return(target)
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Runner).to receive(:run).and_raise(Interrupt)
+      expect { run_command("--yes", "--exclude=lib", "old", "iterm2") }
+        .to raise_error(Interrupt)
+        .and output(/^Finish those first with `brew upgrade-timed --exclude=lib old`, /).to_stderr
+    end
+
     it "reports a failed first cask call and still runs the batches and the last call", :aggregate_failures do
       stub_formula("cmake")
       stub_cask("firefox")
@@ -641,8 +795,17 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_cask("lib-app", stanzas: 'depends_on formula: "lib"')
       allow(Timed::Runner).to receive(:run)
         .and_return(Timed::Runner::Outcome.new(unfinished: %w[app], stopped_early: false))
-      expect { run_command("--yes", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
+      expect { run_command("--yes", "--keep-tmp", "app", "lib-app") }
+        .to output(/^lib-app: needs lib\nFinish those first with `brew upgrade-timed --keep-tmp app`, then /)
+        .to_stderr
       expect(brew_calls.drop(1)).to eq([])
+    end
+
+    it "upgrades a named cask with `--build-from-source` when no named formula is outdated, as brew does" do
+      stub_formula("cmake", "2.0")
+      stub_cask("iterm2")
+      run_command("--yes", "--build-from-source", "cmake", "iterm2")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --cask --yes iterm2]])
     end
 
     it "upgrades a cask named with `--minimum-version` or `--min-version`, without it, as planning applied it" do

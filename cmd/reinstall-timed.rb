@@ -11,7 +11,6 @@ require "upgrade"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
 require_relative "../lib/timed/planner"
-require_relative "../lib/timed/receipts"
 require_relative "../lib/timed/runner"
 
 module Homebrew
@@ -130,30 +129,28 @@ module Homebrew
 
         Timed::Runner.run_casks("reinstall", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: forwarded.cask, label: "first")
+        last = cask_plan.last.map(&:cask)
+        arguments = Timed::Command.path_arguments(args.named, formulae)
+        run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
+                                      roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
+                                      needs:   run_dependencies)
         outcome = if result.batches.any?
-          # A failed reinstall leaves the old version installed, so only a new
-          # receipt shows brew reinstalled a formula.
-          succeeded = lambda do |formula|
-            before = Timed::Receipts.receipt_stat(formula)
-            ->(since) { Timed::Receipts.installed_since?(formula, since, before:) }
-          end
           # One call, so nothing is skipped for a failure, but a failed build
           # ends `brew reinstall` before the formulae after it.
-          Timed::Runner.run(result.batches, verb: "reinstall", flags: forwarded.formula, formulae:, deps: {},
-                                            stamp: !args.no_stamp_receipts?, stops_at_failure: true, succeeded:,
-                                            arguments: Timed::Command.path_arguments(args.named, formulae))
+          Timed::Command.before_last_casks("reinstall", last, named: args.named, flags: forwarded.cask, run:) do
+            Timed::Runner.run(result.batches, verb: "reinstall", flags: forwarded.formula, formulae:, deps: {},
+                                              stamp: !args.no_stamp_receipts?, stops_at_failure: true,
+                                              succeeded: Timed::Runner::REINSTALLED, arguments:)
+          end
         end
-        last = cask_plan.last.map(&:cask)
         # What stops `brew reinstall` early, such as a failed build, stops it
         # before its casks too.
         if outcome&.stopped_early && last.any?
-          opoo <<~EOS
-            `brew reinstall` stopped early, so the #{Utils.pluralize("cask", last.length)} to reinstall after the formulae didn't run: #{Timed::Command.cask_arguments(args.named, last).join(" ")}
-            #{Timed::Command.later("reinstall", last, named: args.named, flags: forwarded.cask)}
-          EOS
+          Timed::Command.casks_not_run("`brew reinstall` stopped early", "reinstall", last,
+                                       named: args.named, flags: forwarded.cask, run:)
         else
           last = Timed::Command.last_casks("reinstall", last, named: args.named, flags: forwarded.cask,
-                                                              unfinished: outcome&.unfinished || [],
+                                                              unfinished: outcome&.unfinished || [], run:,
                                                               run_dependencies:)
           Timed::Runner.run_casks("reinstall", last, flags: forwarded.cask, label: "last")
         end
@@ -166,21 +163,8 @@ module Homebrew
                                                            **installer_options).formula_installer
       end
 
-      # The options `brew reinstall` gives its installers and dependents check.
       sig { returns(T::Hash[Symbol, T.any(T::Boolean, T::Array[String])]) }
-      def installer_options
-        {
-          force_bottle:               args.force_bottle?,
-          build_from_source_formulae: args.build_from_source_formulae,
-          interactive:                args.interactive?,
-          keep_tmp:                   args.keep_tmp?,
-          debug_symbols:              args.debug_symbols?,
-          force:                      args.force?,
-          debug:                      args.debug?,
-          quiet:                      args.quiet?,
-          verbose:                    args.verbose?,
-        }
-      end
+      def installer_options = Timed::Command.installer_options(args)
     end
   end
 end

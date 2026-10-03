@@ -116,10 +116,13 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       expect { described_class.new(%w[--last=llvm llvm]) }.to raise_error(OptionParser::InvalidOption, /--last/)
     end
 
-    it "shows the usage and its own description" do
+    it "shows the usage, its own description and what `--exclude` leaves to brew's check for dependents",
+       :aggregate_failures do
       help = described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ")
       expect(help).to start_with("Usage: brew reinstall-timed [options] formula|cask [...] Reinstall formulae " \
                                  "like brew reinstall, in one call ordered by their estimates:")
+      expect(help).to include("Homebrew may still install or upgrade them as dependencies or dependents of the " \
+                              "others.")
     end
 
     it "refuses `--interactive`, which needs a terminal" do
@@ -394,6 +397,17 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
 
+      it "doesn't reinstall the last casks when Ctrl-C stops the formulae, naming them with how to reinstall " \
+         "them later", :aggregate_failures do
+        allow(Timed::Runner).to receive(:run).and_raise(Interrupt)
+        expect { run_command("--yes", "--zap", "cmake", "firefox", "iterm2") }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Interrupted, so the cask to reinstall after the formulae didn't run: iterm2
+            Reinstall it later with `brew reinstall --cask --zap iterm2`.
+          EOS
+        expect(brew_calls.map(&:last)).to eq(%w[firefox])
+      end
+
       it "reinstalls the last casks after another failure, where brew carries on" do
         allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[cmake]))
         run_command("--yes", "cmake", "firefox", "iterm2")
@@ -416,19 +430,20 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         expect { run_command("--yes", "--zap", "lib", "firefox", "app-for-lib") }.to output(<<~EOS).to_stderr
           Warning: Not reinstalling 1 cask, which needs formulae that didn't reinstall and aren't installed:
           app-for-lib: needs lib
-          Reinstall it later with `brew reinstall --cask --zap app-for-lib`.
+          Finish those first with `brew reinstall-timed lib`, then reinstall it with `brew reinstall --cask --zap app-for-lib`.
         EOS
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
 
       it "reinstalls a cask that needs a formula brew installs for one in the batch last, and not when that " \
-         "formula didn't install", :aggregate_failures do
+         "formula didn't install, keeping `--no-stamp-receipts` in the command to finish it", :aggregate_failures do
         stub_formula("lib", installed: false)
         stub_formula("app", deps: %w[lib])
         stub_cask("app-for-lib", "2.0", stanzas: 'depends_on formula: "lib"')
         allow(Timed::Runner).to receive(:run).and_return(outcome(unfinished: %w[app]))
-        expect { run_command("--yes", "app", "firefox", "app-for-lib") }.to output(/^app-for-lib: needs lib$/)
-          .to_stderr
+        finish = /^app-for-lib: needs lib\nFinish those first with `brew reinstall-timed --no-stamp-receipts app`, /
+        expect { run_command("--yes", "--no-stamp-receipts", "app", "firefox", "app-for-lib") }
+          .to output(finish).to_stderr
         expect(brew_calls.map(&:last)).to eq(%w[firefox])
       end
     end
