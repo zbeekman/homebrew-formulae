@@ -379,6 +379,17 @@ RSpec.describe Timed::Command do
         expect(dependencies).to eq(false => { "app" => %w[lib] }, true => { "app" => [] })
       end
 
+      it "takes every dependency that loads, by full name, when brew can't work out what it installs" do
+        stub_lib_and_app
+        broken = formula("broken") do
+          T.bind(self, T.class_of(Formula))
+          url "https://brew.sh/broken-1.0.tgz"
+          depends_on "app"
+          depends_on "gone"
+        end
+        expect(described_class.run_dependencies([FormulaInstaller.new(broken)])).to eq("broken" => %w[lib app])
+      end
+
       it "holds back a last cask for what brew would have installed for a formula that didn't install" do
         stub_lib_and_app
         cask = stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
@@ -423,18 +434,19 @@ RSpec.describe Timed::Command do
         )
       end
 
-      it "skips, without a terminal, the casks that need a skipped one, but with `--skip-cask-deps` only " \
-         "those naming a cask that can't be loaded, which may be a formula brew still installs" do
+      it "skips, without a terminal, the casks that need a skipped one, by name for a cask that can't be " \
+         "loaded, but not for a formula, nor with `--skip-cask-deps`, as brew installs no cask dependency then" do
         casks = [stub_cask("sudo-app", nil, stanzas: 'pkg "Sudo.pkg"'),
                  stub_cask("needs-sudo", nil, stanzas: 'depends_on cask: "sudo-app"'),
-                 stub_cask("needs-gone", nil, stanzas: 'depends_on cask: "gone/tap/sudo-app"')]
+                 stub_cask("needs-gone-cask", nil, stanzas: 'depends_on cask: "gone/tap/sudo-app"'),
+                 stub_cask("needs-gone-formula", nil, stanzas: 'depends_on formula: "gone/tap/sudo-app"')]
         skipped = [false, true].to_h do |skip_cask_deps|
           result = described_class.cask_plan({ install: casks }, in_run: [], skip_cask_deps:,
                                                                  facts:  Timed::Casks::DiskFacts.new,
                                                                  tty:    -> { false })
           [skip_cask_deps, result.skipped.map { |entry| entry.cask.token }]
         end
-        expect(skipped).to eq(false => %w[sudo-app needs-sudo needs-gone], true => %w[sudo-app needs-gone])
+        expect(skipped).to eq(false => %w[sudo-app needs-sudo needs-gone-cask], true => %w[sudo-app])
       end
     end
 
@@ -461,7 +473,7 @@ RSpec.describe Timed::Command do
         stub_cask("loop-b", nil, stanzas: 'depends_on cask: ["loop-a", "gone-app", "bad-app"]')
         loop_a = stub_cask("loop-a", nil, stanzas: 'depends_on cask: "loop-b"')
         needs = described_class.cask_needs(loop_a)
-        expect([needs.formulae, needs.casks.map(&:token), needs.unresolved])
+        expect([needs.formulae, needs.casks.map(&:token), needs.unresolved_casks])
           .to eq([[], %w[loop-b], %w[gone-app bad-app]])
       end
 
@@ -539,6 +551,12 @@ RSpec.describe Timed::Command do
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "user/tap/evil"')]
         expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []))
           .to eq(%w[direct-app])
+      end
+
+      it "doesn't take a cask it can't load as a formula of the same name that didn't install" do
+        casks = [stub_cask("gone-dep-app", nil, stanzas: 'depends_on cask: "gone/tap/foo"')]
+        expect { described_class.last_casks("install", casks, named: [], flags: [], unfinished: %w[foo]) }
+          .not_to output.to_stderr
       end
     end
 

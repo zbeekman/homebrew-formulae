@@ -161,8 +161,9 @@ module Timed
     # a dialog) counts for the cask, naming the dependency.
     #
     # `cask_dependencies` maps a cask to the casks brew may install before it,
-    # by full name, and those that can't be loaded, as named; without an entry,
-    # its own `depends_on cask:`, as named. See `skip_dependents`.
+    # by full name, and the casks among those that can't be loaded, as named
+    # (formulae never count); without an entry, its own `depends_on cask:`, as
+    # named. See `skip_dependents`.
     sig {
       params(
         casks:             T::Array[Cask::Cask],
@@ -218,9 +219,10 @@ module Timed
     # dependency that is in an `upgrade` or `reinstall` run is installed
     # already, so its dependents are left alone there (the caller classifies
     # the install of an installed, outdated cask as `:upgrade`).
-    # A dependent is matched by full name (see `plan`'s `cask_dependencies`),
-    # or, for a dependency that can't be loaded, by name alone, which may skip
-    # it for another tap's cask of that name, to be safe.
+    # A dependent is matched by its cask dependencies only (see `plan`'s
+    # `cask_dependencies`): by full name, or, for one that can't be loaded, by
+    # name alone, which may skip it for another tap's cask of that name, to be
+    # safe.
     sig {
       params(skipped: T::Array[Entry], first: T::Array[Entry], last: T::Array[Entry],
              cask_dependencies: T::Hash[String, [T::Array[String], T::Array[String]]])
