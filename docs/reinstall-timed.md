@@ -24,16 +24,16 @@ first, and neither does `brew reinstall-timed`. It prints what
 `brew reinstall` would reinstall, with the dependencies it would install or
 upgrade and the outdated dependents it would upgrade, as `brew reinstall`
 prints them before asking, then the order with the estimates. It then asks for
-confirmation once, under `brew reinstall`'s rule: only if Homebrew would also
+confirmation once, under `brew reinstall`'s rules: only if Homebrew would also
 install or upgrade dependencies of the formulae, or upgrade outdated dependents
-of them. Without a terminal it carries on without asking, as `brew reinstall`
-does.
+of them, or install dependencies of the casks. Without a terminal it carries on
+without asking, as `brew reinstall` does.
 
-Pinned formulae are reported and left out, and unknown names are reported at the
-end and make the command fail, both as `brew reinstall` does.
+Pinned formulae and casks are reported and left out, and unknown names are
+reported at the end and make the command fail, all as `brew reinstall` does.
 `--interactive` can't be used, as it needs a terminal: use
-`brew reinstall --interactive` instead. Casks can't be reinstalled yet: use
-`brew reinstall --cask` for those.
+`brew reinstall --interactive` instead. Casks are reinstalled too, before or
+after the formulae: see [Casks](#casks).
 
 `brew reinstall-timed` is a command in this tap. Trust it once with
 `brew trust --command zbeekman/tap/reinstall-timed`, or trust the whole tap.
@@ -71,7 +71,13 @@ started in the same second keep their own logs. Then it:
 
 A failed build stops `brew reinstall`, as does an error before it starts on any
 formula: the formulae it never started are not reinstalled. They are logged as
-`skipped`, listed in a warning, and the command fails.
+`skipped`, listed in a warning, and the command fails. A formula
+`brew reinstall` leaves out before it starts on any, because a download
+(including a resource or patch) failed or a check before installing it did, is
+logged as failed, with two known exceptions: one left out for a failed patch
+download is logged as `skipped` when the call also stopped early, and, when
+nothing in the call was installed, one left out for a failed check is logged
+as `skipped`.
 
 It doesn't run `brew cleanup` itself: `brew reinstall` cleans up the formulae it
 reinstalled, and runs Homebrew's periodic cleanup, unless
@@ -82,12 +88,61 @@ stamps the formulae that Homebrew finished (with build and wall times, but no
 install time), lists the rest, which are not logged, and exits with status 130,
 as Homebrew does, even if Homebrew finished anyway.
 
+## Casks
+
+Casks are neither timed nor logged. Before the formulae, it prints the casks
+`brew reinstall` would reinstall, with the dependencies it would install for
+them, which `brew reinstall` prints only when it asks.
+
+They run in at most two calls of
+`brew reinstall --cask --yes` *`options`* *`cask`* ..., split into a first call
+before the formulae and a last one after them as for
+[`brew upgrade-timed`](upgrade-timed.md#casks), with the cask options it was
+given (`--zap` too; `--[no-]binaries` as there). A cask that isn't installed is
+installed, as `brew reinstall` does, so it has no old version to uninstall, and
+with `--force` an existing app in its way counts, as for
+[`brew install-timed`](install-timed.md#casks). With `--zap`, Homebrew
+uninstalls the old version without a successor, so its `uninstall login_item`
+counts as a dialog, then runs every directive of its `zap` stanza, so those
+that run as root or may raise a dialog count, `signal` and `login_item` always.
+
+The uninstall side is read from the cask as installed, as Homebrew loads it
+to reinstall it. With tap trust on (the default unless
+`$HOMEBREW_NO_REQUIRE_TAP_TRUST` is set), Homebrew doesn't load an installed
+Ruby caskfile for a cask that isn't trusted: it uninstalls the artifacts the
+cask recorded when it was installed and zaps with the new cask's `zap` stanza
+instead, so the uninstall side is read from those, and, to be safe, from the
+new cask's `uninstall` stanza too, which Homebrew doesn't run then.
+
+A failed build stops `brew reinstall` before it reinstalls any cask it was
+given. The casks of the first call, before the formulae, have been reinstalled
+by then; those of the last call, after the formulae, don't run: a warning
+names them, with the command to reinstall them later. After any other failure
+Homebrew carries on to the casks, and so does the command, as it does after a
+failed build of a dependent that Homebrew
+rebuilds or upgrades alongside, or a failed post-install step. Homebrew prints
+the installation times as it finishes, if it installed anything, so then it
+didn't stop. Otherwise the command takes brew as stopped when it never started
+a formula it was given (more of them than downloads it couldn't tie to a
+formula failed), or when the call's last formula printed the end of its build
+log, or with `--verbose` its `did not build` error. So when nothing in the call
+was installed, a formula brew left out before installing it, for a failed
+check, still makes it skip the last casks, with its warning. Without
+`--verbose`, a last formula that fails at an `inreplace` or while applying a
+patch prints neither, so the last casks still run then. A failed reinstall
+puts the old keg back, so a last cask that needs that formula still runs;
+only one that needs a formula that isn't installed (e.g. one that wasn't
+installed before, or a dependency Homebrew would have installed for it) is left
+out, as for
+[`brew upgrade-timed`](upgrade-timed.md#casks).
+
 ## Output
 
 A heading gives the number of formulae, in one batch, and the estimated total.
 A row per formula, in the order they will be reinstalled, shows `pour` or
 `build` and its estimate. An estimate ending in `?` has no history of that kind
-of build to go on, as in `brew build-times stats`.
+of build to go on, as in `brew build-times stats`. Then come the casks to
+reinstall first, and those to reinstall last, each with why.
 
 ## Options
 

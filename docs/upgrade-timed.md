@@ -28,12 +28,13 @@ is set, and runs again from the start if that fetched anything. Then it prints
 the plan from `brew upgrade --dry-run`, with the same options and named
 arguments, and the batches with their estimates, then asks for confirmation
 once for the whole run under `brew upgrade`'s rules: with named arguments, only
-if the batches include formulae other than the names as given (so a new alias
-target, an alias or a name not given exactly as the formula's full name, e.g.
-a core formula with its tap or another tap's formula without it, counts as
-another), or Homebrew would install dependencies or upgrade outdated
-dependents of the named formulae; otherwise, if there is anything to upgrade.
-Without a terminal it carries on without asking, as `brew upgrade` does.
+if the batches or the casks it would upgrade include any other than the names
+as given (so a new alias target, an alias or a name not given exactly as the
+formula's or cask's full name, e.g. a core formula with its tap or another
+tap's formula without it, counts as another), or Homebrew would install
+dependencies or upgrade outdated dependents of the named formulae; otherwise,
+if there is anything to upgrade. Without a terminal it carries on without
+asking, as `brew upgrade` does.
 
 Formulae it won't upgrade (up to date, not installed, pinned, unknown or
 needing a newer version of a pinned dependency) are reported by
@@ -46,8 +47,8 @@ and a name that is also an installed cask's token is taken for the cask).
 `--interactive` can't be used, as it needs a terminal: use
 `brew upgrade --interactive` instead.
 
-Casks are listed in `brew upgrade --dry-run`'s plan, but not upgraded: use
-`brew upgrade --cask` for those.
+Outdated casks are upgraded too, as `brew upgrade` does, before or after the
+batches: see [Casks](#casks).
 
 `brew upgrade-timed` is a command in this tap. Trust it once with
 `brew trust --command zbeekman/tap/upgrade-timed`, or trust the whole tap. See
@@ -104,13 +105,89 @@ batch, none of which are logged, and exits with status 130, as Homebrew does.
 The batches that finished are logged. It exits with status 130 even if
 Homebrew finished the last batch anyway.
 
+## Casks
+
+Casks are neither timed nor logged. With no *`installed_cask`* named, the
+outdated casks are upgraded as `brew upgrade` picks them, unless `--formula` is
+given; with some named, those; with only formulae named, none. Pinned casks,
+casks not below `--minimum-version` and `installer manual` casks are left out,
+for `brew upgrade --dry-run`'s plan to report.
+
+They are upgraded in at most two calls of
+`brew upgrade --cask --yes` *`options`* *`cask`* ... from the home directory
+with Homebrew's output straight to the terminal, each given the cask options
+it was given other than `--minimum-version`, with `--binaries` or
+`--no-binaries` where that differs from `$HOMEBREW_CASK_OPTS`. The calls are:
+
+- the first, before the batches, for the casks that need nothing in the run
+  and shouldn't prompt;
+- the last, after the batches, for the rest, so that a password prompt or a
+  macOS dialog only waits once the builds are done:
+  - casks that need a formula or cask in the run, directly or through the
+    dependencies of the formulae and casks they need, which Homebrew may
+    install for them. That includes what Homebrew needs to unpack a cask's
+    download (e.g. `xz`), which it only knows once it has the download; the
+    command, which downloads nothing, goes by the cask's `container type:`,
+    else its download if already cached, else the download's extension, as
+    Homebrew reads it (e.g. `.tar.xz`, a tarball, needs nothing). What a cask
+    needs is matched with the run by full name, after aliases and renames,
+    so another tap's formula of the same name doesn't count, except for a
+    dependency that can't be loaded, which is matched by name alone; formulae
+    are matched only with formulae and casks only with casks. The run
+    includes the dependencies Homebrew installs or upgrades in the calls for
+    the formulae of the batches; the plan names the formulae each is for;
+  - casks with a cask dependency that isn't installed, which Homebrew would
+    install first, whose install may need sudo or raise a dialog by the rules
+    below (each reason names the dependency). With `--skip-cask-deps`,
+    Homebrew installs no cask dependency, so neither these nor a cask
+    dependency in the run count, but it still installs the formulae those
+    need, which do;
+  - casks that may need sudo: those Homebrew itself says need it (e.g. `pkg`,
+    `installer script:` with `sudo: true`), any `preflight` or `postflight`
+    block and the install steps or file permissions that make Homebrew fall
+    back to sudo (`sudo: :if_needed` steps whose directory you can't write,
+    `set_ownership` steps, bundles with files not owned by or readable by you,
+    targets in directories you can't write, renamed targets you don't own);
+  - casks whose old version may need sudo or raise a dialog as it is
+    uninstalled: `uninstall` directives that run as root (`pkgutil`,
+    `launchctl`, `kext`, `delete`, `script` with `sudo: true`) or may raise a
+    dialog (`quit` and `signal` when `on_upgrade` names it), its
+    `uninstall_preflight` and `uninstall_postflight` blocks and its uninstall
+    steps. As Homebrew uninstalls the version installed, these are read from
+    the cask as installed.
+
+The plan lists the casks of each call, with why each goes last. A failed cask
+call is reported and fails the command; the batches still run. Ctrl-C during a
+cask call stops the run.
+
+A cask for the last call that needs, in the same way, a formula of the
+batches that failed or was skipped, or a dependency Homebrew would have
+installed in that formula's call, and isn't installed is not run: Homebrew
+would install that formula for it, without the formula options given for it
+(e.g. pour a bottle of a formula whose source build failed). Unlike
+`brew upgrade`, which would, the command leaves it out with a warning naming
+it, what it needs and the command to run it later. A formula that failed to
+upgrade is still installed, so Homebrew leaves it alone and the cask runs.
+
+Without a terminal (`/dev/tty` can't be opened, e.g. under `launchd` or
+`cron`) and with `$SUDO_ASKPASS` unset, sudo can't ask for a password, so the
+casks that may need sudo are skipped, with a warning naming them and the
+command to upgrade them later. A cask upgrade that fails partway is rolled
+back, but the rollback may need sudo too and then fails, leaving the cask
+half-upgraded; `brew upgrade` would try them anyway.
+
+Each command it suggests to run casks later has the cask options the call
+would have been given, and names a cask given as a file by that file, with
+every argument escaped for the shell.
+
 ## Output
 
 A heading gives the number of formulae and batches and the estimated total.
 Each batch has a heading with its estimated time and why a new batch starts
 there, then a row per formula with `pour` or `build` and its estimate. An
 estimate ending in `?` has no history of that kind of build to go on, as in
-`brew build-times stats`.
+`brew build-times stats`. Then come the casks to upgrade first, and those to
+upgrade last, each with why.
 
 A new batch starts:
 

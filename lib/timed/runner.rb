@@ -6,6 +6,7 @@ require "tab"
 require "utils"
 require "utils/output"
 require_relative "build_log"
+require_relative "command"
 require_relative "planner"
 require_relative "receipts"
 
@@ -16,6 +17,15 @@ module Timed
 
     # What `run` logs for a formula brew installed.
     DONE = %w[built poured].freeze
+
+    # What came of `run`: the formulae (by full name) brew didn't install, as
+    # they failed, were skipped or never ran, and whether, with
+    # `stops_at_failure`, a call stopped early, which ends the whole brew
+    # command.
+    class Outcome < T::Struct
+      const :unfinished, T::Array[String]
+      const :stopped_early, T::Boolean
+    end
 
     # Runs each of `batches` of `formulae` (by full name) with
     # `brew <verb> --formula --yes --display-times <flags> <names>`, each name
@@ -31,9 +41,14 @@ module Timed
     # verb, the batch's label and its log, and each keg brew installed gets
     # its times in its receipt unless not `stamp`. A formula that `deps` says
     # needs one that failed or was skipped is skipped and logged as such.
-    # With `stops_at_failure` (brew stops a call at a failed build), the
-    # formulae of a failed call that brew never started are logged as
-    # skipped, not failed, with a warning. With `dependencies_only` (`brew
+    # With `stops_at_failure` (brew stops a call at a failed build), brew
+    # finished a failed call that printed the installation times, and
+    # otherwise stopped it early if it never started more of its formulae
+    # than downloads it couldn't tie to a formula failed (a formula left out
+    # for a failed download is never started), or if it printed a failed build
+    # before it turned to dependents and not a failed post-install; the
+    # formulae it never started are then logged as skipped, not failed, with
+    # a warning. With `dependencies_only` (`brew
     # install --only-dependencies`), the calls install only what the formulae
     # need, so `succeeded` checks that, and the formulae are never logged for
     # themselves, failed or skipped, only what brew's output shows it did,
@@ -59,7 +74,7 @@ module Timed
         logs:              Pathname,
         clock:             T.proc.returns(Float),
         now:               T.proc.returns(Time),
-      ).void
+      ).returns(Outcome)
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
                  succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
@@ -75,6 +90,7 @@ module Timed
       # What brew never started in a call it stopped early, e.g. at a failed
       # build.
       not_run = T.let([], T::Array[String])
+      stopped_early = T.let(false, T::Boolean)
       # The child brew is in this process group, so it gets Ctrl-C too.
       interrupts = T.let([], T::Array[Integer])
       old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
@@ -143,9 +159,21 @@ module Timed
                 failed_in_batch.concat(kept.reject { |name| done.fetch(name) })
                 next if !stops_at_failure || results.last || interrupts.any?
 
-                # Brew names each formula it starts on, or whose download fails.
+                output = lines.drop(first_line).map { |line, _| line.chomp.gsub(ANSI, "") }
+                # Brew prints the times (`--display-times`) as it finishes, if
+                # it installed anything, which it never reaches once stopped.
+                next if output.include?(INSTALL_TIMES)
+
+                # Brew names each formula it starts on, or whose download fails,
+                # but for some downloads only the file.
                 begun = parse(lines.drop(first_line)).keys
                 unstarted = kept.reject { |name| begun.include?(Utils.name_from_full_name(name)) }
+                if unstarted.length <= output.grep(UNNAMED_FETCH_FAILED).length
+                  stopped_early ||= stopped_at_build?(output)
+                  next
+                end
+
+                stopped_early = true
                 not_run.concat(unstarted)
                 skipped.concat(unstarted)
                 names -= unstarted
@@ -230,7 +258,38 @@ module Timed
       end
       # Even if brew finished anyway, so that whatever runs this stops too.
       raise Interrupt if interrupts.any?
+
+      Outcome.new(unfinished: failed | skipped, stopped_early:)
     end
+
+    # A failed download that brew names by its file, not its formula
+    # (`Resource::Patch`, `Homebrew::API::SourceDownload`).
+    UNNAMED_FETCH_FAILED = /\A✘ (?:Patch|API Source) /
+
+    # What brew prints for a failed build (`BuildError`): the end of the
+    # build's log (`Formula#system`), or, when verbose, its error
+    # (`BuildError#dump`). A failed post-install prints the same log tail
+    # first and carries on (`FormulaInstaller#post_install`), as does a failed
+    # build of a dependent, which comes after brew's dependents heading
+    # (`Upgrade.upgrade_dependents`).
+    BUILD_FAILED = /\A(?:Last \d+ lines from .+:|Error: \S+ \S+ did not build)\z/
+    POST_INSTALL_FAILED = "Warning: The post-install step did not complete successfully"
+    DEPENDENTS = /
+      \A==>\s(?:Upgrading\s\d+\sdependents?\sof\supgraded\sformulae?:
+      |Checking\sfor\sdependents\sof\supgraded\sformulae\.\.\.)\z
+    /x
+
+    # Whether `output`, without colours, shows brew stopped at a failed build:
+    # the last such build before the dependents isn't a post-install's.
+    sig { params(output: T::Array[String]).returns(T::Boolean) }
+    def self.stopped_at_build?(output)
+      failed = T.let(false, T::Boolean)
+      output.take_while { |line| !DEPENDENTS.match?(line) }.each do |line|
+        failed = BUILD_FAILED.match?(line) || (failed && line != POST_INSTALL_FAILED)
+      end
+      failed
+    end
+    private_class_method :stopped_at_build?
 
     # `candidates` split into those `deps` says need one of `blocked`, which
     # are skipped with a warning, and the rest. With `dependencies_only`, what
@@ -250,6 +309,31 @@ module Timed
       end
     end
     private_class_method :skips
+
+    # Runs `brew <verb> --cask --yes <flags> <casks>` once, from the home
+    # directory, with its output straight to the terminal, as casks are
+    # neither timed nor logged. A failure is reported and the run carries on.
+    # Ctrl-C reaches brew too: once it has stopped, `Interrupt` is raised.
+    sig {
+      params(verb: String, casks: T::Array[String], flags: T::Array[String], label: String, brew: Command::Brew)
+        .void
+    }
+    def self.run_casks(verb, casks, flags:, label:, brew: ->(env, argv) { Command.brew(env, argv) })
+      return if casks.empty?
+
+      oh1 "Running the #{label} #{Utils.pluralize("cask", casks.length)}: #{casks.join(" ")}"
+      interrupts = T.let([], T::Array[Integer])
+      old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
+      argv = [verb, "--cask", "--yes", *flags].uniq + casks
+      begin
+        success = brew.call({}, argv)
+      ensure
+        Signal.trap(:INT, old_trap)
+      end
+      raise Interrupt if interrupts.any?
+
+      ofail "`#{Shellwords.join(["brew", *argv])}` failed." unless success
+    end
 
     # Runs `brew` with `argv` from the home directory (source builds that
     # clone a repository fail from some directories), with its output and
@@ -317,6 +401,9 @@ module Timed
     # A download failed (`DownloadQueue`). A bottle's version is the keg's
     # (`pkg_version`), a source download's has no revision, so it isn't kept.
     FETCH_FAILED = /\A✘ (?<kind>Formula|Bottle) (?<name>\S+) \((?<version>[^)]+)\)\z/
+    # A resource is named after its formula, then `--` and its own name, if it
+    # has one (`Resource#download_name`).
+    RESOURCE_FAILED = /\A✘ (?<kind>Resource) (?<name>\S+?)(?:--\S+)?\z/
 
     # `FormulaInstaller#summary`: the install badge, unless turned off, then
     # the keg, its size and, for a source build, `built in <duration>`.
@@ -418,7 +505,7 @@ module Timed
         elsif (match = POURING.match(line))
           @current = seen(match[:name].to_s, @unclaimed || time)
           @release = false
-        elsif (match = FETCH_FAILED.match(line))
+        elsif (match = FETCH_FAILED.match(line) || RESOURCE_FAILED.match(line))
           @current = seen(match[:name].to_s, time)
           build(@current)["version"] = match[:version] if match[:kind] == "Bottle"
           # Brew won't install it, so it is done with it after its error.

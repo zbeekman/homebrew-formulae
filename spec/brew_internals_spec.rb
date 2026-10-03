@@ -406,6 +406,39 @@ RSpec.describe "brew internals", type: :system do
       body = brew_source("cask/installer.rb")[/^    def load_installed_caskfile!.*?^    end$/m]
       expect(body).to include("CaskLoader.load_from_installed_caskfile(installed_caskfile)")
     end
+
+    it "doesn't load a Ruby caskfile to reinstall a cask that isn't trusted, with tap trust on, as " \
+       "`Timed::Command.installed_cask` follows, keeping the new cask (and its `zap`)" do
+      body = brew_source("cask/installer.rb")[/^    def load_installed_caskfile!.*?^    end$/m].to_s
+      guard = ["tab = CaskLoader.load_installed_tab(@cask)", "tap = tab.tap", "tap ||= @cask.tap",
+               'if installed_caskfile.extname == ".rb" &&', "Homebrew::EnvConfig.require_tap_trust? &&", "tap &&",
+               "!Homebrew::Trust.trusted?(:cask, \"\#{tap.name}/\#{@cask.token}\")"]
+      lines = body.lines.map(&:strip)
+      untrusted = body[/trusted\?.*?^\s+return$/m]
+      zap = brew_source("cask/installer.rb")[/^    def zap\n.*?^    end$/m].to_s
+      expect([guard.map { |line| lines.index(line) }.then { |at| at.all? && at == at.sort },
+              untrusted&.exclude?("@cask ="), zap.include?("@cask.artifacts.grep(Artifact::Zap)")])
+        .to eq([true, true, true])
+    end
+
+    it "uninstalls instead the artifacts the untrusted cask recorded, replayed as `Timed::Command.recorded_cask` " \
+       "replays them" do
+      source = brew_source("cask/installer.rb")
+      untrusted = source[/^    def load_installed_caskfile!.*?^    end$/m].to_s[/trusted\?.*?^\s+return$/m].to_s
+      replay = ["dsl = DSL.new(@cask)",
+                "default_uninstall_artifact_keys = DSL::ACTIVATABLE_ARTIFACT_CLASSES.filter_map do |klass|",
+                "next if [Artifact::Uninstall, Artifact::Zap].include?(klass)",
+                "next if !klass.method_defined?(:uninstall_phase) && !klass.method_defined?(:post_uninstall_phase)",
+                "Array(tab.uninstall_artifacts).each do |artifact_entry|",
+                "next unless default_uninstall_artifact_keys.include?(dsl_key)",
+                "args = Array(raw_args)", "if args.last.is_a?(Hash)", "*args[...-1],",
+                "**T.cast(args.last, T::Hash[T.any(Symbol, String), T.anything]).transform_keys(&:to_sym),",
+                "dsl.public_send(dsl_key, *args)",
+                "@default_uninstall_artifacts ||= dsl.artifacts"]
+      expect([replay.map { |line| untrusted.lines.map(&:strip).include?(line) },
+              source.match?(/def artifacts\n\s+@default_uninstall_artifacts \|\| @cask\.artifacts\n/)])
+        .to eq([replay.map { true }, true])
+    end
   end
 
   describe "`brew upgrade` of a cask" do
@@ -415,6 +448,48 @@ RSpec.describe "brew internals", type: :system do
         "Installer.new(old_cask, **old_options)",
         "new_cask.config = new_cask.default_config.merge(old_config)",
       )
+    end
+  end
+
+  describe "the casks the wrapped commands act on" do
+    it "are, for `brew upgrade`, the outdated ones below `--minimum-version`, but not `installer manual` ones" do
+      expected = ["casks = minimum_version_casks(casks, quiet: true)",
+                  "return false if minimum_version.present? && casks.empty?", "",
+                  "outdated_casks = Cask::Upgrade.outdated_casks(", "casks,", "args:,",
+                  "force: args.force?,", "quiet: true,", "greedy: args.greedy?,",
+                  "greedy_latest: args.greedy_latest?,", "greedy_auto_updates: args.greedy_auto_updates?,",
+                  "summary_pinned: final_upgrade_summary.pinned_casks,", ")", "return true if outdated_casks.empty?",
+                  "", "manual_installer_casks = outdated_casks.select do |cask|", "cask.artifacts.any? do |artifact|",
+                  "artifact.is_a?(Cask::Artifact::Installer) && artifact.manual_install"]
+      expect("cmd/upgrade.rb" => lines_from("cmd/upgrade.rb", expected.fetch(0), expected.length))
+        .to eq("cmd/upgrade.rb" => expected)
+    end
+
+    it "are, for `brew install`, the new ones and the installed, outdated ones it upgrades" do
+      expected = ["installed_casks, new_casks = casks.partition(&:installed?)", "",
+                  "fetch_casks = if Homebrew::EnvConfig.no_install_upgrade?", "new_casks", "else",
+                  "upgrade_casks = Cask::Upgrade.outdated_casks(casks, args:, force: true, quiet: true)",
+                  "new_casks | upgrade_casks", "end",
+                  "Install.ask_casks fetch_casks, skip_cask_deps: args.skip_cask_deps? if ask"]
+      expect("cmd/install.rb" => lines_from("cmd/install.rb", expected.fetch(0), expected.length))
+        .to eq("cmd/install.rb" => expected)
+    end
+
+    it "are printed by `Install.print_dry_run_casks`, which `brew install --dry-run` and the cask prompts use, " \
+       "and which returns the dependencies to install that make brew ask" do
+      ask_casks = brew_source("install.rb")[/^      def ask_casks\(.*?^      end$/m].to_s
+      expect([brew_source("cmd/install.rb").include?(
+        "Install.print_dry_run_casks(casks, skip_cask_deps: args.skip_cask_deps?, include_installed: false)",
+      ), brew_source("cmd/reinstall.rb").include?(
+        'Install.ask_casks casks, action: "reinstallation", skip_cask_deps: args.skip_cask_deps? if ask',
+      ), ask_casks.include?("dependency_names = print_dry_run_casks("),
+              ask_casks.match?(/planned_names:\s+cask_names \+ dependency_names,\n\s+requested_names: cask_names,/)])
+        .to eq([true, true, true, true])
+    end
+
+    it "are uninstalled, on upgrade, as their installed caskfile defines them, or as rebuilt from it" do
+      expect(brew_source("cask/upgrade.rb"))
+        .to include("CaskLoader.recover_from_installed_caskfile(installed_caskfile, fallback_cask: c)")
     end
   end
 
@@ -491,12 +566,14 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
-  # The lines of brew's `cmd/upgrade.rb` from the one that is `first` on,
-  # stripped and with runs of spaces squeezed.
-  def upgrade_lines(first, count)
-    lines = brew_source("cmd/upgrade.rb").lines.map { |line| line.strip.squeeze(" ") }
+  # The lines of brew's `path` from the one that is `first` on, stripped and
+  # with runs of spaces squeezed.
+  def lines_from(path, first, count)
+    lines = brew_source(path).lines.map { |line| line.strip.squeeze(" ") }
     lines.index(first)&.then { |index| lines[index, count] }
   end
+
+  def upgrade_lines(first, count) = lines_from("cmd/upgrade.rb", first, count)
 
   it "drops pinned formulae, then upgrades each to its alias's new target unless that is up to date" do
     expected = ["pinned = outdated.select(&:pinned?)", "outdated -= pinned",
@@ -518,6 +595,12 @@ RSpec.describe "brew internals", type: :system do
     partition_lines = brew_source("upgrade.rb").lines.grep(/partition\(&:keg_only\?\)/).map(&:strip)
     expect("upgrade.rb" => partition_lines)
       .to eq("upgrade.rb" => ["formulae_to_install.replace(formulae_to_install.partition(&:keg_only?).flatten(1))"])
+  end
+
+  it "prints `Installation times` only if anything was installed, as `brew reinstall` finishes after the " \
+     "dependents check, which `Timed::Runner` takes as brew not having stopped early", :aggregate_failures do
+    expect { Messages.new.display_install_times }.not_to output.to_stdout
+    expect(brew_source("cmd/reinstall.rb")[/rescue BuildError.*Install\.finish_installation\(/m]).to be_present
   end
 
   it "prints `Installation times` in a fixed format" do
@@ -848,6 +931,26 @@ RSpec.describe "brew internals", type: :system do
         "puts \"Last \#{log_lines} lines from \#{log_filename}:\"",
       )
       expect(parsed(["Last 15 lines from #{foo.logs}/01.make.log:", "make: *** Error 1"])).to eq(%w[foo])
+    end
+
+    it "name a failed resource download after its formula, and a patch or API source download only by file, " \
+       "which `Timed::Runner` relies on to tell a formula brew left out from one it never got to" do
+      resource = brew_source("resource.rb")
+      expect([resource.include?("owner_name ? \"\#{owner_name}--\#{escaped_name}\" : escaped_name"),
+              resource.scan(/def download_queue_type = "([^"]+)"/).flatten,
+              brew_source("api/source_download.rb").include?('def download_queue_type = "API Source"'),
+              brew_source("downloadable.rb").include?("\"\#{download_queue_type} \#{download_queue_name}\"")])
+        .to eq([true, ["Resource", "Formula", "Bottle Manifest", "Patch"], true, true])
+    end
+
+    it "include none from dependents brew rebuilds or upgrades after its heading, or a failed post-install" do
+      expect([brew_source("upgrade.rb").include?('oh1 "Checking for dependents of upgraded formulae..."'),
+              brew_source("upgrade.rb").include?(
+                "ohai \"\#{upgrade_verb} \#{Utils.pluralize(\"dependent\", upgradeable.count,",
+              ),
+              brew_source("formula_installer.rb")
+                .include?('opoo "The post-install step did not complete successfully"')])
+        .to eq([true, true, true])
     end
 
     it "include the error ending a verbose build's failure, which prints no log tail", :aggregate_failures do

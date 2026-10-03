@@ -8,8 +8,11 @@
 
 require "cmd/install"
 require_relative "../../cmd/install-timed"
+require_relative "../support/casks"
 
 RSpec.describe Homebrew::Cmd::InstallTimed do
+  include TimedCaskHelper
+
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
   let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
@@ -85,12 +88,19 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
   # preinstall checks run in-process, so are left out unless a spec asks for
   # them, and the developer tools are installed. What brew notes about the
   # support tier (e.g. for `--cc`), which it prints as the process exits, is
-  # dropped after each spec.
+  # dropped after each spec. A cask call succeeds, and there is a terminal for
+  # sudo.
   after { Homebrew::Diagnostic.support_tiers.clear }
 
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
+    allow(Cask::CaskLoader).to receive(:for).and_call_original
     allow(Timed::Command).to receive(:auto_update)
+    allow(Timed::Command).to receive(:brew) do |_env, argv|
+      brew_calls << argv
+      true
+    end
+    allow(Timed::Casks).to receive(:terminal?).and_return(true)
     allow(Homebrew::Install).to receive(:ask_formulae)
     allow(Homebrew::Install).to receive(:perform_preinstall_checks_once)
     allow(DevelopmentTools).to receive(:installed?).and_return(true)
@@ -152,13 +162,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect { run_command("--interactive", "cmake") }
         .to raise_error(UsageError, "Invalid usage: `--interactive` needs a terminal; " \
                                     "use `brew install --interactive` instead.")
-    end
-
-    it "refuses casks, naming them" do
-      stub_cask_loader(Cask::Cask.new("firefox"))
-      expect { run_command("--dry-run", "--cask", "firefox") }
-        .to raise_error(UsageError, "Invalid usage: `brew install-timed` doesn't install casks yet; " \
-                                    "use `brew install --cask firefox` instead.")
     end
 
     it "fails on unknown `--last`, `--exclude` and `--guess` names, naming the flag, before running anything",
@@ -671,6 +674,107 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
           .to include("dep" => ["failed"]).and(satisfy { |logged| !logged.key?("app") })
       end
+    end
+  end
+
+  describe "casks" do
+    it "prints what `brew install --dry-run` prints about the casks, then which to run first and last" do
+      stub_cask("firefox", nil)
+      stub_cask("iterm2", installed_stanzas: 'uninstall quit: "com.iterm2"')
+      stub_cask("current-app", "2.0")
+      expect { run_command("--dry-run", "firefox", "iterm2", "current-app") }.to output(<<~EOS).to_stdout
+        ==> Would install 1 cask:
+        firefox
+        ==> Would install 1 cask first
+        firefox
+        ==> Would install 1 cask last
+        iterm2: `uninstall quit` may raise a dialog
+      EOS
+    end
+
+    it "installs and upgrades casks first and last around the batches with the cask flags, as brew would " \
+       "upgrade the installed, outdated ones, and passes the others on for brew to report", :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("firefox", nil)
+      stub_cask("iterm2", installed_stanzas: 'uninstall quit: "com.iterm2"')
+      stub_cask("current-app", "2.0")
+      expect(Homebrew::Ask).not_to receive(:confirm?)
+      run_command("--verbose", "--no-binaries", "--adopt", "--keep-tmp", "firefox", "iterm2", "current-app", "cmake")
+      expect(brew_calls).to eq([%w[install --cask --yes --verbose --adopt --no-binaries firefox current-app],
+                                %w[install --formula --yes --display-times --verbose --keep-tmp cmake],
+                                %w[install --cask --yes --verbose --adopt --no-binaries iterm2]])
+    end
+
+    it "prints nothing with `--dry-run` for a named cask that is installed and current, as brew doesn't" do
+      stub_cask("current-app", "2.0")
+      expect { run_command("--dry-run", "current-app") }.not_to output.to_stdout
+    end
+
+    it "leaves an installed, outdated cask to install as brew does with `HOMEBREW_NO_INSTALL_UPGRADE`" do
+      ENV["HOMEBREW_NO_INSTALL_UPGRADE"] = "1"
+      stub_cask("iterm2", installed_stanzas: 'uninstall quit: "com.iterm2"')
+      run_command("--yes", "iterm2")
+      expect(brew_calls).to eq([%w[install --cask --yes iterm2]])
+    end
+
+    it "names a cask skipped without a terminal that was given as a file by that file in the command to " \
+       "install it later" do
+      allow(Timed::Casks).to receive(:terminal?).and_return(false)
+      dir = mktmpdir
+      (dir/"firefox.rb").write(cask_source("firefox", "2.0", 'pkg "Firefox.pkg"'))
+      path = Regexp.escape((dir/"firefox.rb").realpath.to_s)
+      Dir.chdir(dir) do
+        expect { run_command("--dry-run", "--cask", "--force", "firefox.rb") }
+          .to output(/^Install it later with `brew install --cask --force #{path}`\.$/).to_stderr
+      end
+    end
+
+    it "doesn't install a last cask that needs a formula that failed, which brew would pour for it, saying so",
+       :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("app-for-cmake", nil, stanzas: 'depends_on formula: "cmake"')
+      failing << "cmake"
+      expect { run_command("--yes", "--keep-tmp", "cmake", "app-for-cmake") }.to output(<<~EOS).to_stderr
+        Error: 1 formula did not install: cmake
+        Warning: Not installing 1 cask, which needs formulae that didn't install and aren't installed:
+        app-for-cmake: needs cmake
+        Install it later with `brew install --cask app-for-cmake`.
+      EOS
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake]])
+    end
+
+    it "installs a cask that needs a formula brew installs for one in the batches last, and not when that " \
+       "formula didn't install", :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
+      installs["app"] = %w[lib]
+      failing << "lib"
+      expect { run_command("--yes", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times app]])
+    end
+
+    it "counts what a missing cask dependency's install needs, but not with `--skip-cask-deps`" do
+      stub_cask("helper", nil, stanzas: 'pkg "Helper.pkg"')
+      stub_cask("firefox", nil, stanzas: 'depends_on cask: "helper"')
+      plans = []
+      allow(Timed::Command).to receive(:show_casks) { |_verb, plan, **| plans << plan }
+      [[], %w[--skip-cask-deps]].each { |flags| run_command("--dry-run", *flags, "firefox") }
+      expect(plans.map { |plan| [plan.first.length, plan.last.flat_map { |entry| entry.reasons.map(&:message) }] })
+        .to eq([[0, ["dependency `helper`: `pkg` requires sudo"]], [1, []]])
+    end
+
+    it "gives the cask classifier `--force`" do
+      stub_cask("firefox", nil)
+      expect(Timed::Command).to receive(:cask_plan).with(anything, hash_including(force: true)).and_call_original
+      run_command("--yes", "--force", "firefox")
+    end
+
+    it "asks, as brew does, when brew would install a cask's dependencies" do
+      stub_cask("dep-app", nil)
+      stub_cask("firefox", nil, stanzas: 'depends_on cask: "dep-app"')
+      expect(Homebrew::Ask).to receive(:confirm?).with(action: "installation").once.and_return(true)
+      expect { run_to_end("firefox") }.to output(/^==> Would install 1 dependency for firefox:\ndep-app\n/).to_stdout
     end
   end
 end
