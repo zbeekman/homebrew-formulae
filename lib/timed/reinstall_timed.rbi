@@ -25,6 +25,21 @@ module Homebrew
         sig { returns(T.nilable(T::Array[String])) }
         def guess; end
 
+        sig { returns(T.nilable(String)) }
+        def llm_api_key_file; end
+
+        sig { returns(T.nilable(T::Boolean)) }
+        def llm_estimates?; end
+
+        sig { returns(T.nilable(String)) }
+        def llm_model; end
+
+        sig { returns(T.nilable(String)) }
+        def llm_provider; end
+
+        sig { returns(T.nilable(String)) }
+        def llm_url; end
+
         sig { returns(T::Boolean) }
         def no_stamp_receipts?; end
       end

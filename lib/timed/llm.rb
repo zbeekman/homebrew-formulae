@@ -9,6 +9,7 @@ require "timeout"
 require "uri"
 require "utils/formatter"
 require "utils/output"
+require_relative "build_log"
 
 module Timed
   # LLM build time estimates: settings, one request/response adapter per
@@ -17,7 +18,6 @@ module Timed
     extend Utils::Output::Mixin
 
     BUDGET_SECONDS = 45.0
-    MAX_SECONDS = T.let(48 * 60 * 60, Integer)
     # Decoded; a real answer for hundreds of formulae is a few KB. Only the
     # body is capped: capping the status, header and chunk-size lines would
     # mean hooking private `Net::HTTP` internals, the endpoint is one the
@@ -28,6 +28,10 @@ module Timed
     # Failures to connect to one address, after which the next may work.
     CONNECT_ERRORS = T.let([Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ENETUNREACH, Errno::EADDRNOTAVAIL,
                             Errno::EAFNOSUPPORT].freeze, T::Array[T.class_of(SystemCallError)])
+    # Dot-separated labels of letters, digits, underscores and inner hyphens,
+    # with an optional trailing dot, as hosts files and container networks
+    # also allow `_`; IPv4 addresses match too.
+    HOST_NAME = /\A(?:[a-z\d_](?:[a-z\d_-]*[a-z\d_])?\.)*[a-z\d_](?:[a-z\d_-]*[a-z\d_])?\.?\z/i
     TOOL = "build_estimates"
     SYSTEM_PROMPT = "You estimate how long Homebrew takes to build formulae from source on one machine. " \
                     "Give every formula asked about an estimated build time in seconds."
@@ -394,9 +398,22 @@ module Timed
       rescue URI::InvalidURIError
         nil
       end
-      return uri if uri.is_a?(URI::HTTP) && uri.host.present?
+      if !uri.is_a?(URI::HTTP) || uri.host.blank?
+        raise UsageError, "`--llm-url` must be an `https://` or `http://` URL with a host."
+      end
 
-      raise UsageError, "`--llm-url` must be an `https://` or `http://` URL with a host."
+      # Any other host could only fail to resolve, and isn't shown, as it may
+      # hold a credential (e.g. `host;token=…`).
+      host = uri.host.to_s
+      ipv6 = begin
+        host.start_with?("[") && IPAddr.new(uri.hostname.to_s).ipv6?
+      rescue IPAddr::Error
+        false
+      end
+      return uri if ipv6 || host.match?(HOST_NAME)
+
+      raise UsageError, "`--llm-url` host is not a valid host name: use a host name or an IPv4 or bracketed IPv6 " \
+                        "address."
     end
 
     # Plain `http://` only reaches loopback or private addresses, judged by
@@ -501,7 +518,7 @@ module Timed
           next unless estimate in { name: String => name, seconds: Integer | Float => seconds }
           next if names.exclude?(name) || valid.key?(name)
 
-          valid[name] = seconds.clamp(1, MAX_SECONDS).to_f
+          valid[name] = seconds.clamp(BuildLog::ESTIMATE_SECONDS).to_f
         end
       else
         raise Error, "the response has no estimates"

@@ -58,6 +58,7 @@ module Homebrew
             The estimate of a source build is its mean plus 1.5 standard deviations, and of a pour its mean.
             A formula with both kinds gets a row for each, with the estimate used to order its next build of that kind.
             An estimate ending in `?` is a guess, as the formula has no usable history of that kind.
+            Then the LLM estimates kept by `--llm-estimates`, each with the source build of its version, if any.
           EOS
           named_args :formula
         end
@@ -70,7 +71,23 @@ module Homebrew
           names.flat_map { |name| rows(log, name) }.each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
+          estimates = args.named.empty? ? log.estimates.sort.to_h : log.estimates.slice(*names)
+          return if estimates.empty?
+
+          puts "LLM estimates and the source builds of the same version:"
+          puts format(ESTIMATE_ROW, name: "formula", version: "version", estimate: "estimate", actual: "actual",
+                                    model: "model", date: "date")
+          estimates.each do |name, estimate|
+            version = estimate.fetch("version")
+            actual = log.durations(name, status: "built", version:).last
+            puts format(ESTIMATE_ROW, name:, version:,
+                                      estimate: Timed::BuildLog.format_duration(estimate.fetch("seconds").to_f),
+                                      actual: actual ? Timed::BuildLog.format_duration(actual) : "-",
+                                      model: estimate["model"], date: estimate["date"])
+          end
         end
+
+        ESTIMATE_ROW = "%<name>-28s %<version>-12s %<estimate>9s %<actual>9s  %<model>s %<date>s"
 
         private
 

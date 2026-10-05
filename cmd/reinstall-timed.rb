@@ -40,6 +40,10 @@ module Homebrew
           args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
+        llm = if args.llm_estimates?
+          Timed::LLM.settings(key_file: args.llm_api_key_file, provider: args.llm_provider, url: args.llm_url,
+                              model: args.llm_model)
+        end
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
         items = args.named.to_formulae_and_casks_and_unavailable(method: :resolve)
         named_casks = items.grep(Cask::Cask)
@@ -56,7 +60,7 @@ module Homebrew
         exclude = (args.exclude || []).map { |name| Timed::Command.resolve("--exclude", name) }
 
         named = items.grep(Formula)
-        reinstall(named, casks, casks_named: args.cask? || named_casks.any?, estimator:, guesses:, exclude:)
+        reinstall(named, casks, casks_named: args.cask? || named_casks.any?, estimator:, guesses:, exclude:, llm:)
         # As `brew reinstall` does, last.
         items.each { |item| ofail item if item.is_a?(Exception) }
       end
@@ -68,9 +72,9 @@ module Homebrew
       # named, or `--cask` was given.
       sig {
         params(named: T::Array[Formula], casks: T::Array[Cask::Cask], casks_named: T::Boolean, estimator: Symbol,
-               guesses: T::Hash[String, Float], exclude: T::Array[String]).void
+               guesses: T::Hash[String, Float], exclude: T::Array[String], llm: T.nilable(Timed::LLM::Settings)).void
       }
-      def reinstall(named, casks, casks_named:, estimator:, guesses:, exclude:)
+      def reinstall(named, casks, casks_named:, estimator:, guesses:, exclude:, llm:)
         # What `brew reinstall` prints about the casks before it asks about
         # them: the dependencies it would install.
         cask_dependencies = Install.print_dry_run_casks(casks, action:         "reinstall",
@@ -87,10 +91,9 @@ module Homebrew
         formulae = latest.to_h { |formula| [formula.full_name, formula] }
         set = formulae.keys
         installers = formulae.transform_values { |formula| installer(formula) }
-        log = Timed::BuildLog.load(Timed::BuildLog.default_path)
-        estimates = set.to_h do |name|
-          [name, Timed::Command.estimate(log, name, pour: installers.fetch(name).pour_bottle?, estimator:, guesses:)]
-        end
+        estimates = Timed::Command.estimates(formulae,
+                                             pour: ->(formula) { installers.fetch(formula.full_name).pour_bottle? },
+                                             estimator:, guesses:, llm:, exclude:)
         # One batch: reinstall has no splits.
         result = Timed::Planner.plan(
           verb:      :reinstall,

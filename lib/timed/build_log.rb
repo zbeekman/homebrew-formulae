@@ -21,6 +21,10 @@ module Timed
     # One week: far beyond any build, and small enough that statistics cannot overflow.
     MAX_DURATION_SECONDS = 604_800
 
+    # An LLM's estimate: its answers are clamped to this, so the log keeps
+    # nothing else.
+    ESTIMATE_SECONDS = T.let(1..(48 * 60 * 60), T::Range[Integer])
+
     POURED_ESTIMATE = 15.0
     NO_HISTORY_ESTIMATE = 600.0
 
@@ -78,6 +82,19 @@ module Timed
         builds.each_with_index { |build, index| validate_build!(path, name, build, index) }
       end
 
+      estimates = data.fetch("estimates", {})
+      raise "#{path} is not a build log: `estimates` must be a JSON object." unless estimates.is_a?(Hash)
+
+      estimates.each do |name, estimate|
+        if estimate.is_a?(Hash) && estimate["version"].is_a?(String) &&
+           duration?(estimate["seconds"], ESTIMATE_SECONDS)
+          next
+        end
+
+        raise "#{path} is not a build log: estimate of `#{name}` must be a JSON object with a `version` string " \
+              "and `seconds` from #{ESTIMATE_SECONDS.begin} to #{ESTIMATE_SECONDS.end}."
+      end
+
       # Everything read must be writable back, so `update` cannot fail on it.
       JSON.generate(data)
     rescue JSON::JSONError => e
@@ -103,14 +120,23 @@ module Timed
 
       DURATION_KEYS.each do |key|
         value = build[key]
-        in_range = (value.is_a?(Integer) || value.is_a?(Float)) && value >= 0 && value <= MAX_DURATION_SECONDS
-        next if value.nil? || in_range
+        next if value.nil? || duration?(value)
 
         raise "#{prefix} `#{key}` of build #{index} of package `#{name}` must be a number of seconds " \
               "from 0 to #{MAX_DURATION_SECONDS}."
       end
     end
     private_class_method :validate_build!
+
+    sig { params(value: T.anything, range: T::Range[Integer]).returns(T::Boolean) }
+    def self.duration?(value, range = 0..MAX_DURATION_SECONDS)
+      case value
+      # Not `between?`, which raises for NaN.
+      when Integer, Float then range.cover?(value)
+      else false
+      end
+    end
+    private_class_method :duration?
 
     # Read-modify-write under an exclusive lock on `<path>.lock`, as Homebrew
     # does for `trust.json`, writing through a symlinked `path` to its target.
@@ -232,13 +258,33 @@ module Timed
       latest
     end
 
+    # Keeps an LLM's estimate of the formula's source build of `version`,
+    # replacing any earlier one.
+    sig { params(name: String, version: String, seconds: Float, model: String, date: String).void }
+    def cache_estimate(name, version:, seconds:, model:, date:)
+      (@data["estimates"] ||= {})[short_name(name)] = { "version" => version, "seconds" => seconds, "model" => model,
+                                                        "date" => date }
+    end
+
+    # The LLM's estimate of the formula's source build of `version`, if kept.
+    sig { params(name: String, version: String).returns(T.nilable(Float)) }
+    def cached_estimate(name, version)
+      estimate = estimates[short_name(name)]
+      estimate["seconds"].to_f if estimate && estimate["version"] == version
+    end
+
+    # The LLM's estimates kept, by formula.
+    sig { returns(T::Hash[String, T::Hash[String, T.untyped]]) }
+    def estimates = @data.fetch("estimates", {})
+
     # Durations in seconds of the formula's builds with `status` (`built` or
-    # `poured`; both when nil). `install_seconds` wins over `build_seconds`
-    # unless it is zero.
-    sig { params(name: String, status: T.nilable(String)).returns(T::Array[Float]) }
-    def durations(name, status: nil)
+    # `poured`; both when nil), of `version` only if given. `install_seconds`
+    # wins over `build_seconds` unless it is zero.
+    sig { params(name: String, status: T.nilable(String), version: T.nilable(String)).returns(T::Array[Float]) }
+    def durations(name, status: nil, version: nil)
       builds(name).filter_map do |build|
         next unless (status ? [status] : %w[built poured]).include?(build["status"])
+        next if version && build["version"] != version
 
         seconds = [build["install_seconds"], build["build_seconds"]].find { |value| value.to_f.nonzero? }
         seconds&.to_f

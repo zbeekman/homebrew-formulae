@@ -15,6 +15,7 @@ require "utils/output"
 require_relative "after"
 require_relative "build_log"
 require_relative "casks"
+require_relative "llm"
 require_relative "planner"
 
 module Timed
@@ -68,11 +69,35 @@ module Timed
                     description: "Don't add the build times to the install receipts of the formulae it installs; " \
                                  "they are still logged.",
                     env:         :timed_no_stamp_receipts
+      parser.switch "--[no-]llm-estimates",
+                    description: "Ask an LLM for estimates of source builds with no history, no `--guess` and " \
+                                 "not `--exclude`d, sending it their names, descriptions, versions and build " \
+                                 "dependencies, and this machine's CPU, cores, memory and OS. Off by default.",
+                    env:         :timed_llm_estimates
+      parser.flag "--llm-api-key-file=",
+                  description: "File holding the LLM API key, needed unless `--llm-url` is set. " \
+                               "Defaults to `$HOMEBREW_TIMED_LLM_API_KEY_FILE`.",
+                  depends_on:  "--llm-estimates"
+      parser.flag "--llm-provider=",
+                  description: "The LLM API: `anthropic` or `openai`. Defaults to `$HOMEBREW_TIMED_LLM_PROVIDER`, " \
+                               "else `anthropic` for keys starting `sk-ant-` and `openai` otherwise.",
+                  depends_on:  "--llm-estimates"
+      parser.flag "--llm-url=",
+                  description: "Endpoint to send the request to, e.g. a local server that speaks OpenAI's API, " \
+                               "instead of the provider's own. It receives the API key. " \
+                               "Defaults to `$HOMEBREW_TIMED_LLM_URL`.",
+                  depends_on:  "--llm-estimates"
+      parser.flag "--llm-model=",
+                  description: "The model to ask, needed with `--llm-url`. " \
+                               "Defaults to `$HOMEBREW_TIMED_LLM_MODEL`, else a small model of the provider.",
+                  depends_on:  "--llm-estimates"
       (last ? PLAN_FLAGS : PLAN_FLAGS - ["last"]).each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
-    PLAN_FLAGS = %w[guess estimator last exclude].freeze
-    OWN_FLAGS = T.let([*PLAN_FLAGS, "no_stamp_receipts"].freeze, T::Array[String])
+    LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model].freeze
+    PLAN_FLAGS = T.let(["guess", "estimator", "last", "exclude", *LLM_FLAGS].freeze, T::Array[String])
+    # `--no-llm-estimates` too, as `options` adds it.
+    OWN_FLAGS = T.let([*PLAN_FLAGS, "no_llm_estimates", "no_stamp_receipts"].freeze, T::Array[String])
 
     # Handled by the `-timed` command itself, once for the whole run.
     ASK_FLAGS = %w[ask no_ask dry_run].freeze
@@ -592,8 +617,10 @@ module Timed
     class Estimate < T::Struct
       const :seconds, Float
       const :pour, T::Boolean
-      # No history of this kind of build and no `--guess`.
+      # No history of this kind of build, no `--guess` and no LLM estimate.
       const :fallback, T::Boolean
+      # From `--guess` or an LLM, for a build without history.
+      const :guessed, T::Boolean, default: false
     end
 
     # From the formula's own history of the same kind (pour or build) only;
@@ -607,7 +634,98 @@ module Timed
       history = log.durations(name, status: pour ? "poured" : "built").any?
       guess = guesses[name] if !pour && !history
       seconds = guess || log.estimate(name, pour:, estimator:) || log.fallback_estimate
-      Estimate.new(seconds:, pour:, fallback: !history && guess.nil?)
+      Estimate.new(seconds:, pour:, fallback: !history && guess.nil?, guessed: !guess.nil?)
+    end
+
+    # The estimate of each of `formulae` (by full name), as `estimate` makes
+    # it, from the log at `database`. With `llm` settings, the source builds
+    # left to the fallback get an LLM's estimate instead: the one the log
+    # keeps for their version, else one asked for in one request and kept.
+    # If that fails, they keep the fallback, as do those in `exclude` (by
+    # full name), which the run leaves out.
+    sig {
+      params(formulae: T::Hash[String, Formula], pour: T.proc.params(formula: Formula).returns(T::Boolean),
+             estimator: Symbol, guesses: T::Hash[String, Float], llm: T.nilable(LLM::Settings), database: Pathname,
+             exclude: T::Array[String])
+        .returns(T::Hash[String, Estimate])
+    }
+    def self.estimates(formulae, pour:, estimator:, guesses:, llm: nil, database: BuildLog.default_path,
+                       exclude: [])
+      log = BuildLog.load(database)
+      estimates = formulae.to_h do |name, formula|
+        [name, estimate(log, name, pour: pour.call(formula), estimator:, guesses:)]
+      end
+      return estimates if llm.nil?
+
+      versions = formulae.filter_map do |name, formula|
+        next if exclude.include?(name) || !estimates.fetch(name).fallback || estimates.fetch(name).pour
+
+        [name, formula.pkg_version.to_s]
+      end.to_h
+      kept = versions.filter_map { |name, version| log.cached_estimate(name, version)&.then { [name, it] } }.to_h
+      subjects = versions.except(*kept.keys).map do |name, version|
+        formula = formulae.fetch(name)
+        LLM::Subject.new(name:, version:, desc: formula.desc,
+                         build_dependencies: formula.deps.select(&:build?).map(&:name))
+      end
+      answers = if subjects.any?
+        count = Utils.pluralize("estimate", subjects.length, include_count: true)
+        # Of another URL, only what says where it goes: no credentials, path
+        # or query.
+        url = llm.url
+        asked = if url.to_s == LLM::PROVIDERS.fetch(llm.provider).url
+          "#{llm.provider} #{llm.model}"
+        else
+          "#{llm.model} at #{url.host}:#{url.port}"
+        end
+        ohai "Asking #{asked} for #{count}"
+        LLM.estimates(llm, subjects, machine:)
+      else
+        {}
+      end
+      if answers.any?
+        date = Time.now.strftime("%F")
+        begin
+          BuildLog.update(database) do |updated|
+            answers.each do |name, seconds|
+              updated.cache_estimate(name, version: versions.fetch(name), seconds:, model: llm.model, date:)
+            end
+          end
+        rescue => e
+          opoo "Couldn't keep the LLM estimates in #{database}: #{e}"
+        end
+      end
+      estimates.merge(kept.merge(answers).transform_values do |seconds|
+        Estimate.new(seconds:, pour: false, fallback: false, guessed: true)
+      end)
+    end
+
+    # What an LLM is told of this machine: CPU, cores, memory and OS, as
+    # `brew config` describes them, leaving out any that can't be read, as
+    # the request is never worth stopping the run for.
+    sig { returns(T::Hash[String, T.any(String, Integer)]) }
+    def self.machine
+      facts = {
+        "cpu"       => -> { "#{Hardware::CPU.arch} #{Hardware::CPU.family}" },
+        "cores"     => -> { Hardware::CPU.cores },
+        "memory_gb" => lambda do
+          bytes = if OS.mac?
+            Utils.popen_read("/usr/sbin/sysctl", "-n", "hw.memsize").to_i
+          else
+            File.read("/proc/meminfo")[/^MemTotal:\s+(\d+) kB/, 1].to_i * 1024
+          end
+          (bytes / (1024.0**3)).round if bytes.positive?
+        end,
+        "os"        => -> { OS_VERSION },
+      }
+      facts.filter_map do |name, fact|
+        value = begin
+          fact.call
+        rescue
+          nil
+        end
+        [name, value] unless value.nil?
+      end.to_h
     end
 
     # Prints the batches with their estimates, why each starts where it does,
@@ -647,8 +765,13 @@ module Timed
             next puts "dependencies of #{name}" if dependencies_only
 
             estimate = estimates.fetch(name)
+            mark = if estimate.fallback
+              "?"
+            elsif estimate.guessed
+              "*"
+            end
             puts format("%<name>-28s %<kind>-5s %<estimate>9s", name:, kind: estimate.pour ? "pour" : "build",
-                        estimate: "#{BuildLog.format_duration(estimate.seconds)}#{"?" if estimate.fallback}")
+                        estimate: "#{BuildLog.format_duration(estimate.seconds)}#{mark}")
           end
         end
       end

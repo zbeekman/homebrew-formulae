@@ -352,6 +352,30 @@ RSpec.describe Timed::LLM do
       expect(names_flag_by_url).to eq(urls.to_h { |url| [url, true] })
     end
 
+    it "takes a host name, an IPv4 or a bracketed IPv6 address as the host, and rejects any other host before " \
+       "looking it up, without echoing it, as it could only fail and may hide a credential" do
+      invalid = "Invalid usage: `--llm-url` host is not a valid host name: use a host name or an IPv4 or bracketed " \
+                "IPv6 address."
+      expected = {
+        "https://llm.example/v1"         => "no UsageError",
+        "https://10.0.0.5/v1"            => "no UsageError",
+        "https://[::1]/v1"               => "no UsageError",
+        "http://my_host:11434/v1"        => "no UsageError",
+        "https://host;token=abc:8080/v1" => invalid,
+        "http://host;token=abc:8080/v1"  => invalid,
+        "https://a%2Cb/v1"               => invalid,
+        "https://a&b=c/v1"               => invalid,
+        "https://[v1.abc]/v1"            => invalid,
+      }
+      looked_up = []
+      resolver = lambda do |host|
+        looked_up << host
+        ["127.0.0.1"]
+      end
+      outcomes = expected.keys.to_h { |url| [url, usage_error(url:, model: "m", resolver:)] }
+      expect([outcomes, looked_up]).to eq([expected, ["my_host"]])
+    end
+
     it "pins plain `http://` to the loopback address it names" do
       expect(local.addresses).to eq(["127.0.0.1"])
     end

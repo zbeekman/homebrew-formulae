@@ -9,6 +9,7 @@
 require "cmd/install"
 require_relative "../../cmd/install-timed"
 require_relative "../support/casks"
+require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::InstallTimed do
   include TimedCaskHelper
@@ -218,7 +219,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         .to output(<<~EOS).to_stdout
           ==> Would install 2 formulae in 2 batches, estimated 1h50m
           ==> Batch 1 of 2 (--last): 1h00m
-          lib                          build     1h00m
+          lib                          build    1h00m*
           ==> Batch 2 of 2 (--last): 50m00s, slow app needs slow lib
           app                          build   50m00s?
           ==> Then check dependents for broken linkage, and reinstall broken ones from source
@@ -419,6 +420,64 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       allow(Homebrew::Install).to receive(:formulae_ask_prompt_needed?).and_return(true)
       expect(Homebrew::Ask).not_to receive(:confirm?)
       run_command("--dry-run", "cmake")
+    end
+  end
+
+  describe "LLM estimates" do
+    include TimedLLMHelper
+
+    let(:requests) { [] }
+    let(:local) { %w[--llm-estimates --llm-url=http://127.0.0.1:11434/v1/chat/completions --llm-model=qwen2.5:7b] }
+
+    # A local server answers, as OpenAI does.
+    before { answer_with({ "new" => 300 }, requests, provider: "openai") }
+
+    it "asks for the named source builds with no history, without a key for a local server, and marks them `*`" do
+      stub_formula("cmake")
+      stub_formula("new")
+      expect { run_command("--dry-run", *local, "cmake", "new") }.to output(<<~EOS).to_stdout
+        ==> Asking qwen2.5:7b at 127.0.0.1:11434 for 1 estimate
+        ==> Would install 2 formulae in 1 batch, estimated 8m20s
+        ==> Batch 1 of 1: 8m20s
+        cmake                        build     3m20s
+        new                          build    5m00s*
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+      EOS
+    end
+
+    it "asks nothing about `--exclude`d formulae, and keeps nothing for them" do
+      stub_formula("cmake")
+      stub_formula("new")
+      run_command("--dry-run", *local, "--exclude=new", "cmake", "new")
+      expect([requests, JSON.parse(database.read).key?("estimates")]).to eq([[], false])
+    end
+
+    it "asks nothing with `--only-dependencies`, which has no estimates" do
+      stub_formula("new")
+      run_command("--dry-run", "--only-dependencies", *local, "new")
+      expect(requests).to eq([])
+    end
+
+    it "never lets the key out, whether the provider answers, refuses it or can't be reached: not on screen, " \
+       "in the log, receipts or batch logs, nor in any sub-call's arguments or environment, the calls after the " \
+       "batches' too, which get no LLM flag either" do
+      stub_formula("new")
+      user = stub_formula("user", "1.0", deps: %w[new], bottled: true)
+      broken = stub_formula("broken", "2.0", deps: %w[new])
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: []))
+      installers = [instance_double(FormulaInstaller, formula: user)]
+      allow(Homebrew::Upgrade).to receive_messages(dependent_formula_installers:        installers,
+                                                   filter_dependent_formula_installers: installers)
+      allow(Timed::Command).to receive(:broken_dependents).and_return([broken])
+      results = key_leaks(database, receipt) do |argv|
+        # Not installed again, and the dependent outdated again.
+        FileUtils.rm_rf [HOMEBREW_CELLAR/"new", HOMEBREW_PREFIX/"opt/new", HOMEBREW_CELLAR/"user/2.0"]
+        Tab.clear_cache
+        run_to_end(*argv, "new")
+      end
+      calls = ["install new", "upgrade user", "reinstall broken"]
+      expect(results).to eq(%w[answered refused unreachable].to_h { |way| [way, [1, [], calls]] })
     end
   end
 
