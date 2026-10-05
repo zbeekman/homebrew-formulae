@@ -23,11 +23,14 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 ## Timed installs, upgrades and reinstalls
 `brew install-timed`, `brew upgrade-timed` and `brew reinstall-timed` are for
-formulae built from source. Each takes every option of the command it wraps.
-It orders the formulae by estimates from earlier runs, dependencies first, then
-quickest first, and runs `brew install` or `brew upgrade` once per batch
-(`brew reinstall` once), so quick builds finish early and long ones never hold
-them up.
+formulae built from source. Each takes every option of the command it wraps,
+except `--interactive`, which needs a terminal: run the wrapped command with
+`--interactive` instead (e.g. `brew install --interactive`). With `--debug`,
+Homebrew's interactive debugger is turned off, as its prompt couldn't be
+answered. It orders the formulae by estimates from earlier runs, dependencies
+first, then quickest first, and runs `brew install` or `brew upgrade` once per
+batch (`brew reinstall` once), so quick builds finish early and long ones never
+hold them up.
 
 Trust the commands once, or the whole tap with `brew trust zbeekman/tap`:
 
