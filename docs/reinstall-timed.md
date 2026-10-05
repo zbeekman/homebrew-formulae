@@ -86,7 +86,15 @@ reinstalled, and runs Homebrew's periodic cleanup, unless
 Ctrl-C stops Homebrew too. The command waits for it to exit, then logs and
 stamps the formulae that Homebrew finished (with build and wall times, but no
 install time), lists the rest, which are not logged, and exits with status 130,
-as Homebrew does, even if Homebrew finished anyway.
+as Homebrew does, even if Homebrew finished anyway. The casks of the last call
+then don't run: a warning names them, with the command to reinstall them
+later. One that needs a formula of the run that isn't installed is named with
+it, and with the `brew reinstall-timed` command for the named formulae that
+bring it in, to run first, as Homebrew would install that formula for the cask
+without the options given for it. That command keeps the formula options it
+was given, and its `--exclude` and `--no-stamp-receipts`; it has no `--yes`,
+so it asks as usual, and no `--guess` or `--estimator`, which only shape the
+plan.
 
 ## Casks
 
@@ -117,10 +125,10 @@ new cask's `uninstall` stanza too, which Homebrew doesn't run then.
 A failed build stops `brew reinstall` before it reinstalls any cask it was
 given. The casks of the first call, before the formulae, have been reinstalled
 by then; those of the last call, after the formulae, don't run: a warning
-names them, with the command to reinstall them later. After any other failure
-Homebrew carries on to the casks, and so does the command, as it does after a
-failed build of a dependent that Homebrew
-rebuilds or upgrades alongside, or a failed post-install step. Homebrew prints
+names them, with the command to reinstall them later, as after Ctrl-C. After
+any other failure Homebrew carries on to the casks, and so does the command,
+as it does after a failed build of a dependent that Homebrew rebuilds or
+upgrades alongside, or a failed post-install step. Homebrew prints
 the installation times as it finishes, if it installed anything, so then it
 didn't stop. Otherwise the command takes brew as stopped when it never started
 a formula it was given (more of them than downloads it couldn't tie to a
@@ -133,8 +141,9 @@ patch prints neither, so the last casks still run then. A failed reinstall
 puts the old keg back, so a last cask that needs that formula still runs;
 only one that needs a formula that isn't installed (e.g. one that wasn't
 installed before, or a dependency Homebrew would have installed for it) is left
-out, as for
-[`brew upgrade-timed`](upgrade-timed.md#casks).
+out, as for [`brew upgrade-timed`](upgrade-timed.md#casks), with the
+`brew reinstall-timed` command for the named formulae that bring that in, to
+run first.
 
 ## Output
 
@@ -169,7 +178,7 @@ itself, once for the whole run. It adds:
 `--exclude`
 
 : Comma-separated formulae to leave out of the run. Homebrew may still
-  install or upgrade them as dependencies of the others.
+  install or upgrade them as dependencies or dependents of the others.
 
 `--guess`, `--estimator` and `--exclude` plan formulae only, so they can't be
 used with `--cask`, and each name must be a formula.

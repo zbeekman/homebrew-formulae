@@ -2,13 +2,17 @@
 # frozen_string_literal: true
 
 require "abstract_command"
+require "cache_store"
 require "cask/cask_loader"
 require "cask/download"
 require "formulary"
+require "linkage_checker"
 require "shellwords"
 require "trust"
 require "unpack_strategy"
+require "upgrade"
 require "utils/output"
+require_relative "after"
 require_relative "build_log"
 require_relative "casks"
 require_relative "planner"
@@ -53,9 +57,13 @@ module Timed
         parser.comma_array "--last",
                            description: "Comma-separated formulae to run in a final batch, with their dependents."
       end
+      # Without `--last`, the run is one call, whose own installed-dependents
+      # check may upgrade them; otherwise the run does that check itself and
+      # leaves them alone.
       parser.comma_array "--exclude",
                          description: "Comma-separated formulae to leave out of the run. Homebrew may still " \
-                                      "install or upgrade them as dependencies of the others."
+                                      "install or upgrade them as dependencies #{"or dependents " unless last}" \
+                                      "of the others."
       parser.switch "--no-stamp-receipts",
                     description: "Don't add the build times to the install receipts of the formulae it installs; " \
                                  "they are still logged.",
@@ -69,16 +77,23 @@ module Timed
     # Handled by the `-timed` command itself, once for the whole run.
     ASK_FLAGS = %w[ask no_ask dry_run].freeze
 
+    # Of the own flags, those that change what a run installs or how, which a
+    # `-timed` command it suggests keeps; the others only shape the plan.
+    # Brew has disabled `--ask`, and without `--yes` that command asks.
+    KEPT_FLAGS = %w[exclude no_stamp_receipts].freeze
+
     # Each sub-call names its own kind.
     KIND_FLAGS = %w[formula formulae cask casks].freeze
 
     # The wrapped command's flags to pass on: all of them in `preview`, for the
     # one `--dry-run` sub-call; common and formula flags in `formula`, common
     # and cask flags in `cask`, for the sub-calls that each add their kind.
+    # `own`: the `KEPT_FLAGS` given, for a `-timed` command the run suggests.
     class Forwarded < T::Struct
       const :preview, T::Array[String]
       const :formula, T::Array[String]
       const :cask, T::Array[String]
+      const :own, T::Array[String]
     end
 
     # `options` as in `args.options_only`; `conflicts` as in the wrapped
@@ -95,11 +110,336 @@ module Timed
       # A `--[no-]…` switch is named without `no_` in the conflicts.
       names = ->(option) { [option_name(option), option_name(option).delete_prefix("no_")] }
       split = preview.reject { |option| KIND_FLAGS.include?(option_name(option)) }
+      own = options.select { |option| KEPT_FLAGS.include?(option_name(option)) }.map do |option|
+        name, value = option.split("=", 2)
+        # A file, made absolute, as for the named arguments.
+        value ? "#{name}=#{named_argv(value.split(",")).join(",")}" : option
+      end
       Forwarded.new(
         preview:,
         formula: split.reject { |option| cask_only.intersect?(names.call(option)) },
         cask:    split.reject { |option| formula_only.intersect?(names.call(option)) },
+        own:,
       )
+    end
+
+    # The options brew gives the installers of the outdated dependents its
+    # installed-dependents check upgrades (`Upgrade.upgrade_dependents`) that
+    # `brew upgrade` takes. `--build-from-source` and `--HEAD` are only for
+    # the named formulae, and `--debug-symbols` needs `--build-from-source`.
+    DEPENDENT_FLAGS = %w[force_bottle keep_tmp force debug quiet verbose].freeze
+
+    # Of `options`, the formula flags as `forward` gives them, those for the
+    # `brew upgrade` call that upgrades the outdated dependents.
+    sig { params(options: T::Array[String]).returns(T::Array[String]) }
+    def self.dependent_flags(options) = options.select { |option| DEPENDENT_FLAGS.include?(option_name(option)) }
+
+    # The switches `brew install`, `brew upgrade` and `brew reinstall` give
+    # their installers and installed-dependents check, other than those every
+    # command has.
+    INSTALLER_SWITCHES = %w[force_bottle interactive keep_tmp debug_symbols force].freeze
+
+    # The options `brew install`, `brew upgrade` and `brew reinstall` give
+    # their installers and installed-dependents check, from `args` of a
+    # `-timed` command, which take every flag of the command they wrap.
+    sig { params(args: Homebrew::CLI::Args).returns(T::Hash[Symbol, T.any(T::Boolean, T::Array[String])]) }
+    def self.installer_options(args)
+      INSTALLER_SWITCHES.to_h { |name| [name.to_sym, args.public_send(:"#{name}?") == true] }.merge(
+        build_from_source_formulae: args.build_from_source_formulae,
+        debug:                      args.debug?,
+        quiet:                      args.quiet?,
+        verbose:                    args.verbose?,
+      )
+    end
+
+    # The options brew gives the dependents with broken linkage it reinstalls
+    # from source (`Upgrade.upgrade_dependents`), besides
+    # `--build-from-source`, with which `--force-bottle` conflicts.
+    LINKAGE_FLAGS = %w[keep_tmp debug_symbols force debug quiet verbose].freeze
+
+    # The calls `Runner.run` makes after the batches, for what brew's
+    # installed-dependents check does after the formulae it installs:
+    # upgrading the outdated `dependents` it found for `checked`, then
+    # reinstalling the dependents with broken linkage. `flags` are the formula
+    # flags as `forward` gives them, and `own` its `own`; `excluded`, the full
+    # names of formulae left out of the run, which neither call touches, nor
+    # the commands they give to finish what they leave. None, and the check
+    # left to brew, if the user has turned it off.
+    sig {
+      params(dependents: T::Array[Formula], checked: T::Array[Formula], args: Homebrew::CLI::Args,
+             flags: T::Array[String], excluded: T::Array[String], own: T::Array[String])
+        .returns(T.nilable(T::Array[Runner::After]))
+    }
+    def self.after(dependents, checked, args:, flags:, excluded:, own:)
+      return if Homebrew::EnvConfig.no_installed_dependents_check?
+
+      [dependents_call(dependents, checked, args:, flags:, own:), linkage_call(flags:, excluded:, own:)]
+    end
+
+    # The command that upgrades `names`: `brew upgrade-timed` with the run's
+    # `own` flags, as brew's own installed-dependents check in a plain `brew
+    # upgrade` would upgrade outdated dependents the run excluded, but without
+    # `names` (full names) in its `--exclude`, which would leave them out.
+    sig { params(names: T::Array[String], own: T::Array[String]).returns(String) }
+    def self.upgrade_command(names, own:)
+      flags = own.filter_map do |option|
+        next option if option_name(option) != "exclude"
+
+        kept = option.delete_prefix("--exclude=").split(",").reject do |name|
+          names.include?(Formulary.factory(name).full_name)
+        rescue FormulaUnavailableError, TapFormulaAmbiguityError, Homebrew::UntrustedTapError
+          false
+        end
+        "--exclude=#{kept.join(",")}" if kept.any?
+      end
+      shell_command(["brew", "upgrade-timed", *flags, *names])
+    end
+    private_class_method :upgrade_command
+
+    # `argv` as a command to run, each argument escaped for the shell, but
+    # only the value of an option with one, as `=` needs no escaping.
+    sig { params(argv: T::Array[String]).returns(String) }
+    def self.shell_command(argv)
+      argv.map do |arg|
+        option, value = arg.split("=", 2) if arg.match?(/\A--[\w-]+=/)
+        value ? "#{option}=#{Shellwords.escape(value)}" : Shellwords.escape(arg)
+      end.join(" ")
+    end
+    private_class_method :shell_command
+
+    # The command that reinstalls the dependents with broken linkage `names`
+    # from source, as the run's call does: with brew's own installed-dependents
+    # check off, as the run's call has it, so it upgrades or reinstalls nothing
+    # else. With the note that says so, to print after the commands, so they
+    # can be copied as they are.
+    sig { params(names: T::Array[String]).returns([String, String]) }
+    def self.reinstall_command(names)
+      ["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source #{names.join(" ")}",
+       "The reinstall skips Homebrew's installed-dependents check, as this run's own call did."]
+    end
+    private_class_method :reinstall_command
+
+    # Upgrades the outdated `dependents` of `checked`. As brew does before
+    # installing anything, leaves out those whose bottles the installed
+    # versions of their dependencies already satisfy, and does that again
+    # once the batches are done, for those still outdated.
+    sig {
+      params(dependents: T::Array[Formula], checked: T::Array[Formula], args: Homebrew::CLI::Args,
+             flags: T::Array[String], own: T::Array[String]).returns(Runner::After)
+    }
+    def self.dependents_call(dependents, checked, args:, flags:, own:)
+      installers = if dependents.any?
+        Homebrew::Upgrade.dependent_formula_installers(
+          Homebrew::Upgrade::Dependents.new(upgradeable: dependents, pinned: [], skipped: []), checked,
+          flags: args.flags_only, **installer_options(args)
+        )
+      else
+        []
+      end
+      Runner::After.new(
+        label: "dependents", verb: "upgrade", flags: dependent_flags(flags), noun: "outdated dependent",
+        candidates: installers.map(&:formula), deps: ->(formula) { dependency_names(formula) },
+        choose: lambda do |_installed, _blocked|
+          # Brew installed the batches in other processes.
+          Formula.clear_cache
+          outdated = installers.reject { |installer| installer.formula.latest_version_installed? }
+          outdated.empty? ? [] : Homebrew::Upgrade.filter_dependent_formula_installers(outdated).map(&:formula)
+        end,
+        finish: ->(left) { upgrade_command(left, own:) }
+      )
+    end
+    private_class_method :dependents_call
+
+    # Reinstalls from source, as brew does, the dependents with broken linkage
+    # of the formulae the run installed, each loaded from the tap its receipt
+    # names: all those of formulae built from source or from other taps (brew
+    # checks non-core formulae only), but of the core bottles, whose linkage
+    # brew takes as checked, only those built from source. Leaves out pinned
+    # and outdated ones, as brew does, those the run failed, skipped, didn't
+    # finish or left out (`excluded`), and those that need one of those,
+    # naming them with the command to run.
+    sig { params(flags: T::Array[String], excluded: T::Array[String], own: T::Array[String]).returns(Runner::After) }
+    def self.linkage_call(flags:, excluded:, own:)
+      Runner::After.new(
+        label: "linkage", verb: "reinstall", noun: "broken dependent", candidates: nil,
+        deps: ->(formula) { dependency_names(formula) },
+        flags: ["--build-from-source", *flags.select { |option| LINKAGE_FLAGS.include?(option_name(option)) }],
+        choose: lambda do |installed, blocked|
+          # Brew installed the batches in other processes.
+          Formula.clear_cache
+          loaded = installed.filter_map do |name, how|
+            # As `Formulary.keg_only?` does.
+            [Formulary.from_rack(HOMEBREW_CELLAR/name), how]
+          rescue FormulaUnavailableError, TapFormulaAmbiguityError, Homebrew::UntrustedTapError => e
+            unchecked(name, e, blocked:, excluded:)
+            nil
+          end
+          next [] if loaded.empty?
+
+          poured, all = loaded.partition { |formula, how| formula.core_formula? && how == "poured" }
+                              .map { |formulae| formulae.map(&:first) }
+          oh1 "Checking for dependents of upgraded formulae..."
+          broken = begin
+            broken_dependents(dependents_to_check(all, poured:))
+          rescue Interrupt
+            opoo "The check for broken linkage didn't finish; not all the dependents of " \
+                 "#{(all + poured).map(&:full_name).join(" ")} were checked."
+            raise
+          end
+          ohai "No broken dependents found!" if broken.empty?
+          repairable(broken, blocked:, excluded:, own:)
+        end,
+        finish: ->(left) { reinstall_command(left).join("\n") }
+      )
+    end
+    private_class_method :linkage_call
+
+    # Says that the dependents of the installed formula `name`, which can't be
+    # loaded (`error`), weren't checked for broken linkage, with how to
+    # reinstall those that can be found (by the tap its receipt names), but
+    # not those `fixable` leaves out.
+    sig { params(name: String, error: Exception, blocked: T::Array[String], excluded: T::Array[String]).void }
+    def self.unchecked(name, error, blocked:, excluded:)
+      tab = Keg.from_rack(HOMEBREW_CELLAR/name)&.tab
+      tap = tab&.tap&.name || CoreTap.instance.name
+      dependents = begin
+        Formula.installed.select do |formula|
+          formula.any_installed_keg&.runtime_dependencies&.any? do |dependency|
+            full_name = dependency["full_name"].to_s
+            dependency_tap = full_name.include?("/") ? full_name.rpartition("/").first : CoreTap.instance.name
+            Utils.name_from_full_name(full_name) == name && dependency_tap == tap
+          end
+        end
+      rescue
+        []
+      end
+      ready, others = dependents.partition { |dependent| fixable?(dependent, blocked:, excluded:) }
+      how = if ready.any?
+        "\nTo check them, reinstall them from source:\n  #{reinstall_command(ready.map(&:full_name)).join("\n")}"
+      end
+      if others.any?
+        how = "#{how}\nNot counting #{others.map(&:full_name).join(" ")}, which " \
+              "#{(others.length == 1) ? "is" : "are"} pinned, outdated, left out of the run or " \
+              "#{(others.length == 1) ? "needs" : "need"} what this run didn't install."
+      end
+      opoo "Couldn't check the dependents of #{name} for broken linkage: #{error}#{how}"
+    end
+    private_class_method :unchecked
+
+    # Whether `formula` can be reinstalled from source now: it isn't pinned,
+    # outdated, `excluded` or `blocked` (failed, skipped or not finished), nor
+    # needs one of `blocked`.
+    sig { params(formula: Formula, blocked: T::Array[String], excluded: T::Array[String]).returns(T::Boolean) }
+    def self.fixable?(formula, blocked:, excluded:)
+      !formula.pinned? && !formula.outdated? && (excluded + blocked).exclude?(formula.full_name) &&
+        !dependency_names(formula).intersect?(blocked)
+    end
+    private_class_method :fixable?
+
+    # The installed dependents to check for broken linkage: all those of
+    # `formulae`, and those of `poured` built from source.
+    sig { params(formulae: T::Array[Formula], poured: T::Array[Formula]).returns(T::Array[Formula]) }
+    def self.dependents_to_check(formulae, poured:)
+      built = poured.flat_map(&:runtime_installed_formula_dependents).reject do |dependent|
+        dependent.any_installed_keg&.tab&.poured_from_bottle
+      end
+      (formulae.flat_map(&:runtime_installed_formula_dependents) + built).uniq
+    end
+
+    # Of the `broken` dependents, those to reinstall, dependencies first, as
+    # brew does: not pinned or outdated, as brew does, nor `excluded` or
+    # `blocked` (failed, skipped or not finished), nor needing one of
+    # `blocked`, which a command for them would install as a dependency.
+    # Names the others with how to fix them (`own` as for `after`).
+    sig {
+      params(broken: T::Array[Formula], blocked: T::Array[String], excluded: T::Array[String],
+             own: T::Array[String]).returns(T::Array[Formula])
+    }
+    def self.repairable(broken, blocked:, excluded:, own:)
+      needs = broken.to_h { |formula| [formula, dependency_names(formula) & blocked] }
+      # First, as `brew upgrade` of one, outdated as it is, would pour it.
+      untouched, rest = broken.partition { |formula| blocked.include?(formula.full_name) }
+      waiting, rest = rest.partition { |formula| needs.fetch(formula).any? }
+      pinned, rest = rest.partition(&:pinned?)
+      outdated, rest = rest.partition(&:outdated?)
+      left_out, rest = rest.partition { |formula| excluded.include?(formula.full_name) }
+      names = ->(formulae) { formulae.map(&:full_name).join(" ") }
+      what = lambda do |formulae, kind = nil|
+        count = Utils.pluralize("dependent", formulae.length, include_count: true)
+        "Not reinstalling #{count.sub(" ", " #{kind} ".squeeze(" "))} with broken linkage"
+      end
+      reinstall = ->(formulae) { reinstall_command(formulae.map(&:full_name)).join("\n") }
+      upgrade = ->(formulae) { upgrade_command(formulae.map(&:full_name), own:) }
+      # The commands for `formulae`, each after its heading: the outdated ones
+      # upgraded, as `brew reinstall` would upgrade them, from source. Then
+      # any note, so the commands can be copied as they are.
+      fixes = lambda do |formulae, reinstall_with, upgrade_with|
+        stale, current = formulae.partition(&:outdated?)
+        command, note = reinstall_command(current.map(&:full_name)) if current.any?
+        [("#{reinstall_with}  #{command}" if command), ("#{upgrade_with}  #{upgrade.call(stale)}" if stale.any?),
+         note].compact.join("\n")
+      end
+      if waiting.any?
+        held = waiting.select(&:pinned?)
+        needing = waiting.map { |formula| "#{formula.full_name} (needs #{needs.fetch(formula).join(" ")})" }
+        opoo "#{what.call(waiting)}, as they need what this run didn't install: #{needing.join(", ")}\n" \
+             "#{"Unpin #{names.call(held)} first. " if held.any?}Once that installs, run:\n" \
+             "#{fixes.call(waiting, "", "")}"
+      end
+      if pinned.any?
+        onoe "#{what.call(pinned, "pinned")}: #{names.call(pinned)}\n" \
+             "#{fixes.call(pinned, "Once unpinned, reinstall with:\n",
+                           "Once unpinned, upgrade, which reinstalls, with:\n")}"
+      end
+      if outdated.any?
+        opoo "#{what.call(outdated, "outdated")}: #{names.call(outdated)}\n" \
+             "Upgrade, which reinstalls, with:\n  #{upgrade.call(outdated)}"
+      end
+      if left_out.any?
+        opoo "#{what.call(left_out)} given to `--exclude`: #{names.call(left_out)}\n" \
+             "Reinstall with:\n  #{reinstall.call(left_out)}"
+      end
+      if untouched.any?
+        they = (untouched.length == 1) ? "it installs" : "they install"
+        opoo "#{what.call(untouched)} that this run didn't finish: #{names.call(untouched)}\n" \
+             "Once #{they}, reinstall with:\n  #{reinstall.call(untouched)}"
+      end
+      rest.sort { |one, two| depends_on(one, two) }
+    end
+    private_class_method :repairable
+
+    # Brew's order for the dependents it reinstalls (`Upgrade.depends_on`,
+    # which is private): after those they depend on, otherwise by name.
+    sig { params(one: Formula, two: Formula).returns(Integer) }
+    def self.depends_on(one, two)
+      if one.any_installed_keg
+            &.runtime_dependencies
+            &.any? { |dependency| dependency["full_name"] == two.full_name }
+        return 1
+      end
+
+      comparison = one <=> two
+      raise ArgumentError, "Cannot compare #{one.full_name} with #{two.full_name}" if comparison.nil?
+
+      comparison
+    end
+    private_class_method :depends_on
+
+    # Those of the installed `dependents` with broken library linkage, as
+    # brew finds them after upgrading (`Upgrade.check_broken_dependents`,
+    # which is private).
+    sig { params(dependents: T::Array[Formula]).returns(T::Array[Formula]) }
+    def self.broken_dependents(dependents)
+      CacheStoreDatabase.use(:linkage) do |db|
+        dependents.select do |dependent|
+          keg = dependent.any_installed_keg
+          next false if keg.nil? || !keg.directory?
+
+          # As brew does.
+          cache_db = T.cast(db, CacheStoreDatabase[String, T::Hash[T.any(String, Symbol), T.anything]])
+          LinkageChecker.new(keg, cache_db:).broken_library_linkage?
+        end
+      end
     end
 
     # Runs `brew` with `argv` from the home directory (source builds that
@@ -167,17 +507,19 @@ module Timed
       exec.call({ AUTO_UPDATED_ENV => "1" }, [command, *argv])
     end
 
-    # The full names of the formulae `formula` needs, to run those first:
-    # brew's expansion, which names each by its formula's full name and
+    # The full names of the formulae `formula` needs, to run those first, as
+    # every caller compares them with full names: brew's expansion, which
     # leaves out optional and recommended dependencies the formula isn't
-    # built with, also leaving out those that can't be loaded (and what only
-    # they need).
+    # built with, also leaving out those that can't be loaded, e.g. from a tap
+    # that isn't trusted (and what only they need). It already renames each dependency it keeps to its
+    # formula's full name, whatever name `depends_on` gave it
+    # (`dup_with_formula_name` in `Dependency.expand`).
     sig { params(formula: Formula).returns(T::Array[String]) }
     def self.dependency_names(formula)
       formula.recursive_dependencies do |dependent, dependency|
         dependency.to_formula
         Dependency.action(dependent, dependency)
-      rescue FormulaUnavailableError
+      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
         Dependable::PRUNE
       end.map(&:name)
     end
@@ -269,16 +611,20 @@ module Timed
     end
 
     # Prints the batches with their estimates, why each starts where it does,
-    # and the planner's warnings. Estimates ending in `?` are fallbacks, as in
-    # `brew build-times stats`. With `dependencies_only` (`brew install
-    # --only-dependencies`), each row is the dependencies of a formula, which
-    # have no estimates yet. Without batches, it says so only if the run has no
-    # `casks` (named, planned or `--cask`), whose lists say what it does.
+    # the outdated `dependents` upgraded after them, whether dependents are
+    # then checked for broken `linkage`, and the planner's warnings.
+    # Estimates ending in `?` are fallbacks, as in `brew build-times stats`.
+    # With `dependencies_only` (`brew install --only-dependencies`), each row
+    # is the dependencies of a formula, which have no estimates yet. Without
+    # batches, it says so only if the run has no `casks` (named, planned or
+    # `--cask`), whose lists say what it does.
     sig {
       params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String],
-             dependencies_only: T::Boolean, casks: T::Boolean).void
+             dependencies_only: T::Boolean, casks: T::Boolean, dependents: T::Array[String],
+             linkage: T::Boolean).void
     }
-    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false)
+    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false, dependents: [],
+                       linkage: false)
       result.warnings.each { |warning| opoo warning }
       batches = result.batches
       if batches.empty?
@@ -306,6 +652,11 @@ module Timed
           end
         end
       end
+      if dependents.any?
+        ohai "Then upgrade outdated dependents"
+        puts dependents.join(" ")
+      end
+      ohai "Then check dependents for broken linkage, and reinstall broken ones from source" if linkage
       return if excluded.empty?
 
       ohai "Excluded"
@@ -576,23 +927,89 @@ module Timed
       []
     end
 
-    # The arguments for the `casks` to run after the formulae, as
-    # `cask_arguments` names them for the `named` arguments, leaving out, with
-    # one warning (see `later`), those that need (see `cask_needs`) one of the
-    # `unfinished` formulae (by full name) brew didn't install that isn't
-    # installed and linked into `opt` either: brew's cask installer would
-    # install it for them, without the formula options given for it, e.g.
-    # pour a bottle of a formula whose source build failed. One left installed
-    # (e.g. by a failed upgrade) brew leaves alone. What brew installs for an
-    # unfinished formula (`run_dependencies`, as for `cask_plan`) counts as
-    # unfinished too, as its call may have failed at one of those.
+    # The formulae a `-timed` command runs, to finish them later: `command`,
+    # the `-timed` command with the formula flags its calls were given;
+    # `roots`, the formulae (by full name) it was given that it runs, each
+    # with its argument (the file given, see `path_arguments`, or its name),
+    # so that flags only for those given (e.g. `--build-from-source`) stay
+    # theirs; `needs`, what brew installs or upgrades for each of `roots`, by
+    # full name.
+    class Run < T::Struct
+      const :command, T::Array[String]
+      const :roots, T::Hash[String, String]
+      const :needs, T::Hash[String, T::Array[String]]
+    end
+
+    # Returns what the block, which runs the formulae, returns, given what
+    # `after` returns: the calls after the batches, worked out first. If
+    # Ctrl-C stops either, the `casks` to run after the formulae don't run
+    # either: says so (see `casks_not_run`) and stops too, saying first that
+    # the batches didn't run if it stopped `after`.
     sig {
-      params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
-             unfinished: T::Array[String], run_dependencies: T::Hash[String, T::Array[String]])
-        .returns(T::Array[String])
+      type_parameters(:U).params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
+                                 flags: T::Array[String], run: Run,
+                                 after: T.proc.returns(T.nilable(T::Array[Runner::After])),
+                                 _block: T.proc.params(after: T.nilable(T::Array[Runner::After]))
+                                          .returns(T.type_parameter(:U)))
+                         .returns(T.type_parameter(:U))
     }
-    def self.last_casks(verb, casks, named:, flags:, unfinished:, run_dependencies: {})
-      unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
+    def self.before_last_casks(verb, casks, named:, flags:, run:, after: -> {}, &_block)
+      calls = begin
+        after.call
+      rescue Interrupt
+        opoo "Interrupted, so the batches didn't run."
+        raise
+      end
+      yield calls
+    rescue Interrupt
+      casks_not_run("Interrupted", verb, casks, named:, flags:, run:) if casks.any?
+      raise
+    end
+
+    # Says that the `casks` to run after the formulae didn't run, and why
+    # (`reason`), naming them as `cask_arguments` does for the `named`
+    # arguments, with how to run them later (see `later`), but those that
+    # need a formula of the `run` that isn't installed (see `blocked_casks`)
+    # with how to finish that first (see `finish_first`).
+    sig {
+      params(reason: String, verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
+             flags: T::Array[String], run: Run).void
+    }
+    def self.casks_not_run(reason, verb, casks, named:, flags:, run:)
+      message = "#{reason}, so the #{Utils.pluralize("cask", casks.length)} to #{verb} after the formulae " \
+                "didn't run: #{cask_arguments(named, casks).join(" ")}"
+      blocked = blocked_casks(casks, run.roots.keys | run.needs.values.flatten)
+      if blocked.empty?
+        opoo "#{message}\n#{later(verb, casks, named:, flags:)}"
+        return
+      end
+
+      one = blocked.length == 1
+      ready = casks - blocked.keys
+      lines = [
+        message,
+        "#{Utils.pluralize("cask", blocked.length, include_count: true)} #{one ? "needs" : "need"} formulae of " \
+        "this run that aren't installed, which brew would\n" \
+        "install for #{one ? "it" : "them"}, but not as this run would:",
+        *finish_first(verb, blocked, named:, flags:, run:),
+      ]
+      if ready.any?
+        lines << "#{verb.capitalize} the #{(ready.length == 1) ? "other" : "others"} later with " \
+                 "`#{cask_command(verb, ready, named:, flags:)}`."
+      end
+      opoo lines.join("\n")
+    end
+
+    # Of `casks`, those that need (see `cask_needs`) one of the formulae
+    # `candidates` (by full name) that isn't installed and linked into
+    # `opt`, with those formulae: brew's cask installer would install them
+    # for the cask, without the formula options given for them. One that is
+    # installed, even an old version, brew leaves alone.
+    sig {
+      params(casks: T::Array[Cask::Cask], candidates: T::Array[String])
+        .returns(T::Hash[Cask::Cask, T::Array[String]])
+    }
+    def self.blocked_casks(casks, candidates)
       # Loaded by full name, so another tap's formula of the same name isn't.
       missing = lambda do |name|
         formula = Formulary.factory(name)
@@ -602,27 +1019,79 @@ module Timed
       end
       needs = casks.to_h do |cask|
         # Brew installs formula dependencies even with `--skip-cask-deps`.
-        [cask, cask_needs(cask).formulae_among(unfinished).select { |name| missing.call(name) }]
+        [cask, cask_needs(cask).formulae_among(candidates).select { |name| missing.call(name) }]
       end
-      blocked = needs.select { |_, needed| needed.any? }
+      needs.select { |_, needed| needed.any? }
+    end
+    private_class_method :blocked_casks
+
+    # Names what each of the `blocked` casks needs (see `blocked_casks`),
+    # then how to finish that first: the `run`'s command for the formulae
+    # given to it that bring those in, then the casks' own command. With no
+    # such formula (e.g. an outdated dependency of one given to `--exclude`),
+    # only the casks' command, for once those are installed.
+    sig {
+      params(verb: String, blocked: T::Hash[Cask::Cask, T::Array[String]], named: T::Array[String],
+             flags: T::Array[String], run: Run).returns(T::Array[String])
+    }
+    def self.finish_first(verb, blocked, named:, flags:, run:)
+      missing = blocked.values.flatten
+      roots = run.roots.select { |name, _| [name, *run.needs.fetch(name, [])].intersect?(missing) }.values
+      casks = "#{verb} #{(blocked.length == 1) ? "it" : "them"} with " \
+              "`#{cask_command(verb, blocked.keys, named:, flags:)}`."
+      [
+        *blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" },
+        if roots.any?
+          "Finish those first with `#{shell_command(["brew", *run.command, *roots])}`, then #{casks}"
+        else
+          "Once those are installed, #{casks}"
+        end,
+      ]
+    end
+    private_class_method :finish_first
+
+    # The arguments for the `casks` to run after the formulae, as
+    # `cask_arguments` names them for the `named` arguments, leaving out, with
+    # one warning (see `finish_first`), those that need one of the
+    # `unfinished` formulae (by full name) brew didn't install that isn't
+    # installed either (see `blocked_casks`), e.g. a formula whose source
+    # build failed, which brew's cask installer would pour. What brew
+    # installs for an unfinished formula (`run_dependencies`, as for
+    # `cask_plan`) counts as unfinished too, as its call may have failed at
+    # one of those.
+    sig {
+      params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
+             unfinished: T::Array[String], run: Run, run_dependencies: T::Hash[String, T::Array[String]])
+        .returns(T::Array[String])
+    }
+    def self.last_casks(verb, casks, named:, flags:, unfinished:, run:, run_dependencies: {})
+      unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
+      blocked = blocked_casks(casks, unfinished)
       if blocked.any?
         opoo <<~EOS
           Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
-          #{blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" }.join("\n")}
-          #{later(verb, blocked.keys, named:, flags:)}
+          #{finish_first(verb, blocked, named:, flags:, run:).join("\n")}
         EOS
       end
       cask_arguments(named, casks - blocked.keys)
     end
 
-    # How to run `casks` later, with the cask `flags` their call was given,
-    # naming each as `cask_arguments` does for the `named` arguments, each
-    # argument escaped for the shell.
+    # How to run `casks` later, with the cask `flags` their call was given
+    # (see `cask_command`).
     sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
     def self.later(verb, casks, named:, flags:)
-      command = Shellwords.join(["brew", verb, "--cask", *flags, *cask_arguments(named, casks)])
-      "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with `#{command}`."
+      "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with " \
+        "`#{cask_command(verb, casks, named:, flags:)}`."
     end
+
+    # The command that runs `casks` with the cask `flags` their call was
+    # given, naming each as `cask_arguments` does for the `named` arguments,
+    # each argument escaped for the shell.
+    sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
+    def self.cask_command(verb, casks, named:, flags:)
+      shell_command(["brew", verb, "--cask", *flags, *cask_arguments(named, casks)])
+    end
+    private_class_method :cask_command
 
     # The argument that names each of `casks` in a sub-call: the file it was
     # loaded from if `names` gave it as a path, as `named_argv` makes it,
