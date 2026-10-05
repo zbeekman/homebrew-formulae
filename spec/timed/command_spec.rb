@@ -813,6 +813,16 @@ RSpec.describe Timed::Command do
           .to eq("brew upgrade-timed --no-stamp-receipts user")
       end
 
+      it "keeps in `--exclude` one it can no longer load, e.g. from a tap untrusted during the run" do
+        stub_formula("user", "1.0")
+        allow(Formulary).to receive(:factory).and_call_original
+        allow(Formulary).to receive(:factory).with("user/tap/evil")
+                                             .and_raise(Homebrew::UntrustedTapError, "untrusted")
+        own = %w[--exclude=user/tap/evil,user]
+        expect(after(excluded: %w[user/tap/evil user], own:).fetch(0).finish.call(%w[user]))
+          .to eq("brew upgrade-timed --exclude=user/tap/evil user")
+      end
+
       it "doesn't ask brew's bottle check about no dependents" do
         expect(Homebrew::Upgrade).not_to receive(:dependent_formula_installers)
         expect(Homebrew::Upgrade).not_to receive(:filter_dependent_formula_installers)
@@ -854,8 +864,9 @@ RSpec.describe Timed::Command do
           .to_stdout
       end
 
-      it "names a formula it can't load, with how to reinstall its dependents from the tap its receipt names, " \
-         "where it finds them and can, and checks the rest", :aggregate_failures do
+      it "names a formula it can't load, e.g. in several taps or from a tap that isn't trusted, with how to " \
+         "reinstall its dependents from the tap its receipt names, where it finds them and can, and checks the rest",
+         :aggregate_failures do
         tapped = stub_formula("tapped", "2.0", tap: Tap.fetch("user", "tap"))
         stub_formula("twice", "1.0", tap: Tap.fetch("user", "a"))
         needing = ->(full_name) { instance_double(Keg, runtime_dependencies: [{ "full_name" => full_name }]) }
@@ -868,10 +879,10 @@ RSpec.describe Timed::Command do
         allow(dependents.fetch("held")).to receive(:pinned?).and_return(true)
         allow(Formula).to receive(:installed).and_return([*dependents.values, tapped])
         allow(Formulary).to receive(:from_rack).and_call_original
-        %w[twice gone].each do |name|
-          allow(Formulary).to receive(:from_rack).with(HOMEBREW_CELLAR/name)
-                                                 .and_raise(TapFormulaAmbiguityError.new(name, []))
-        end
+        allow(Formulary).to receive(:from_rack).with(HOMEBREW_CELLAR/"twice")
+                                               .and_raise(TapFormulaAmbiguityError.new("twice", []))
+        allow(Formulary).to receive(:from_rack).with(HOMEBREW_CELLAR/"gone")
+                                               .and_raise(Homebrew::UntrustedTapError, "untrusted")
         expect(described_class).to receive(:dependents_to_check)
           .with([having_attributes(full_name: "user/tap/tapped")], poured: []).and_return([])
         allow(described_class).to receive(:broken_dependents).and_return([])
@@ -1014,6 +1025,18 @@ RSpec.describe Timed::Command do
       stub_formula_loader(lib)
       stub_formula_loader(lib, "lib")
       expect(described_class.dependency_names(app)).to eq(%w[user/tap/lib])
+    end
+
+    it "leaves out a dependency it can't load from a tap that isn't trusted, as one that can't be found" do
+      app = formula("app") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/app-1.0.tgz"
+        depends_on "user/tap/evil"
+      end
+      allow(Formulary).to receive(:factory).and_call_original
+      allow(Formulary).to receive(:factory).with("user/tap/evil", warn: false)
+                                           .and_raise(Homebrew::UntrustedTapError, "untrusted")
+      expect(described_class.dependency_names(app)).to eq([])
     end
   end
 

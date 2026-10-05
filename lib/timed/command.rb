@@ -187,7 +187,7 @@ module Timed
 
         kept = option.delete_prefix("--exclude=").split(",").reject do |name|
           names.include?(Formulary.factory(name).full_name)
-        rescue FormulaUnavailableError, TapFormulaAmbiguityError
+        rescue FormulaUnavailableError, TapFormulaAmbiguityError, Homebrew::UntrustedTapError
           false
         end
         "--exclude=#{kept.join(",")}" if kept.any?
@@ -270,7 +270,7 @@ module Timed
           loaded = installed.filter_map do |name, how|
             # As `Formulary.keg_only?` does.
             [Formulary.from_rack(HOMEBREW_CELLAR/name), how]
-          rescue FormulaUnavailableError, TapFormulaAmbiguityError => e
+          rescue FormulaUnavailableError, TapFormulaAmbiguityError, Homebrew::UntrustedTapError => e
             unchecked(name, e, blocked:, excluded:)
             nil
           end
@@ -510,8 +510,8 @@ module Timed
     # The full names of the formulae `formula` needs, to run those first, as
     # every caller compares them with full names: brew's expansion, which
     # leaves out optional and recommended dependencies the formula isn't
-    # built with, also leaving out those that can't be loaded (and what only
-    # they need). It already renames each dependency it keeps to its
+    # built with, also leaving out those that can't be loaded, e.g. from a tap
+    # that isn't trusted (and what only they need). It already renames each dependency it keeps to its
     # formula's full name, whatever name `depends_on` gave it
     # (`dup_with_formula_name` in `Dependency.expand`).
     sig { params(formula: Formula).returns(T::Array[String]) }
@@ -519,7 +519,7 @@ module Timed
       formula.recursive_dependencies do |dependent, dependency|
         dependency.to_formula
         Dependency.action(dependent, dependency)
-      rescue FormulaUnavailableError
+      rescue FormulaUnavailableError, Homebrew::UntrustedTapError
         Dependable::PRUNE
       end.map(&:name)
     end
