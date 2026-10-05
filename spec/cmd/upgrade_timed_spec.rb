@@ -231,7 +231,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         ==> Batch 1 of 2: 3m35s
         lib                          pour     0m15s?
         cmake                        build     3m20s
-        ==> Batch 2 of 2: 50m00s, slow app needs slow cmake
+        ==> Batch 2 of 2: 50m00s, app needs cmake
         app                          build   50m00s?
         ==> Then check dependents for broken linkage, and reinstall broken ones from source
       EOS
@@ -255,7 +255,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         ==> Would upgrade 3 formulae in 3 batches, estimated 2h16m
         ==> Batch 1 of 3: 3m20s
         cmake                        build     3m20s
-        ==> Batch 2 of 3: 1h23m, slow keg-only llvm
+        ==> Batch 2 of 3: 1h23m, keg-only llvm
         llvm                         build     1h23m
         ==> Batch 3 of 3 (--last): 50m00s
         gcc                          build    50m00s

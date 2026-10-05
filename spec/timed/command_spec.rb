@@ -1373,7 +1373,7 @@ RSpec.describe Timed::Command do
 
     it "marks `--last` batches, gives split reasons and lists `--exclude`d formulae" do
       result = Timed::Planner::Result.new(batches:  [batch("main", nil, "a"), batch("last", "--last", "b"),
-                                                     batch("last", "slow c needs slow b", "c")],
+                                                     batch("last", "c needs b", "c")],
                                           warnings: [])
       expect { described_class.show_plan("upgrade", result, estimates, excluded: %w[x y]) }
         .to output(<<~EOS).to_stdout
@@ -1382,7 +1382,7 @@ RSpec.describe Timed::Command do
           a                            build     0m10s
           ==> Batch 2 of 3 (--last): 1m40s
           b                            build     1m40s
-          ==> Batch 3 of 3 (--last): 3m20s, slow c needs slow b
+          ==> Batch 3 of 3 (--last): 3m20s, c needs b
           c                            build     3m20s
           ==> Excluded
           x y

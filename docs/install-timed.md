@@ -268,12 +268,14 @@ then
 (unless `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set). Then come the casks
 to install first, and those to install last, each with why.
 
-A new batch starts:
+A new batch starts only:
 
 - before a formula estimated over 75 seconds that needs one estimated over 75
   seconds in the same batch (so a failed dependency never leaves its dependent
-  built against the old version);
-- before the formulae given to `--last` and their dependents.
+  built against the old version), shown as *`formula`* `needs`
+  *`dependency`*;
+- before the formulae given to `--last` and their dependents, whose batches'
+  headings are marked `(--last)`.
 
 Keg-only formulae keep their place: only `brew upgrade` moves them first.
 

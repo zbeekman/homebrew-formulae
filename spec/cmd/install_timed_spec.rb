@@ -220,7 +220,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
           ==> Would install 2 formulae in 2 batches, estimated 1h50m
           ==> Batch 1 of 2 (--last): 1h00m
           lib                          build    1h00m*
-          ==> Batch 2 of 2 (--last): 50m00s, slow app needs slow lib
+          ==> Batch 2 of 2 (--last): 50m00s, app needs lib
           app                          build   50m00s?
           ==> Then check dependents for broken linkage, and reinstall broken ones from source
         EOS
@@ -324,7 +324,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         ==> Would install 2 formulae in 2 batches, estimated 1h26m
         ==> Batch 1 of 2: 3m20s
         cmake                        build     3m20s
-        ==> Batch 2 of 2: 1h23m, slow llvm needs slow cmake
+        ==> Batch 2 of 2: 1h23m, llvm needs cmake
         llvm                         build     1h23m
         ==> Then check dependents for broken linkage, and reinstall broken ones from source
         ==> Excluded

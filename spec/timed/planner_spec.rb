@@ -119,7 +119,7 @@ RSpec.describe Timed::Planner do
       deps = { "a" => %w[b], "b" => %w[a], "c" => %w[a] }
       planned = result(%w[a b c], { "a" => 500, "b" => 600, "c" => 100 }, deps:).batches
       expect(planned.map { |b| [b.reason, b.names] }).to eq(
-        [[nil, %w[a]], ["slow b needs slow a", %w[b]], ["slow c needs slow b", %w[c]]],
+        [[nil, %w[a]], ["b needs a", %w[b]], ["c needs b", %w[c]]],
       )
     end
 
@@ -156,7 +156,7 @@ RSpec.describe Timed::Planner do
     it "applies the slow-dependent split to a cycle" do
       deps = { "a" => %w[b], "b" => %w[a] }
       planned = result(%w[a b], { "a" => 100, "b" => 200 }, deps:).batches
-      expect(planned.map(&:reason)).to eq([nil, "slow b needs slow a"])
+      expect(planned.map(&:reason)).to eq([nil, "b needs a"])
     end
 
     it "moves a whole cycle to the last batch when one member is --last" do
@@ -203,7 +203,7 @@ RSpec.describe Timed::Planner do
 
     it "labels the split with its reason" do
       planned = result(%w[quick llvm], estimates, keg_only: %w[llvm]).batches
-      expect(planned.map(&:reason)).to eq([nil, "slow keg-only llvm"])
+      expect(planned.map(&:reason)).to eq([nil, "keg-only llvm"])
     end
 
     it "does not split for a keg-only formula at the front" do
@@ -268,7 +268,7 @@ RSpec.describe Timed::Planner do
 
     it "labels the split with its reason" do
       planned = result(%w[llvm flang], estimates, deps:).batches
-      expect(planned.map(&:reason)).to eq([nil, "slow flang needs slow llvm"])
+      expect(planned.map(&:reason)).to eq([nil, "flang needs llvm"])
     end
 
     it "keeps a fast dependent in the same batch" do
@@ -380,7 +380,7 @@ RSpec.describe Timed::Planner do
       estimates = { "a" => 10, "llvm" => 3000 }
       planned = result(%w[a llvm], estimates, keg_only: %w[llvm], last: %w[a llvm]).batches
       expect(planned.map { |b| [b.label, b.reason, b.names] }).to eq(
-        [["last", "--last", %w[a]], ["last", "slow keg-only llvm", %w[llvm]]],
+        [["last", "--last", %w[a]], ["last", "keg-only llvm", %w[llvm]]],
       )
     end
 
@@ -389,7 +389,7 @@ RSpec.describe Timed::Planner do
       deps = { "flang" => %w[llvm] }
       planned = result(%w[llvm flang quick], estimates, deps:, last: %w[llvm]).batches
       expect(planned.map { |b| [b.label, b.reason, b.names] }).to eq(
-        [["main", nil, %w[quick]], ["last", "--last", %w[llvm]], ["last", "slow flang needs slow llvm", %w[flang]]],
+        [["main", nil, %w[quick]], ["last", "--last", %w[llvm]], ["last", "flang needs llvm", %w[flang]]],
       )
     end
   end

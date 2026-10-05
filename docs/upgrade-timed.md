@@ -291,14 +291,17 @@ follow, under `Then upgrade outdated dependents`, then
 (unless `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set). Then come the casks
 to upgrade first, and those to upgrade last, each with why.
 
-A new batch starts:
+A new batch starts only:
 
 - before a keg-only formula estimated over 75 seconds that follows formulae
-  that are not keg-only (`brew upgrade` upgrades keg-only formulae first);
+  that are not keg-only (`brew upgrade` upgrades keg-only formulae first),
+  shown as `keg-only` *`formula`*;
 - before a formula estimated over 75 seconds that needs one estimated over 75
   seconds in the same batch (so a failed dependency never leaves its dependent
-  built against the old version);
-- before the formulae given to `--last` and their dependents.
+  built against the old version), shown as *`formula`* `needs`
+  *`dependency`*;
+- before the formulae given to `--last` and their dependents, whose batches'
+  headings are marked `(--last)`.
 
 ## Options
 
