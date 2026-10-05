@@ -5,6 +5,11 @@ on:
     branches:
       - main
   pull_request:
+  # Daily on `main`, so the canaries catch Homebrew changes that break the
+  # commands: `setup-homebrew` checks out Homebrew's latest `main` each run.
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
 
 permissions: {}
 
@@ -73,3 +78,96 @@ jobs:
       # Static Sorbet check of the tap's `cmd/`, `lib/` and `spec/`. Keep in
       # step with `script/typecheck`, the same check for a worktree.
       - run: brew typecheck zbeekman/tap
+
+  # The commands for real, on a throwaway runner: a small formula with no
+  # dependencies, built from source, needing no terminal or sudo. Needs
+  # nothing from `specs`, so runs alongside it on every platform.
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-26, macos-15-intel ]
+        include:
+          - os: ubuntu-latest
+            container:
+              image: ghcr.io/homebrew/brew:main
+          - os: ubuntu-24.04-arm
+            container:
+              image: ghcr.io/homebrew/brew:main
+    runs-on: ${{ matrix.os }}
+    # arm64 Linux is experimental here.
+    continue-on-error: ${{ matrix.os == 'ubuntu-24.04-arm' }}
+    container: ${{ fromJSON(toJSON(matrix.container)) }} # zizmor: ignore[unpinned-images]
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_ENV_HINTS: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@e99025eb970cfa124b8284a35463d87426917478 # 2026.09.28.1
+
+      # The build log in `$HOMEBREW_USER_CONFIG_HOME`, as the commands read
+      # it, and the receipt through the formula's `opt` link.
+      # `$HOMEBREW_DEVELOPER` stops `brew ruby`, a developer command, turning
+      # developer mode on for the rest of the job.
+      - name: Find the build log and receipt
+        env:
+          HOMEBREW_DEVELOPER: 1
+        run: |
+          config_home="$(brew ruby -e 'puts ENV.fetch("HOMEBREW_USER_CONFIG_HOME")')"
+          echo "BUILD_LOG=${config_home}/build-log.json" >>"${GITHUB_ENV}"
+          echo "RECEIPT=$(brew --prefix hello)/INSTALL_RECEIPT.json" >>"${GITHUB_ENV}"
+
+      - run: brew install-timed --yes --build-from-source hello
+
+      # Logged and stamped as a source build, and brew still reads the receipt.
+      - name: Check the install
+        run: |
+          jq -e '[.packages.hello.builds[] | [.verb, .status]] == [["install", "built"]]' "${BUILD_LOG}"
+          jq -e '.build_times.verb == "install" and .build_times.install_seconds > 0' "${RECEIPT}"
+          brew info --json=v2 hello |
+            jq -e '.formulae[0].installed[0] | .installed_on_request and .poured_from_bottle == false'
+
+      - run: brew build-times stats hello
+
+      - run: brew upgrade-timed --dry-run hello
+
+      - run: brew reinstall-timed --yes hello
+
+      - name: Check the reinstall
+        run: |
+          jq -e '[.packages.hello.builds[].verb] == ["install", "reinstall"]' "${BUILD_LOG}"
+          jq -e '.build_times.verb == "reinstall"' "${RECEIPT}"
+          brew info --json=v2 hello | jq -e '.formulae[0].installed[0].installed_on_request'
+
+  # A failed scheduled or manual run on `main` opens an issue, or comments on
+  # the open one; the failed job still fails the run, so GitHub's failure
+  # email goes out too. A failed `continue-on-error` job reads as `success`
+  # here, so the experimental platform alone opens no issue.
+  report:
+    needs: [ specs, typecheck, e2e ]
+    if: >
+      failure() &&
+      github.ref == 'refs/heads/main' &&
+      contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event_name)
+    runs-on: ubuntu-slim
+    permissions:
+      issues: write # to open or comment on the issue
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Specs fail against the latest Homebrew"
+          body="The \`${GITHUB_EVENT_NAME}\` run of \`specs.yml\` on \`main\` failed: ${RUN_URL}"
+          number="$(gh issue list --state open --limit 1000 --json number,title \
+            --jq "first(.[] | select(.title == \"${title}\")) | .number")"
+          if [[ -n "${number}" ]]; then
+            gh issue comment "${number}" --body "${body}"
+          else
+            gh issue create --title "${title}" --body "${body}"
+          fi
