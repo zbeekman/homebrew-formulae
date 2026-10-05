@@ -7,6 +7,7 @@
 # rubocop:disable Sorbet/BlockMethodDefinition
 
 require "cmd/upgrade"
+require "linkage_checker"
 require_relative "../../lib/timed/command"
 require_relative "../support/casks"
 
@@ -49,6 +50,16 @@ RSpec.describe Timed::Command do
       forwarded = described_class.forward(%w[--no-binaries --no-quit], conflicts:)
       expect(forwarded.formula).to eq([])
       expect(forwarded.cask).to eq(%w[--no-binaries --no-quit])
+    end
+
+    it "keeps for the `-timed` commands it suggests `--exclude`, a file given to it made absolute, and " \
+       "`--no-stamp-receipts`, but not the ask flags or those that only shape the plan" do
+      dir = mktmpdir
+      FileUtils.touch dir/"lib.rb"
+      options = %w[--debug --yes --no-ask --dry-run --guess=llvm=1h --estimator=median --last=llvm
+                   --exclude=go,lib.rb --no-stamp-receipts]
+      forwarded = Dir.chdir(dir) { described_class.forward(options, conflicts:) }
+      expect(forwarded.own).to eq(["--exclude=go,#{(dir/"lib.rb").realpath}", "--no-stamp-receipts"])
     end
   end
 
@@ -236,6 +247,12 @@ RSpec.describe Timed::Command do
       end
     end
 
+    # A run of `install-timed --build-from-source`, given `roots` (by full
+    # name, with their arguments), which bring in `needs`.
+    def timed_run(roots = {}, needs = {})
+      Timed::Command::Run.new(command: %w[install-timed --build-from-source], roots:, needs:)
+    end
+
     # Formulae lib and app, which needs lib, at 1.0, loadable by name; lib
     # installed, with a receipt, and linked into `opt` if `installed_lib`.
     def stub_lib_and_app(installed_lib: false)
@@ -365,7 +382,8 @@ RSpec.describe Timed::Command do
         stub_two_foos
         casks = [stub_cask("tap-app", nil, stanzas: 'depends_on formula: "user/tap/foo"')]
         kept = [%w[foo], %w[user/tap/foo]].to_h do |unfinished|
-          [unfinished, described_class.last_casks("install", casks, named: [], flags: [], unfinished:)]
+          kept_casks = described_class.last_casks("install", casks, named: [], flags: [], unfinished:, run: timed_run)
+          [unfinished, kept_casks]
         end
         expect(kept).to eq(%w[foo] => %w[tap-app], %w[user/tap/foo] => [])
       end
@@ -380,8 +398,9 @@ RSpec.describe Timed::Command do
                                                                 tty: -> { true })
         expect(result.last.map { |entry| entry.reasons.map(&:message) })
           .to eq([["depends on `xz`, which is in this run"]])
-        expect { described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[xz]) }
-          .to output(/^xz-app: needs xz$/).to_stderr
+        expect do
+          described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[xz], run: timed_run)
+        end.to output(/^xz-app: needs xz$/).to_stderr
       end
 
       it "puts a cask last when it needs a formula brew installs for one in the run, saying for which" do
@@ -421,7 +440,7 @@ RSpec.describe Timed::Command do
         cask = stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
         expect do
           described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[app],
-                                                        run_dependencies: { "app" => %w[lib] })
+                                                        run_dependencies: { "app" => %w[lib] }, run: timed_run)
         end.to output(/^lib-app: needs lib$/).to_stderr
       end
 
@@ -545,58 +564,160 @@ RSpec.describe Timed::Command do
     describe ".last_casks" do
       it "leaves out, with one warning, the casks that need a formula brew didn't install and isn't installed, " \
          "directly, through their formulae or through other casks, as brew would install it for them without " \
-         "the options given for it", :aggregate_failures do
+         "the options given for it, with the run's command to finish that first", :aggregate_failures do
         stub_lib_and_app
         stub_cask("dep-app", nil, stanzas: 'depends_on formula: "lib"')
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"'),
                  stub_cask("through-app", nil, stanzas: 'depends_on formula: "app"'),
                  stub_cask("via-cask", nil, stanzas: 'depends_on cask: "dep-app"'), stub_cask("free-app", nil)]
+        run = timed_run({ "lib" => "lib", "other" => "other" }, { "lib" => [], "other" => [] })
         kept = T.let(nil, T.nilable(T::Array[String]))
         expect do
-          kept = described_class.last_casks("install", casks, named: [], flags: %w[--force], unfinished: %w[lib])
+          kept = described_class.last_casks("install", casks, named: [], flags: %w[--force], unfinished: %w[lib],
+                                                              run:)
         end.to output(<<~EOS).to_stderr
           Warning: Not installing 3 casks, which need formulae that didn't install and aren't installed:
           direct-app: needs lib
           through-app: needs lib
           via-cask: needs lib
-          Install them later with `brew install --cask --force direct-app through-app via-cask`.
+          Finish those first with `brew install-timed --build-from-source lib`, then install them with `brew install --cask --force direct-app through-app via-cask`.
         EOS
         expect(kept).to eq(%w[free-app])
+      end
+
+      it "names no command for what a cask needs when no formula given to the run brings it in" do
+        stub_lib_and_app
+        casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
+        expect do
+          described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib], run: timed_run)
+        end.to output(<<~EOS).to_stderr
+          Warning: Not upgrading 1 cask, which needs formulae that didn't upgrade and aren't installed:
+          direct-app: needs lib
+          Once those are installed, upgrade it with `brew upgrade --cask direct-app`.
+        EOS
       end
 
       it "keeps a cask that needs a formula brew didn't upgrade but left installed, as brew won't touch it" do
         stub_lib_and_app(installed_lib: true)
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
-        expect { described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib]) }
-          .not_to output.to_stderr
+        expect do
+          described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib], run: timed_run)
+        end.not_to output.to_stderr
       end
 
       it "takes a formula it can't load, e.g. from a tap that isn't trusted, as needed by name only" do
         allow(Formulary).to receive(:factory).and_call_original
         allow(Formulary).to receive(:factory).with("user/tap/evil").and_raise(Homebrew::UntrustedTapError, "no")
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "user/tap/evil"')]
-        expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: []))
+        expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: [], run: timed_run))
           .to eq(%w[direct-app])
       end
 
       it "doesn't take a cask it can't load as a formula of the same name that didn't install" do
         casks = [stub_cask("gone-dep-app", nil, stanzas: 'depends_on cask: "gone/tap/foo"')]
-        expect { described_class.last_casks("install", casks, named: [], flags: [], unfinished: %w[foo]) }
-          .not_to output.to_stderr
+        expect do
+          described_class.last_casks("install", casks, named: [], flags: [], unfinished: %w[foo], run: timed_run)
+        end.not_to output.to_stderr
       end
     end
 
     describe ".later" do
-      it "shell-escapes every argument of the command, e.g. a path or flag value with a space" do
+      it "shell-escapes every argument of the command, e.g. a path or flag value with a space, but not an " \
+         "option's `=`, which needs none" do
         dir = mktmpdir/"My Casks"
         dir.mkpath
         (dir/"foo.rb").write(cask_source("foo", "2.0"))
         Dir.chdir(dir) do
           casks = [Cask::CaskLoader.load("foo.rb")]
           command = described_class.later("install", casks, named: %w[foo.rb], flags: ["--appdir=/My Apps"])
-          expect(command).to eq("Install it later with `brew install --cask --appdir\\=/My\\ Apps " \
+          expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps " \
                                 "#{(dir/"foo.rb").realpath.to_s.gsub(" ", "\\ ")}`.")
         end
+      end
+    end
+
+    describe ".before_last_casks" do
+      let(:run) { Timed::Command::Run.new(command: %w[install-timed], roots: { "app" => "app" }, needs: {}) }
+
+      it "returns what running the formulae, given the calls after them, returns" do
+        casks = [stub_cask("iterm2", nil)]
+        calls = [instance_double(Timed::Runner::After)]
+        returned = described_class.before_last_casks("upgrade", casks, named: [], flags: [], run:,
+                                                                      after: -> { calls }) do |after|
+          [after, :outcome]
+        end
+        expect(returned).to eq([calls, :outcome])
+      end
+
+      it "names the casks to run after the formulae, with how to run them later, when Ctrl-C stops the formulae, " \
+         "and stops too" do
+        casks = [stub_cask("iterm2", nil), stub_cask("firefox", nil)]
+        expect do
+          described_class.before_last_casks("install", casks, named: [], flags: %w[--force], run:) { raise Interrupt }
+        end.to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Interrupted, so the casks to install after the formulae didn't run: iterm2 firefox
+          Install them later with `brew install --cask --force iterm2 firefox`.
+        EOS
+      end
+
+      it "says the batches didn't run when Ctrl-C stops working out the calls after them, before the batches" do
+        interrupt = -> { raise Interrupt }
+        expect do
+          described_class.before_last_casks("install", [], named: [], flags: [], run:, after: interrupt) do
+            raise "the batches ran"
+          end
+        end.to raise_error(Interrupt).and output("Warning: Interrupted, so the batches didn't run.\n").to_stderr
+      end
+
+      it "says nothing more on Ctrl-C without such casks" do
+        expect do
+          described_class.before_last_casks("install", [], named: [], flags: [], run:) { raise Interrupt }
+        end.to raise_error(Interrupt).and not_to_output.to_stderr
+      end
+    end
+
+    describe ".casks_not_run" do
+      it "names a cask's formulae of the run that aren't installed, with the run's command for the formulae that " \
+         "bring them in, to run first, as brew's cask installer would install them otherwise, and the other casks " \
+         "with the plain command" do
+        stub_lib_and_app
+        casks = [stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"'), stub_cask("free-app", nil)]
+        run = Timed::Command::Run.new(command: %w[install-timed --build-from-source],
+                                      roots:   { "app" => "/My Formulae/app.rb", "other" => "other" },
+                                      needs:   { "app" => %w[lib], "other" => [] })
+        expect do
+          described_class.casks_not_run("Interrupted", "install", casks, named: [], flags: %w[--force], run:)
+        end.to output(<<~EOS).to_stderr
+          Warning: Interrupted, so the casks to install after the formulae didn't run: lib-app free-app
+          1 cask needs formulae of this run that aren't installed, which brew would
+          install for it, but not as this run would:
+          lib-app: needs lib
+          Finish those first with `brew install-timed --build-from-source /My\\ Formulae/app.rb`, then install it with `brew install --cask --force lib-app`.
+          Install the other later with `brew install --cask --force free-app`.
+        EOS
+      end
+
+      it "escapes an argument with `=` that isn't an option whole, leaving only an option's `=` as it is" do
+        stub_lib_and_app
+        casks = [stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')]
+        run = Timed::Command::Run.new(command: %w[install-timed --exclude=x], roots: { "app" => "/f/a=b.rb" },
+                                      needs: { "app" => %w[lib] })
+        expect do
+          described_class.casks_not_run("Interrupted", "install", casks, named: [], flags: [], run:)
+        end.to output(%r{^Finish those first with `brew install-timed --exclude=x /f/a\\=b\.rb`, }).to_stderr
+      end
+
+      it "gives the plain command for a cask whose formulae of the run are installed and linked into `opt`" do
+        stub_lib_and_app(installed_lib: true)
+        casks = [stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')]
+        run = Timed::Command::Run.new(command: %w[upgrade-timed], roots: { "app" => "app" },
+                                      needs: { "app" => %w[lib] })
+        expect do
+          described_class.casks_not_run("`brew upgrade` stopped early", "upgrade", casks, named: [], flags: [], run:)
+        end.to output(<<~EOS).to_stderr
+          Warning: `brew upgrade` stopped early, so the cask to upgrade after the formulae didn't run: lib-app
+          Upgrade it later with `brew upgrade --cask lib-app`.
+        EOS
       end
     end
 
@@ -611,6 +732,311 @@ RSpec.describe Timed::Command do
             .to eq([(dir/"foo.rb").realpath.to_s, "user/tap/bar"])
         end
       end
+    end
+  end
+
+  describe ".dependent_flags" do
+    it "keeps the forwarded formula flags brew gives the outdated dependents it upgrades, which `brew upgrade` " \
+       "takes" do
+      options = %w[--verbose --force --build-from-source --keep-tmp --debug-symbols --force-bottle --overwrite
+                   --display-times --fetch-HEAD --quiet --debug --as-dependency --cc=clang --with-foo]
+      expect(described_class.dependent_flags(options))
+        .to eq(%w[--verbose --force --keep-tmp --force-bottle --quiet --debug])
+    end
+  end
+
+  describe "the calls after the batches" do
+    let(:args) { described_class.builtin("upgrade").new(%w[--keep-tmp]).args }
+    let(:flags) { %w[--keep-tmp --force-bottle --build-from-source --debug-symbols --verbose] }
+    let(:receipt) { JSON.parse((Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json").read) }
+
+    def after(dependents = [], checked = [], excluded: [], own: [])
+      calls = described_class.after(dependents, checked, args:, flags:, excluded:, own:)
+      calls || raise("no calls after the batches")
+    end
+
+    before { allow(Formulary).to receive(:loader_for).and_call_original }
+
+    # A formula at 2.0 needing `deps`, from `tap` if given, loadable by its
+    # full name, with `installed` in the Cellar (from `tap` as its receipt
+    # says, built from source unless `poured`) and linked into `opt` (neither
+    # when nil).
+    def stub_formula(name, installed = nil, tap: nil, poured: false, deps: [])
+      stub = formula(name, tap:) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/#{name}-2.0.tgz"
+        deps.each { |dep| depends_on dep }
+      end
+      stub_formula_loader(stub)
+      if installed
+        keg = HOMEBREW_CELLAR/name/installed
+        keg.mkpath
+        source = receipt.fetch("source").merge("tap" => tap&.name || "homebrew/core")
+        (keg/AbstractTab::FILENAME).write(JSON.generate(receipt.merge("source"             => source,
+                                                                      "poured_from_bottle" => poured)))
+        (HOMEBREW_PREFIX/"opt").mkpath
+        FileUtils.ln_sf keg, HOMEBREW_PREFIX/"opt"/name
+      end
+      stub
+    end
+
+    it "makes none, leaving the check to brew, when the user has turned it off, as brew then does neither" do
+      ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
+      expect(described_class.after([], [], args:, flags:, excluded: [], own: [])).to be_nil
+    end
+
+    describe "the outdated dependents' call" do
+      it "upgrades with the flags brew gives them those brew's bottle check keeps, checking those still outdated " \
+         "again once the batches are done, as brew does, and finishes them with `brew upgrade-timed` and the run's " \
+         "`--exclude`, so brew's own check there leaves excluded outdated dependents alone", :aggregate_failures do
+        lib = stub_formula("lib")
+        dependents = %w[user other done].map { |name| stub_formula(name, "1.0") }
+        installers = dependents.map { |dependent| instance_double(FormulaInstaller, formula: dependent) }
+        expect(Homebrew::Upgrade).to receive(:dependent_formula_installers)
+          .with(having_attributes(upgradeable: dependents), [lib], hash_including(keep_tmp: true))
+          .and_return(installers)
+        call = after(dependents, [lib], excluded: %w[gone], own: %w[--exclude=gone --no-stamp-receipts]).fetch(0)
+        FileUtils.touch (HOMEBREW_CELLAR/"done/2.0").tap(&:mkpath)/"file"
+        expect(Homebrew::Upgrade).to receive(:filter_dependent_formula_installers)
+          .with(installers.take(2)).and_return(installers.take(1))
+        app = stub_formula("app", deps: %w[lib])
+        expect([call.label, call.verb, call.flags, call.candidates, call.choose.call({}, []), call.deps.call(app),
+                call.finish.call(%w[user])])
+          .to eq(["dependents", "upgrade", %w[--keep-tmp --force-bottle --verbose], dependents, dependents.take(1),
+                  %w[lib], "brew upgrade-timed --exclude=gone --no-stamp-receipts user"])
+      end
+
+      it "finishes one given to `--exclude` without `--exclude`, which would leave it out" do
+        stub_formula("user", "1.0")
+        own = %w[--exclude=user --no-stamp-receipts]
+        expect(after(excluded: %w[user], own:).fetch(0).finish.call(%w[user]))
+          .to eq("brew upgrade-timed --no-stamp-receipts user")
+      end
+
+      it "keeps in `--exclude` one it can no longer load, e.g. from a tap untrusted during the run" do
+        stub_formula("user", "1.0")
+        allow(Formulary).to receive(:factory).and_call_original
+        allow(Formulary).to receive(:factory).with("user/tap/evil")
+                                             .and_raise(Homebrew::UntrustedTapError, "untrusted")
+        own = %w[--exclude=user/tap/evil,user]
+        expect(after(excluded: %w[user/tap/evil user], own:).fetch(0).finish.call(%w[user]))
+          .to eq("brew upgrade-timed --exclude=user/tap/evil user")
+      end
+
+      it "doesn't ask brew's bottle check about no dependents" do
+        expect(Homebrew::Upgrade).not_to receive(:dependent_formula_installers)
+        expect(Homebrew::Upgrade).not_to receive(:filter_dependent_formula_installers)
+        expect(after.fetch(0).choose.call({}, [])).to eq([])
+      end
+    end
+
+    describe "the broken dependents' call" do
+      let(:call) { after(excluded: %w[left], own: %w[--exclude=left]).fetch(1) }
+
+      it "reinstalls from source with the flags brew gives them, after what each needs", :aggregate_failures do
+        stub_formula("lib")
+        app = stub_formula("app", deps: %w[lib])
+        expect([call.label, call.verb, call.flags, call.candidates, call.deps.call(app)])
+          .to eq(["linkage", "reinstall", %w[--build-from-source --keep-tmp --debug-symbols --verbose], nil, %w[lib]])
+      end
+
+      it "finishes them with brew's own installed-dependents check off, as the run's call has it, saying so" do
+        expect(call.finish.call(%w[lib app]))
+          .to eq("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source lib app\n" \
+                 "The reinstall skips Homebrew's installed-dependents check, as this run's own call did.")
+      end
+
+      it "checks all the dependents of the formulae the run installed, from the tap their receipts name, but " \
+         "only those built from source of core bottles, which brew takes as checked", :aggregate_failures do
+        stub_formula("poured", "2.0")
+        stub_formula("built", "2.0")
+        stub_formula("clash")
+        stub_formula("clash", "2.0", tap: Tap.fetch("user", "tap"))
+        expect(described_class).to receive(:dependents_to_check)
+          .with(contain_exactly(having_attributes(full_name: "built"),
+                                having_attributes(full_name: "user/tap/clash")),
+                poured: [having_attributes(full_name: "poured")])
+          .and_return([])
+        expect(described_class).to receive(:broken_dependents).with([]).and_return([])
+        installed = { "poured" => "poured", "built" => "built", "clash" => "poured" }
+        expect { call.choose.call(installed, []) }
+          .to output("==> Checking for dependents of upgraded formulae...\n==> No broken dependents found!\n")
+          .to_stdout
+      end
+
+      it "names a formula it can't load, e.g. in several taps or from a tap that isn't trusted, with how to " \
+         "reinstall its dependents from the tap its receipt names, where it finds them and can, and checks the rest",
+         :aggregate_failures do
+        tapped = stub_formula("tapped", "2.0", tap: Tap.fetch("user", "tap"))
+        stub_formula("twice", "1.0", tap: Tap.fetch("user", "a"))
+        needing = ->(full_name) { instance_double(Keg, runtime_dependencies: [{ "full_name" => full_name }]) }
+        dependents = { "user" => "user/a/twice", "other" => "user/b/twice", "held" => "user/a/twice" }
+                     .to_h do |name, needs|
+          dependent = stub_formula(name, "2.0")
+          allow(dependent).to receive(:any_installed_keg).and_return(needing.call(needs))
+          [name, dependent]
+        end
+        allow(dependents.fetch("held")).to receive(:pinned?).and_return(true)
+        allow(Formula).to receive(:installed).and_return([*dependents.values, tapped])
+        allow(Formulary).to receive(:from_rack).and_call_original
+        allow(Formulary).to receive(:from_rack).with(HOMEBREW_CELLAR/"twice")
+                                               .and_raise(TapFormulaAmbiguityError.new("twice", []))
+        allow(Formulary).to receive(:from_rack).with(HOMEBREW_CELLAR/"gone")
+                                               .and_raise(Homebrew::UntrustedTapError, "untrusted")
+        expect(described_class).to receive(:dependents_to_check)
+          .with([having_attributes(full_name: "user/tap/tapped")], poured: []).and_return([])
+        allow(described_class).to receive(:broken_dependents).and_return([])
+        warnings = []
+        allow(described_class).to receive(:opoo) { |warning| warnings << warning }
+        call.choose.call({ "twice" => "poured", "gone" => "built", "tapped" => "poured" }, [])
+        expect(warnings.map { |warning| warning.sub(/(?<=linkage): .*?(?=\nTo check them|\z)/m, ": …") })
+          .to eq(["Couldn't check the dependents of twice for broken linkage: …\n" \
+                  "To check them, reinstall them from source:\n  " \
+                  "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source user\n" \
+                  "The reinstall skips Homebrew's installed-dependents check, as this run's own call did.\n" \
+                  "Not counting held, which is pinned, outdated, left out of the run or needs what this run " \
+                  "didn't install.",
+                  "Couldn't check the dependents of gone for broken linkage: …"])
+      end
+
+      it "says which dependents it hadn't checked when Ctrl-C stops the check" do
+        stub_formula("built", "2.0")
+        allow(described_class).to receive(:dependents_to_check).and_return([])
+        allow(described_class).to receive(:broken_dependents).and_raise(Interrupt)
+        expect { call.choose.call({ "built" => "built" }, []) }
+          .to raise_error(Interrupt)
+          .and output("Warning: The check for broken linkage didn't finish; not all the dependents of built " \
+                      "were checked.\n").to_stderr
+      end
+
+      it "checks nothing when the run installed nothing" do
+        expect(described_class).not_to receive(:broken_dependents)
+        expect { call.choose.call({}, []) }.not_to output.to_stdout
+      end
+
+      it "reinstalls the broken dependents dependencies first, but not pinned or outdated ones or those the run " \
+         "failed, skipped or left out, naming each kind with the command to fix it", :aggregate_failures do
+        stub_formula("built", "2.0")
+        good = stub_formula("good", "2.0")
+        base = stub_formula("base", "2.0")
+        allow(good).to receive(:any_installed_keg)
+          .and_return(instance_double(Keg, runtime_dependencies: [{ "full_name" => "base", "version" => "2.0" }]))
+        pinned = stub_formula("pinned", "2.0")
+        allow(pinned).to receive(:pinned?).and_return(true)
+        # `brew reinstall` would install 2.0, from source, losing the pin.
+        held = stub_formula("held", "1.0")
+        allow(held).to receive(:pinned?).and_return(true)
+        outdated = stub_formula("outdated", "1.0")
+        failed = stub_formula("failed", "2.0")
+        left = stub_formula("left", "2.0")
+        needy = stub_formula("needy", "2.0", deps: %w[failed])
+        stale = stub_formula("stale", "1.0", deps: %w[failed])
+        # Outdated, but planned for a batch Ctrl-C stopped, perhaps to build
+        # from source, so `brew upgrade` won't do.
+        late = stub_formula("late", "1.0")
+        allow(described_class).to receive_messages(
+          dependents_to_check: [],
+          broken_dependents:   [good, pinned, held, outdated, failed, left, base, needy, stale, late],
+        )
+        chosen = T.let([], T::Array[Formula])
+        skips = "The reinstall skips Homebrew's installed-dependents check, as this run's own call did."
+        expect { chosen = call.choose.call({ "built" => "built" }, %w[failed late]) }.to output(<<~EOS).to_stderr
+          Warning: Not reinstalling 2 dependents with broken linkage, as they need what this run didn't install: needy (needs failed), stale (needs failed)
+          Once that installs, run:
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source needy
+            brew upgrade-timed --exclude=left stale
+          #{skips}
+          Error: Not reinstalling 2 pinned dependents with broken linkage: pinned held
+          Once unpinned, reinstall with:
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source pinned
+          Once unpinned, upgrade, which reinstalls, with:
+            brew upgrade-timed --exclude=left held
+          #{skips}
+          Warning: Not reinstalling 1 outdated dependent with broken linkage: outdated
+          Upgrade, which reinstalls, with:
+            brew upgrade-timed --exclude=left outdated
+          Warning: Not reinstalling 1 dependent with broken linkage given to `--exclude`: left
+          Reinstall with:
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source left
+          #{skips}
+          Warning: Not reinstalling 2 dependents with broken linkage that this run didn't finish: failed late
+          Once they install, reinstall with:
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew reinstall --build-from-source failed late
+          #{skips}
+        EOS
+        expect(chosen).to eq([base, good])
+      end
+
+      it "drops from the `--exclude` of an upgrade command the outdated, or pinned and outdated, broken dependent " \
+         "it names, which that would leave out, keeping the rest" do
+        stub_formula("built", "2.0")
+        stub_formula("other")
+        outdated = stub_formula("outdated", "1.0")
+        held = stub_formula("held", "1.0")
+        allow(held).to receive(:pinned?).and_return(true)
+        allow(described_class).to receive_messages(dependents_to_check: [], broken_dependents: [outdated, held])
+        excluded = after(excluded: %w[outdated held other], own: %w[--exclude=outdated,held,other]).fetch(1)
+        expect { excluded.choose.call({ "built" => "built" }, []) }.to output(<<~EOS).to_stderr
+          Error: Not reinstalling 1 pinned dependent with broken linkage: held
+          Once unpinned, upgrade, which reinstalls, with:
+            brew upgrade-timed --exclude=outdated,other held
+          Warning: Not reinstalling 1 outdated dependent with broken linkage: outdated
+          Upgrade, which reinstalls, with:
+            brew upgrade-timed --exclude=held,other outdated
+        EOS
+      end
+    end
+
+    it "takes every installed dependent of some formulae, but only those built from source of others" do
+      lib = stub_formula("lib")
+      core = stub_formula("core")
+      dependents = { "any" => false, "built" => false, "poured" => true }
+                   .to_h { |name, poured| [name, stub_formula(name, "2.0", poured:)] }
+      allow(lib).to receive(:runtime_installed_formula_dependents).and_return([dependents.fetch("any")])
+      allow(core).to receive(:runtime_installed_formula_dependents)
+        .and_return(dependents.values_at("built", "poured", "any"))
+      expect(described_class.dependents_to_check([lib], poured: [core]).map(&:name)).to eq(%w[any built])
+    end
+
+    it "finds the installed dependents with broken library linkage, as brew does after upgrading dependents" do
+      ok = stub_formula("ok", "2.0")
+      broken = stub_formula("broken", "2.0")
+      allow(LinkageChecker).to receive(:new) do |keg, cache_db:|
+        instance_double(LinkageChecker,
+                        broken_library_linkage?: keg.name == "broken" && cache_db.is_a?(CacheStoreDatabase))
+      end
+      expect(described_class.broken_dependents([ok, broken, stub_formula("gone")])).to eq([broken])
+    end
+  end
+
+  describe ".dependency_names" do
+    it "gives each formula a formula needs by its full name, even one a tap formula names by its short name" do
+      tap = Tap.fetch("user", "tap")
+      lib = formula("lib", tap:) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/lib-1.0.tgz"
+      end
+      app = formula("app", tap:) do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/app-1.0.tgz"
+        depends_on "lib"
+      end
+      allow(Formulary).to receive(:loader_for).and_call_original
+      stub_formula_loader(lib)
+      stub_formula_loader(lib, "lib")
+      expect(described_class.dependency_names(app)).to eq(%w[user/tap/lib])
+    end
+
+    it "leaves out a dependency it can't load from a tap that isn't trusted, as one that can't be found" do
+      app = formula("app") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/app-1.0.tgz"
+        depends_on "user/tap/evil"
+      end
+      allow(Formulary).to receive(:factory).and_call_original
+      allow(Formulary).to receive(:factory).with("user/tap/evil", warn: false)
+                                           .and_raise(Homebrew::UntrustedTapError, "untrusted")
+      expect(described_class.dependency_names(app)).to eq([])
     end
   end
 
@@ -784,6 +1210,23 @@ RSpec.describe Timed::Command do
         .to output("==> No formulae to upgrade\n").to_stdout
       expect { described_class.show_plan("upgrade", result, estimates, excluded: [], casks: true) }
         .not_to output.to_stdout
+    end
+
+    it "says what it does after the batches, the outdated dependents it upgrades and the check for broken " \
+       "linkage, before the `--exclude`d formulae" do
+      result = Timed::Planner::Result.new(batches: [batch("main", nil, "a")], warnings: [])
+      expect do
+        described_class.show_plan("install", result, estimates, excluded: %w[x], dependents: %w[d e], linkage: true)
+      end.to output(<<~EOS).to_stdout
+        ==> Would install 1 formula in 1 batch, estimated 0m10s
+        ==> Batch 1 of 1: 0m10s
+        a                            build     0m10s
+        ==> Then upgrade outdated dependents
+        d e
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+        ==> Excluded
+        x
+      EOS
     end
 
     it "prints the planner's warnings" do

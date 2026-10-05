@@ -5,6 +5,7 @@ require "formula"
 require "tab"
 require "utils"
 require "utils/output"
+require_relative "after"
 require_relative "build_log"
 require_relative "command"
 require_relative "planner"
@@ -19,13 +20,26 @@ module Timed
     DONE = %w[built poured].freeze
 
     # What came of `run`: the formulae (by full name) brew didn't install, as
-    # they failed, were skipped or never ran, and whether, with
-    # `stops_at_failure`, a call stopped early, which ends the whole brew
-    # command.
+    # they failed, were skipped or never ran, those of the calls after the
+    # batches included, and whether, with `stops_at_failure`, a call stopped
+    # early, which ends the whole brew command.
     class Outcome < T::Struct
       const :unfinished, T::Array[String]
       const :stopped_early, T::Boolean
     end
+
+    # Whether brew installed a formula, from when its call started.
+    Succeeded = T.type_alias { T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)) }
+
+    # Whether brew installed a formula: its version is installed.
+    INSTALLED = T.let(->(formula) { ->(_since) { formula.latest_version_installed? } }.freeze, Succeeded)
+
+    # Whether brew reinstalled a formula: a failed reinstall leaves the old
+    # keg, and its receipt, in place.
+    REINSTALLED = T.let(lambda do |formula|
+      before = Receipts.receipt_stat(formula)
+      ->(since) { Receipts.installed_since?(formula, since, before:) }
+    end.freeze, Succeeded)
 
     # Runs each of `batches` of `formulae` (by full name) with
     # `brew <verb> --formula --yes --display-times <flags> <names>`, each name
@@ -53,6 +67,10 @@ module Timed
     # need, so `succeeded` checks that, and the formulae are never logged for
     # themselves, failed or skipped, only what brew's output shows it did,
     # which includes one brew installs as another one's dependency.
+    # With `after`, every call runs without brew's installed-dependents check,
+    # which only knows its own call's formulae and so would upgrade those of
+    # later calls without their options, and the `after` calls follow the
+    # batches, in order, each like a batch of its own.
     # Ctrl-C reaches brew too: once it has stopped, only the formulae brew
     # finished in the batch it was running are logged, and `Interrupt` is
     # raised, even if brew finished that batch.
@@ -66,10 +84,11 @@ module Timed
         pours:             T::Array[String],
         pour_flags:        T.nilable(T::Array[String]),
         stamp:             T::Boolean,
-        succeeded:         T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)),
+        succeeded:         Succeeded,
         stops_at_failure:  T::Boolean,
         dependencies_only: T::Boolean,
         arguments:         T::Hash[String, String],
+        after:             T.nilable(T::Array[After]),
         database:          Pathname,
         logs:              Pathname,
         clock:             T.proc.returns(Float),
@@ -77,8 +96,8 @@ module Timed
       ).returns(Outcome)
     }
     def self.run(batches, verb:, flags:, formulae:, deps:, pours: [], pour_flags: nil, stamp: true,
-                 succeeded: ->(formula) { ->(_since) { formula.latest_version_installed? } }, stops_at_failure: false,
-                 dependencies_only: false, arguments: {}, database: BuildLog.default_path,
+                 succeeded: INSTALLED, stops_at_failure: false,
+                 dependencies_only: false, arguments: {}, after: nil, database: BuildLog.default_path,
                  logs: HOMEBREW_LOGS/"timed",
                  clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f }, now: -> { Time.now })
       # Runs started in the same second are separate processes.
@@ -86,21 +105,66 @@ module Timed
       logs.mkpath
       failed = T.let([], T::Array[String])
       skipped = T.let([], T::Array[String])
+      # What each call after the batches failed to install, by label.
+      failed_after = T.let({}, T::Hash[String, T::Array[String]])
+      # The formulae the run installed, by short name, with how.
+      installed = T.let({}, T::Hash[String, String])
+      # The formulae left when Ctrl-C stopped the run, and what each call
+      # after the batches had left: `:pending` if it hadn't worked that out
+      # yet, `:stopped` if Ctrl-C stopped it doing so.
       not_finished = T.let(nil, T.nilable(T::Array[String]))
+      after_left = T.let([], T::Array[[After, T.any(T::Array[String], Symbol)]])
       # What brew never started in a call it stopped early, e.g. at a failed
-      # build.
-      not_run = T.let([], T::Array[String])
+      # build, by verb.
+      not_run = T.let({}, T::Hash[String, T::Array[String]])
       stopped_early = T.let(false, T::Boolean)
+      # The run set the variable, not the user, so no hint about it.
+      no_check = after ? { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" } : {}
+      steps = T.let([*batches, *after], T::Array[T.any(Planner::Batch, After)])
+      left = lambda do |rest|
+        rest.each do |step|
+          next not_finished&.concat(step.names) if step.is_a?(Planner::Batch)
+
+          after_left << [step, :pending]
+        end
+      end
       # The child brew is in this process group, so it gets Ctrl-C too.
       interrupts = T.let([], T::Array[Integer])
       old_trap = Signal.trap(:INT) { |signal| interrupts << signal }
       begin
-        batches.each.with_index(1) do |batch, index|
+        steps.each.with_index(1) do |step, index|
           if interrupts.any?
-            not_finished = batches.drop(index - 1).flat_map(&:names)
+            not_finished = []
+            left.call(steps.drop(index - 1))
             break
           end
 
+          call = step if step.is_a?(After)
+          step_verb = call&.verb || verb
+          only_dependencies = dependencies_only && call.nil?
+          check = if call.nil?
+            succeeded
+          else
+            call.reinstall? ? REINSTALLED : INSTALLED
+          end
+          # Each reinstall has a call of its own.
+          stops = call.nil? && stops_at_failure
+          candidates = case step
+          when After
+            chosen = choose(step, installed, failed + skipped + failed_after.values.flatten)
+            if chosen.nil?
+              # Ctrl-C stopped it; the rest is only worked out.
+              interrupts << Signal.list.fetch("INT")
+              not_finished ||= []
+              after_left << [step, :stopped]
+            end
+            chosen ||= []
+            formulae = formulae.merge(chosen.to_h { |formula| [formula.full_name, formula] })
+            deps = deps.merge(chosen.to_h { |formula| [formula.full_name, step.deps.call(formula)] })
+            chosen.map(&:full_name)
+          else
+            step.names
+          end
           started = now.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
           # With `dependencies_only`, the formulae whose dependencies brew
@@ -112,52 +176,60 @@ module Timed
           # Whether brew installed each formula in its call.
           done = T.let({}, T::Hash[String, T::Boolean])
           skipped_before = skipped.length
-          skip, names = skips(batch.names, failed + skipped, deps, verb, dependencies_only)
+          skip, names = skips(candidates, failed + skipped, deps, verb, dependencies_only, finish: call&.finish)
           skipped.concat(skip)
 
           stopped = T.let(false, T::Boolean)
           if names.any?
-            oh1 "Running batch #{index} of #{batches.length}: #{names.join(" ")}"
+            heading = if call
+              "#{call.verb.capitalize.delete_suffix("e")}ing #{call.what.downcase}"
+            else
+              "Running batch #{index} of #{batches.length}"
+            end
+            oh1 "#{heading}: #{names.join(" ")}"
             log = logs/"#{prefix}-batch#{index}.log"
             lines = T.let([], T::Array[Line])
             start = clock.call
             # In the batch's order, dependencies first, so brew never pours
             # a formula as a dependency before its call to build it.
-            runs = pour_flags ? names.chunk_while { |a, b| pours.include?(a) == pours.include?(b) } : [names]
+            runs = if call&.reinstall?
+              names.zip
+            elsif pour_flags && call.nil?
+              names.chunk_while { |a, b| pours.include?(a) == pours.include?(b) }
+            else
+              [names]
+            end
             calls = runs.map do |run_names|
-              next [flags, run_names, {}] if pour_flags.nil? || pours.exclude?(run_names.fetch(0))
+              next [call.flags, run_names] if call
+              next [pour_flags, run_names] if pour_flags && pours.include?(run_names.fetch(0))
 
-              # Brew's installed-dependents check would pour the run's
-              # outdated dependents, named formulae among them, before their
-              # own call builds them; brew never runs it for these formulae.
-              # The run set the variable, not the user, so no hint about it.
-              [pour_flags, run_names,
-               { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }]
+              [flags, run_names]
             end
             results = T.let([], T::Array[T.nilable(T::Boolean)])
             log.open("w") do |file|
-              calls.each do |call_flags, call_names, env|
+              calls.each do |call_flags, call_names|
                 if interrupts.any?
                   stopped = true
                   break
                 end
 
-                skip, kept = skips(call_names, failed + failed_in_batch + skipped, deps, verb, dependencies_only)
+                skip, kept = skips(call_names, failed + failed_in_batch + skipped, deps, verb, dependencies_only,
+                                   finish: call&.finish)
                 skipped.concat(skip)
                 names -= skip
                 next if kept.empty?
 
-                argv = [verb, "--formula", "--yes", "--display-times", *call_flags].uniq
-                checks = kept.to_h { |name| [name, succeeded.call(formulae.fetch(name))] }
+                argv = [step_verb, "--formula", "--yes", "--display-times", *call_flags].uniq
+                checks = kept.to_h { |name| [name, check.call(formulae.fetch(name))] }
                 call_started = now.call
                 first_line = lines.length
-                results << stream([*argv, *kept.map { |name| arguments.fetch(name, name) }], env:) do |line|
+                results << stream([*argv, *kept.map { |name| arguments.fetch(name, name) }], env: no_check) do |line|
                   file.write(line.gsub(ANSI, ""))
                   lines << [line, clock.call - start]
                 end
-                checks.each { |name, check| done[name] = check.call(call_started) }
+                checks.each { |name, installed_since| done[name] = installed_since.call(call_started) }
                 failed_in_batch.concat(kept.reject { |name| done.fetch(name) })
-                next if !stops_at_failure || results.last || interrupts.any?
+                next if !stops || results.last || interrupts.any?
 
                 output = lines.drop(first_line).map { |line, _| line.chomp.gsub(ANSI, "") }
                 # Brew prints the times (`--display-times`) as it finishes, if
@@ -174,7 +246,7 @@ module Timed
                 end
 
                 stopped_early = true
-                not_run.concat(unstarted)
+                (not_run[step_verb] ||= []).concat(unstarted)
                 skipped.concat(unstarted)
                 names -= unstarted
               end
@@ -191,18 +263,18 @@ module Timed
               # checked: checked now, from the batch's start, though a check
               # that compares with how it was before the call can't tell. Only
               # what brew finished in the stopped batch is logged anyway.
-              installed = done.fetch(name) { succeeded.call(formula).call(started) }
-              if dependencies_only
-                (installed ? finished : failed) << name
+              formula_installed = done.fetch(name) { check.call(formula).call(started) }
+              if only_dependencies
+                (formula_installed ? finished : failed) << name
                 next
               end
 
               short = Utils.name_from_full_name(name)
               build = builds.delete(short) || {}
-              if installed && DONE.include?(build["status"])
+              if formula_installed && DONE.include?(build["status"])
                 builds[short] = build
-              elsif !installed
-                failed << name
+              elsif !formula_installed
+                (call ? (failed_after[call.label] ||= []) : failed) << name
                 builds[short] = build.merge("status"  => "failed",
                                             "version" => build["version"] || formula.pkg_version.to_s)
               end
@@ -212,13 +284,14 @@ module Timed
           end
           # By short name, as the log keys formulae; what brew did with a
           # formula it tried anyway is kept instead.
-          (dependencies_only ? [] : skipped.drop(skipped_before)).each do |name|
+          (only_dependencies ? [] : skipped.drop(skipped_before)).each do |name|
             entries[Utils.name_from_full_name(name)] ||= {
               "status" => "skipped", "version" => formulae.fetch(name).pkg_version.to_s, "started" => started.iso8601
             }
           end
 
-          entries.transform_values! { |entry| entry.merge("verb" => verb, "batch" => batch.label) }
+          entries.transform_values! { |entry| entry.merge("verb" => step_verb, "batch" => step.label) }
+          entries.each { |name, entry| installed[name] = entry.fetch("status") if DONE.include?(entry["status"]) }
           BuildLog.update(database) { |build_log| entries.each { |name, entry| build_log.record(name, entry) } }
           if stamp
             entries.each do |name, entry|
@@ -236,9 +309,13 @@ module Timed
           end
           next unless stopped
 
-          not_finished = batch.names.reject do |name|
+          # Of a call after the batches, only what it was giving brew.
+          unfinished = (call ? names : candidates).reject do |name|
             finished.include?(name) || entries.key?(Utils.name_from_full_name(name))
-          end + batches.drop(index).flat_map(&:names)
+          end
+          not_finished = call ? [] : unfinished
+          after_left << [call, unfinished] if call
+          left.call(steps.drop(index))
           break
         end
       ensure
@@ -249,17 +326,53 @@ module Timed
           opoo "Interrupted; not finished or logged: #{"the dependencies of " if dependencies_only}" \
                "#{not_finished.join(" ")}"
         end
+        # What the commands it gives must leave alone.
+        blocked = failed + skipped + failed_after.values.flatten + not_finished
+        stopped_again = T.let(false, T::Boolean)
+        after_left.each do |call, state|
+          # Only worked out, not done; a second Ctrl-C stops that too.
+          if state == :pending && !stopped_again
+            chosen = choose(call, installed, blocked)
+            deps = deps.merge(chosen.to_h { |formula| [formula.full_name, call.deps.call(formula)] }) if chosen
+            state = chosen&.map(&:full_name) || :stopped
+            stopped_again = state == :stopped
+          end
+          if state.is_a?(Array)
+            report_left(call, state, deps, blocked)
+            # The later calls' commands would install these as dependencies.
+            blocked |= state
+            next
+          end
+
+          # Those it might have chosen that are still to do.
+          maybe = call.candidates&.reject(&:latest_version_installed?) || []
+          deps = deps.merge(maybe.to_h { |formula| [formula.full_name, call.deps.call(formula)] })
+          ready = maybe.map(&:full_name).reject { |name| deps.fetch(name, []).intersect?(blocked) }
+          finish = "; to finish what may be left, run:\n  #{call.finish.call(ready)}" if ready.any?
+          opoo "#{call.what} not worked out, as Ctrl-C stopped that#{finish || "."}"
+          report_left(call, maybe.map(&:full_name) - ready, deps, blocked)
+          blocked |= maybe.map(&:full_name)
+        end
       else
-        opoo "`brew #{verb}` stopped early; not run: #{not_run.join(" ")}" if not_run.any?
+        not_run.each do |not_run_verb, names|
+          opoo "`brew #{not_run_verb}` stopped early; not run: #{names.join(" ")}"
+        end
         if failed.any?
           count = Utils.pluralize("formula", failed.length, include_count: true)
           ofail "#{dependencies_only ? "The dependencies of #{count}" : count} did not #{verb}: #{failed.join(" ")}"
+        end
+        (after || []).each do |call|
+          names = failed_after.fetch(call.label, [])
+          next if names.empty?
+
+          ofail "#{Utils.pluralize(call.noun, names.length, include_count: true)} did not #{call.verb}: " \
+                "#{names.join(" ")}\nTo finish, run:\n  #{call.finish.call(names)}"
         end
       end
       # Even if brew finished anyway, so that whatever runs this stops too.
       raise Interrupt if interrupts.any?
 
-      Outcome.new(unfinished: failed | skipped, stopped_early:)
+      Outcome.new(unfinished: failed | skipped | failed_after.values.flatten, stopped_early:)
     end
 
     # A failed download that brew names by its file, not its formula
@@ -291,20 +404,64 @@ module Timed
     end
     private_class_method :stopped_at_build?
 
+    # Says what `call` left of `names`, with the command that finishes it,
+    # apart from those that `deps` says need one of `blocked`, which aren't
+    # finished, so that command waits until they are.
+    sig {
+      params(call: After, names: T::Array[String], deps: T::Hash[String, T::Array[String]],
+             blocked: T::Array[String]).void
+    }
+    def self.report_left(call, names, deps, blocked)
+      waiting, ready = names.partition { |name| deps.fetch(name, []).intersect?(blocked) }
+      opoo call.left_message(ready) if ready.any?
+      return if waiting.empty?
+
+      needed = waiting.flat_map { |name| deps.fetch(name, []) & blocked }.uniq
+      opoo "#{call.what} not #{call.done}: #{waiting.join(" ")}, as they need #{needed.join(" ")}, which this run " \
+           "didn't finish; once those are installed, run:\n  #{call.finish.call(waiting)}"
+    end
+    private_class_method :report_left
+
+    # What `call` chooses from `installed` and `blocked`, with Ctrl-C's usual
+    # effect, as it may take minutes: nil if it stopped it. If it fails, says
+    # so, and that the call does nothing.
+    sig {
+      params(call: After, installed: T::Hash[String, String], blocked: T::Array[String])
+        .returns(T.nilable(T::Array[Formula]))
+    }
+    def self.choose(call, installed, blocked)
+      handler = Signal.trap(:INT, "DEFAULT")
+      begin
+        call.choose.call(installed.dup, blocked)
+      rescue Interrupt
+        nil
+      rescue => e
+        ofail "Couldn't work out the #{call.what.downcase}, so none were #{call.done}: #{e}"
+        []
+      ensure
+        Signal.trap(:INT, handler)
+      end
+    end
+    private_class_method :choose
+
     # `candidates` split into those `deps` says need one of `blocked`, which
-    # are skipped with a warning, and the rest. With `dependencies_only`, what
-    # failed for those was installing what they need.
+    # are skipped with a warning, with the command `finish` gives to run once
+    # those install, and the rest. With `dependencies_only`, what failed for
+    # those was installing what they need.
     sig {
       params(candidates: T::Array[String], blocked: T::Array[String], deps: T::Hash[String, T::Array[String]],
-             verb: String, dependencies_only: T::Boolean).returns([T::Array[String], T::Array[String]])
+             verb: String, dependencies_only: T::Boolean,
+             finish: T.nilable(T.proc.params(left: T::Array[String]).returns(String)))
+        .returns([T::Array[String], T::Array[String]])
     }
-    def self.skips(candidates, blocked, deps, verb, dependencies_only)
+    def self.skips(candidates, blocked, deps, verb, dependencies_only, finish: nil)
       candidates.partition do |name|
         missing = deps.fetch(name, []) & blocked
         next false if missing.empty?
 
         whose = dependencies_only ? "the dependencies of" : Utils.pluralize("dependency", missing.length)
-        opoo "Skipping #{name}: #{whose} #{missing.join(", ")} did not #{verb}"
+        then_run = "\nOnce #{(missing.length == 1) ? "it does" : "they do"}, run:\n  #{finish.call([name])}" if finish
+        opoo "Skipping #{name}: #{whose} #{missing.join(", ")} did not #{verb}#{then_run}"
         true
       end
     end

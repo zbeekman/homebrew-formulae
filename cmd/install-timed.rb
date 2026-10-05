@@ -182,7 +182,7 @@ module Homebrew
         # A formula whose latest version is installed now (e.g. with `--HEAD`
         # and that stable version unlinked, or `--overwrite`) will count as
         # installed only with a new receipt. One upgraded alongside an earlier
-        # batch (outdated dependents) isn't, so its own call may do nothing.
+        # batch (as a dependency) isn't, so its own call may do nothing.
         current = formulae.select { |_, formula| formula.latest_version_installed? }
                           .transform_values { |formula| Timed::Receipts.receipt_stat(formula) }
         deps = formulae.transform_values { |formula| Timed::Command.dependency_names(formula) }
@@ -211,9 +211,17 @@ module Homebrew
                                         **installer_options)
         Install.ask_formulae(planned_installers, dependants, prompt: false, flags: args.flags_only,
                                                              **installer_options)
+        # The outdated dependents brew's check finds are upgraded after the
+        # batches, but never a named formula, as brew installs those itself
+        # or not at all.
+        left_out = set + named.map(&:full_name) + exclude
+        dependents = dependants.upgradeable.reject { |formula| left_out.include?(formula.full_name) }
         Timed::Command.show_plan("install", result, estimates, excluded:          set & exclude,
                                                                dependencies_only: args.only_dependencies?,
-                                                               casks:             args.cask? || casks.any?)
+                                                               casks:             args.cask? || casks.any?,
+                                                               dependents:        dependents.map(&:full_name),
+                                                               linkage:           planned.any? &&
+                                                                 !Homebrew::EnvConfig.no_installed_dependents_check?)
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
         run_dependencies = Timed::Command.run_dependencies(planned_installers)
@@ -253,35 +261,34 @@ module Homebrew
         Homebrew::Diagnostic.support_tiers.clear
         Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, first_casks),
                                 flags: forwarded.cask, label: "first")
+        arguments = Timed::Command.path_arguments(args.named, formulae)
+        run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
+                                      roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
+                                      needs:   run_dependencies)
         outcome = if result.batches.any?
-          Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
-                                            stamp: !args.no_stamp_receipts?, succeeded:,
-                                            dependencies_only: args.only_dependencies?,
-                                            arguments: Timed::Command.path_arguments(args.named, formulae))
+          # The outdated dependents and broken linkage are seen to before the
+          # last casks, which may need them.
+          after = lambda do
+            Timed::Command.after(dependents, selected, args:, excluded: exclude, flags: forwarded.formula,
+                                                       own: forwarded.own)
+          end
+          Timed::Command.before_last_casks("install", last_casks, named: args.named, flags: forwarded.cask, run:,
+                                                                  after:) do |calls|
+            Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
+                                              stamp: !args.no_stamp_receipts?, succeeded:,
+                                              dependencies_only: args.only_dependencies?, arguments:, after: calls)
+          end
         end
         last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
-                                                                unfinished: outcome&.unfinished || [],
+                                                                unfinished: outcome&.unfinished || [], run:,
                                                                 run_dependencies:)
         Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
       end
 
       private
 
-      # The options `brew install` gives its installers and dependents check.
       sig { returns(T::Hash[Symbol, T.any(T::Boolean, T::Array[String])]) }
-      def installer_options
-        {
-          force_bottle:               args.force_bottle?,
-          build_from_source_formulae: args.build_from_source_formulae,
-          interactive:                args.interactive?,
-          keep_tmp:                   args.keep_tmp?,
-          debug_symbols:              args.debug_symbols?,
-          force:                      args.force?,
-          debug:                      args.debug?,
-          quiet:                      args.quiet?,
-          verbose:                    args.verbose?,
-        }
-      end
+      def installer_options = Timed::Command.installer_options(args)
     end
   end
 end

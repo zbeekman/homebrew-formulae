@@ -69,7 +69,8 @@ module Homebrew
         end
         # As `brew upgrade` does, unpinned outdated formulae installed through
         # an alias whose target has changed are upgraded to the new target.
-        roots = candidates.select { |formula| outdated?(formula) }.reject(&:pinned?).map do |formula|
+        upgradeable = candidates.select { |formula| outdated?(formula) }.reject(&:pinned?)
+        roots = upgradeable.map do |formula|
           latest = formula.latest_formula
           latest.latest_version_installed? ? formula : latest
         end
@@ -103,8 +104,18 @@ module Homebrew
         named_casks = items.grep(Cask::Cask)
         outdated = outdated_casks(named_casks)
         any_casks = args.cask? || named_casks.any? || outdated.any?
-        Timed::Command.show_plan("upgrade", result, estimates, excluded:, casks: any_casks)
         planned = result.batches.flat_map(&:names)
+        # Brew's installed-dependents check of the formulae it upgrades (and
+        # refuses, unless it refuses them all), not of their dependencies. The
+        # outdated dependents it finds that the batches don't upgrade are
+        # upgraded after them.
+        checked = planned.empty? ? [] : roots.reject { |formula| exclude.include?(formula.full_name) }
+        dependants = dependants(checked)
+        dependents = dependants.upgradeable.reject { |formula| (planned + exclude).include?(formula.full_name) }
+        Timed::Command.show_plan("upgrade", result, estimates, excluded:, casks: any_casks,
+                                                               dependents: dependents.map(&:full_name),
+                                                               linkage: planned.any? &&
+                                                                 !Homebrew::EnvConfig.no_installed_dependents_check?)
         # Without names, brew's preview lists every formula and cask it would
         # upgrade, casks by token.
         if args.named.empty?
@@ -137,7 +148,7 @@ module Homebrew
         # any of them (brew checks those before refusing any).
         upgrading = roots.select { |formula| needs.key?(formula.full_name) }
         force = args.named.present? &&
-                (upgrading.any? { |formula| needs.fetch(formula.full_name).any? } || outdated_dependents?(roots))
+                (upgrading.any? { |formula| needs.fetch(formula.full_name).any? } || dependants.upgradeable.present?)
         ask = !args.no_ask? && Install.ask_prompt_needed?(
           planned_names: planned + casks.map(&:full_name), requested_names: args.named, force:,
           named: args.named.present?
@@ -148,19 +159,37 @@ module Homebrew
 
         Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: cask_flags, label: "first")
+        last = cask_plan.last.map(&:cask)
+        arguments = Timed::Command.path_arguments(args.named, formulae)
+        # To finish them, the formulae given (all the outdated ones with no
+        # names), not the outdated dependencies the batches add, each named as
+        # given: by the alias's new target, it wouldn't be upgraded.
+        given = roots.each_with_index.filter_map do |root, index|
+          next unless planned.include?(root.full_name)
+
+          formula = upgradeable.fetch(index)
+          [root.full_name, arguments.fetch(formula.full_name, formula.full_name)]
+        end.to_h
+        run = Timed::Command::Run.new(command: [self.class.command_name, *flags, *forwarded.own], roots: given,
+                                      needs:   deps.slice(*given.keys))
         outcome = if result.batches.any?
           # `brew upgrade` builds only the named formulae from source with
           # `--build-from-source`, but gives `--debug-symbols` to every build
           # in a call; formulae planned as pours go in a call without either.
           pour_flags = (flags - %w[--build-from-source --debug-symbols] if args.build_from_source?)
-          Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
-                                            pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                            stamp: !args.no_stamp_receipts?,
-                                            arguments: Timed::Command.path_arguments(args.named, formulae))
+          # The outdated dependents and broken linkage are seen to before the
+          # last casks, which may need them.
+          after = -> { Timed::Command.after(dependents, checked, args:, flags:, excluded: exclude, own: forwarded.own) }
+          Timed::Command.before_last_casks("upgrade", last, named: args.named, flags: cask_flags, run:,
+                                                            after:) do |calls|
+            Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
+                                              pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
+                                              stamp: !args.no_stamp_receipts?, arguments:, after: calls)
+          end
         end
-        last = Timed::Command.last_casks("upgrade", cask_plan.last.map(&:cask), named: args.named, flags: cask_flags,
-                                                                                unfinished: outcome&.unfinished || [],
-                                                                                run_dependencies:)
+        last = Timed::Command.last_casks("upgrade", last, named: args.named, flags: cask_flags,
+                                                          unfinished: outcome&.unfinished || [], run:,
+                                                          run_dependencies:)
         Timed::Runner.run_casks("upgrade", last, flags: cask_flags, label: "last")
       end
 
@@ -260,28 +289,19 @@ module Homebrew
         formula.latest_head_pkg_version(fetch_head: true).to_s == old_version.to_s
       end
 
-      # Whether brew would also upgrade outdated dependents of `formulae`
-      # (the installed dependents check), which makes `brew upgrade` ask.
-      sig { params(formulae: T::Array[Formula]).returns(T::Boolean) }
-      def outdated_dependents?(formulae)
-        # Brew's check warns that it's off, as the preview already has.
-        return false if Homebrew::EnvConfig.no_installed_dependents_check?
+      # The outdated dependents of `formulae` brew would also upgrade (the
+      # installed-dependents check), which make `brew upgrade` ask.
+      sig { params(formulae: T::Array[Formula]).returns(Upgrade::Dependents) }
+      def dependants(formulae)
+        # Brew's check warns that it's off, as the preview already has. With
+        # nothing to check, brew never works out its options, which
+        # `--build-from-source` with a named cask can't.
+        if Homebrew::EnvConfig.no_installed_dependents_check? || formulae.empty?
+          return Upgrade::Dependents.new(upgradeable: [], pinned: [], skipped: [])
+        end
 
-        Upgrade.dependants(
-          formulae,
-          flags:                      args.flags_only,
-          dry_run:                    true,
-          ask:                        true,
-          force_bottle:               args.force_bottle?,
-          build_from_source_formulae: args.build_from_source_formulae,
-          interactive:                args.interactive?,
-          keep_tmp:                   args.keep_tmp?,
-          debug_symbols:              args.debug_symbols?,
-          force:                      args.force?,
-          debug:                      args.debug?,
-          quiet:                      args.quiet?,
-          verbose:                    args.verbose?,
-        ).upgradeable.present?
+        Upgrade.dependants(formulae, flags: args.flags_only, dry_run: true, ask: true,
+                                     **Timed::Command.installer_options(args))
       end
 
       # The installer `brew upgrade` would use, with the options it would use.
