@@ -505,6 +505,61 @@ RSpec.describe Timed::Runner do
         expect(calls.length).to eq(1)
       end
 
+      # A broken dependent `broken` that needs `user`, telling `told` what
+      # it is told is blocked.
+      def broken_needing_user(told)
+        linkage(deps: { "broken" => %w[user] }, choose: lambda do |_installed, blocked|
+          told << blocked
+          [formulae.fetch("broken")]
+        end)
+      end
+
+      it "holds back, when Ctrl-C stops a batch, what a later call after the batches would do that needs what an " \
+         "earlier one left undone, as its command would upgrade that", :aggregate_failures do
+        %w[lib app user broken].each { |name| stub_formula(name) }
+        fake_brew { |names| Process.kill("INT", Process.pid) if names == %w[lib] }
+        told = []
+        expect { run([batch("lib"), batch("app")], after: [after("user"), broken_needing_user(told)]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Interrupted; not finished or logged: app
+            Warning: Outdated dependents not upgraded: user; to finish, run:
+              brew upgrade user
+            Warning: Broken dependents not reinstalled: broken, as they need user, which this run didn't finish; once those are installed, run:
+              brew reinstall broken
+          EOS
+        expect(told).to eq([%w[app user]])
+      end
+
+      it "holds back what a later call after the batches would do that needs what Ctrl-C stopped an earlier one " \
+         "running", :aggregate_failures do
+        %w[lib user broken].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[user]) { |names| Process.kill("INT", Process.pid) if names == %w[user] }
+        told = []
+        expect { run([batch("lib")], after: [after("user"), broken_needing_user(told)]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Outdated dependents not upgraded: user; to finish, run:
+              brew upgrade user
+            Warning: Broken dependents not reinstalled: broken, as they need user, which this run didn't finish; once those are installed, run:
+              brew reinstall broken
+          EOS
+        expect(told).to eq([%w[user]])
+      end
+
+      it "holds back what a later call after the batches would do that needs what an earlier one may have left, " \
+         "when Ctrl-C stops it working that out", :aggregate_failures do
+        %w[lib user broken].each { |name| stub_formula(name) }
+        fake_brew
+        told = []
+        expect { run([batch("lib")], after: [after("user", choose: stopped_choose), broken_needing_user(told)]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Outdated dependents not worked out, as Ctrl-C stopped that; to finish what may be left, run:
+              brew upgrade user
+            Warning: Broken dependents not reinstalled: broken, as they need user, which this run didn't finish; once those are installed, run:
+              brew reinstall broken
+          EOS
+        expect(told).to eq([%w[user]])
+      end
+
       it "names only what a call after the batches was running when Ctrl-C stops it" do
         %w[lib user].each { |name| stub_formula(name) }
         fake_brew(failing: %w[user]) { |names| Process.kill("INT", Process.pid) if names == %w[user] }

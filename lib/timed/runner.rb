@@ -339,6 +339,8 @@ module Timed
           end
           if state.is_a?(Array)
             report_left(call, state, deps, blocked)
+            # The later calls' commands would install these as dependencies.
+            blocked |= state
             next
           end
 
@@ -349,6 +351,7 @@ module Timed
           finish = "; to finish what may be left, run:\n  #{call.finish.call(ready)}" if ready.any?
           opoo "#{call.what} not worked out, as Ctrl-C stopped that#{finish || "."}"
           report_left(call, maybe.map(&:full_name) - ready, deps, blocked)
+          blocked |= maybe.map(&:full_name)
         end
       else
         not_run.each do |not_run_verb, names|
