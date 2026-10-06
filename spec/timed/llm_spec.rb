@@ -218,8 +218,8 @@ RSpec.describe Timed::LLM do
     end
 
     it "prints nothing on success" do
-      expect { estimates(anthropic, anthropic_response([{ name: "llvm", seconds: 3000 }])) }
-        .to not_to_output.to_stdout.and not_to_output.to_stderr
+      answer = anthropic_response([{ name: "llvm", seconds: 3000 }, { name: "lld", seconds: 600 }])
+      expect { estimates(anthropic, answer) }.to not_to_output.to_stdout.and not_to_output.to_stderr
     end
 
     it "redacts the key from the warning on every failure" do
@@ -515,6 +515,33 @@ RSpec.describe Timed::LLM do
         [[settings.provider, body.to_json], warning.match?(failed)]
       end
       expect(warned_by_reply).to eq(replies.to_h { |settings, body| [[settings.provider, body.to_json], true] })
+    end
+
+    it "warns, returning none, for an answer with no valid estimate of a formula asked about" do
+      answers = {
+        "empty"       => [],
+        "invalid"     => [{ name: "llvm", seconds: "3000" }, { name: "lld" }, "lld"],
+        "unrequested" => [{ name: "gcc", seconds: 5000 }, { name: key, seconds: 1 }],
+      }
+      outcome_by_answer = answers.to_h do |label, answer|
+        result = T.let(nil, T.nilable(T::Hash[String, Float]))
+        warning = stderr_of { result = estimates(anthropic, anthropic_response(answer)) }
+        [label, [result, warning]]
+      end
+      expect(outcome_by_answer).to eq(answers.to_h do |label, _|
+        [label, [{}, "Warning: LLM build time estimates failed (anthropic claude-haiku-4-5), using median build " \
+                     "times: the response has no valid estimates\n"]]
+      end)
+    end
+
+    it "keeps a partial answer, warning in one line of the formulae it left out, quoting none of it",
+       :aggregate_failures do
+      result = T.let(nil, T.nilable(T::Hash[String, Float]))
+      answer = openai_response([{ name: "llvm", seconds: 3000 }, { name: key, seconds: 1 }, { name: "lld" }])
+      warning = stderr_of { result = estimates(openai, answer) }
+      expect(result).to eq("llvm" => 3000.0)
+      expect(warning).to eq("Warning: LLM build time estimates left some out (openai gpt-5-mini), using median " \
+                            "build times for: lld\n")
     end
 
     it "warns that a response isn't JSON" do

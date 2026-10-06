@@ -256,7 +256,8 @@ module Timed
 
     # Asks for build time estimates of `subjects` in one request, within
     # 45 seconds including one retry on HTTP 429 or 5xx. Returns only valid
-    # estimates for names asked about; on any failure, warns and returns none.
+    # estimates for names asked about, warning of any it leaves out; on any
+    # failure, including none valid, warns and returns none.
     sig {
       params(
         settings: Settings, subjects: T::Array[Subject], machine: T::Hash[String, T.any(String, Integer, Float)],
@@ -280,7 +281,12 @@ module Timed
       end
       raise Error, http_error(response.code) unless (200..299).cover?(response.code)
 
-      valid(response_estimates(adapter, response.body), names)
+      answers = valid(response_estimates(adapter, response.body), names)
+      if (missing = names - answers.keys).any?
+        opoo redact("LLM build time estimates left some out (#{settings.provider} #{settings.model}), " \
+                    "using median build times for: #{missing.join(", ")}", settings)
+      end
+      answers
     rescue => e
       opoo redact("LLM build time estimates failed (#{settings.provider} #{settings.model}), " \
                   "using median build times: #{e.message}", settings)
@@ -509,10 +515,11 @@ module Timed
     end
 
     # The response is untrusted: keep the first numeric estimate for each
-    # name asked about, clamped to 1 second to 48 hours, and nothing else.
+    # name asked about, clamped to 1 second to 48 hours, and nothing else;
+    # with none left, it failed.
     sig { params(estimates: T.anything, names: T::Array[String]).returns(T::Hash[String, Float]) }
     private_class_method def self.valid(estimates, names)
-      case estimates
+      kept = case estimates
       when Array
         estimates.each_with_object({}) do |estimate, valid|
           next unless estimate in { name: String => name, seconds: Integer | Float => seconds }
@@ -523,6 +530,9 @@ module Timed
       else
         raise Error, "the response has no estimates"
       end
+      raise Error, "the response has no valid estimates" if kept.empty?
+
+      kept
     end
 
     sig { params(text: String, settings: Settings).returns(String) }

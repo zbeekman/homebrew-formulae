@@ -110,15 +110,16 @@ brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completion
   whether the model is good enough.
 - It never holds up a run: the whole request, including one retry on HTTP 429
   or 5xx, has 45 seconds. If it fails for any reason (no answer in time,
-  offline, a refused key, an unknown model, an answer that isn't valid), a
-  warning says why (for an HTTP error, only its status and a hint), and those
-  formulae keep the median. Answers are checked: only the formulae asked
-  about are used, each between 1 second and 48 hours. Settings that can't
-  work (no key without `--llm-url`, `--llm-url` without `--llm-model`, an
-  `--llm-url` host that isn't a host name or an IPv4 or bracketed IPv6
-  address, `http://` to an address that isn't on this computer or a private
-  network, a key file that can't be read, an unknown provider) stop the
-  command before it does anything.
+  offline, a refused key, an unknown model, an answer with no valid
+  estimate), a warning says why (for an HTTP error, only its status and a
+  hint), and those formulae keep the median. Answers are checked: only the
+  formulae asked about are used, each between 1 second and 48 hours, and a
+  warning names any that an answer leaves out, which keep the median.
+  Settings that can't work (no key without `--llm-url`, `--llm-url` without
+  `--llm-model`, an `--llm-url` host that isn't a host name or an IPv4 or
+  bracketed IPv6 address, `http://` to an address that isn't on this
+  computer or a private network, a key file that can't be read, an unknown
+  provider) stop the command before it does anything.
 - The key is read from a file only, never from an option or a variable:
   options show up in `ps`, shell history and debug output, and a variable
   holding it could reach any formula or cask download. The file must hold
