@@ -93,8 +93,8 @@ it, and with the `brew reinstall-timed` command for the named formulae that
 bring it in, to run first, as Homebrew would install that formula for the cask
 without the options given for it. That command keeps the formula options it
 was given, and its `--exclude` and `--no-stamp-receipts`; it has no `--yes`,
-so it asks as usual, and no `--guess` or `--estimator`, which only shape the
-plan.
+so it asks as usual, and no `--guess`, `--estimator` or LLM options, which only
+shape the plan.
 
 ## Casks
 
@@ -150,8 +150,9 @@ run first.
 A heading gives the number of formulae, in one batch, and the estimated total.
 A row per formula, in the order they will be reinstalled, shows `pour` or
 `build` and its estimate. An estimate ending in `?` has no history of that kind
-of build to go on, as in `brew build-times stats`. Then come the casks to
-reinstall first, and those to reinstall last, each with why.
+of build to go on, as in `brew build-times stats`, and one ending in `*` is
+from `--guess` or an LLM (`--llm-estimates`). Then come the casks to reinstall
+first, and those to reinstall last, each with why.
 
 ## Options
 
@@ -168,7 +169,8 @@ itself, once for the whole run. It adds:
 
 : Comma-separated `name=duration` estimates for source builds with no history,
   e.g. `llvm=1h30m`: hours, minutes and seconds, as `brew build-times` prints
-  them. Each formula can be given once, with a duration over zero.
+  them. Each formula can be given once, with a duration over zero. The plan
+  marks these estimates with `*`.
 
 `--estimator`
 
@@ -189,3 +191,40 @@ used with `--cask`, and each name must be a formula.
   installs; they are still logged. Enabled by default if
   `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set, to any value. Receipts are then
   left exactly as Homebrew wrote them.
+
+`--[no-]llm-estimates`
+
+: Ask an LLM for estimates of the source builds with no history, no `--guess`
+  and not `--exclude`d, which would otherwise get the fallback, in one request
+  of at most 45 seconds; the plan marks these estimates with `*`. If it fails,
+  they keep the fallback, with a warning. It sends the formulae's names,
+  versions, descriptions and build dependencies, and this computer's CPU,
+  cores, memory and OS, nothing else. Off by default; enabled by default if
+  `$HOMEBREW_TIMED_LLM_ESTIMATES` is set, to any value. See
+  [LLM estimates](../README.md#llm-estimates).
+
+`--llm-api-key-file`
+
+: File holding the API key, needed unless `--llm-url` is set. Defaults to
+  `$HOMEBREW_TIMED_LLM_API_KEY_FILE`.
+
+`--llm-provider`
+
+: `anthropic` or `openai`. Defaults to `$HOMEBREW_TIMED_LLM_PROVIDER`, else
+  `anthropic` for a key starting with `sk-ant-` and `openai` otherwise.
+
+`--llm-url`
+
+: Where to send the request instead of the provider's API, e.g. a server on
+  this computer that speaks OpenAI's API. Defaults to `$HOMEBREW_TIMED_LLM_URL`.
+  It receives the API key.
+
+`--llm-model`
+
+: The model to ask, needed with `--llm-url`. Defaults to
+  `$HOMEBREW_TIMED_LLM_MODEL`, else the provider's small model
+  (`claude-haiku-4-5` or `gpt-5-mini`).
+
+`--llm-api-key-file`, `--llm-provider`, `--llm-url` and `--llm-model` need
+`--llm-estimates` (or `$HOMEBREW_TIMED_LLM_ESTIMATES`), and none of the LLM
+options can be used with `--cask`.

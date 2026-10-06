@@ -37,6 +37,13 @@ RSpec.describe Timed::Command do
         .to eq(%w[--debug --formula --build-from-source --minimum-version=1.0])
     end
 
+    it "forwards none of the LLM flags, nor keeps them for the `-timed` commands it suggests" do
+      options = %w[--llm-estimates --no-llm-estimates --llm-api-key-file=/key --llm-provider=openai
+                   --llm-url=https://example.com --llm-model=m --verbose]
+      forwarded = described_class.forward(options, conflicts:)
+      expect([forwarded.preview, forwarded.formula, forwarded.cask, forwarded.own]).to eq([*[%w[--verbose]] * 3, []])
+    end
+
     it "splits the rest into formula and cask flags by `brew upgrade`'s conflicts, without `--formula` or `--cask`",
        :aggregate_failures do
       options = %w[--verbose --formula --cask --force --build-from-source --keep-tmp --greedy --appdir=/Apps
@@ -76,6 +83,44 @@ RSpec.describe Timed::Command do
                                            .grep(/\A--(?:no-)?(?:binaries|verbose)\z/)]
       end
       expect(options).to eq(runs)
+    end
+  end
+
+  describe ".llm_settings" do
+    it "is none without `--llm-estimates`, else the settings from the `--llm-*` flags or their variables, " \
+       "raising `UsageError` for settings that can't work" do
+      key_file = mktmpdir/"key"
+      key_file.write("sk-proj-FAKEOPENAIKEY0123456789\n")
+      key_file.chmod(0600)
+      url = "http://127.0.0.1:11434/v1/chat/completions"
+      runs = {
+        "off"      => [{ "HOMEBREW_TIMED_LLM_URL" => url, "HOMEBREW_TIMED_LLM_MODEL" => "m" }, []],
+        "variable" => [{ "HOMEBREW_TIMED_LLM_ESTIMATES" => "1", "HOMEBREW_TIMED_LLM_URL" => url,
+                         "HOMEBREW_TIMED_LLM_MODEL" => "m" }, []],
+        "flags"    => [{}, ["--llm-estimates", "--llm-api-key-file=#{key_file}", "--llm-provider=anthropic",
+                            "--llm-url=#{url}", "--llm-model=qwen2.5:7b"]],
+        "unusable" => [{}, ["--llm-estimates"]],
+      }
+      settings_by_run = runs.to_h do |label, (env, argv)|
+        ENV.delete_if { |name, _| name.start_with?("HOMEBREW_TIMED_LLM_") }
+        ENV.update(env)
+        parser = Homebrew::CLI::Parser.new(described_class.builtin("upgrade"))
+        described_class.define_flags(parser)
+        settings = begin
+          described_class.llm_settings(parser.parse(argv))&.then do |found|
+            [found.provider, found.url.to_s, found.model, found.key&.value]
+          end
+        rescue UsageError => e
+          e.message
+        end
+        [label, settings]
+      end
+      expect(settings_by_run).to eq(
+        "off"      => nil,
+        "variable" => ["openai", url, "m", nil],
+        "flags"    => ["anthropic", url, "qwen2.5:7b", "sk-proj-FAKEOPENAIKEY0123456789"],
+        "unusable" => "Invalid usage: LLM estimates need `--llm-api-key-file` unless `--llm-url` is set.",
+      )
     end
   end
 
@@ -1143,22 +1188,215 @@ RSpec.describe Timed::Command do
 
     def estimate(name, pour:, estimator: :mean, guesses: {})
       estimate = described_class.estimate(log, name, pour:, estimator:, guesses:)
-      [estimate.seconds.round(1), estimate.fallback]
+      [estimate.seconds.round(1), estimate.fallback, estimate.guessed]
     end
 
     it "uses history of the same kind only, ignoring `--guess`, with the chosen estimator" do
       estimates = [estimate("llvm", pour: false, guesses: { "llvm" => 1.0 }),
                    estimate("llvm", pour: false, estimator: :median), estimate("wget", pour: true)]
-      expect(estimates).to eq([[696.9, false], [200.0, false], [4.0, false]])
+      expect(estimates).to eq([[696.9, false, false], [200.0, false, false], [4.0, false, false]])
     end
 
-    it "uses `--guess` for a source build without history" do
-      expect(estimate("wget", pour: false, guesses: { "wget" => 90.0 })).to eq([90.0, false])
+    it "uses `--guess` for a source build without history, marked as guessed" do
+      expect(estimate("wget", pour: false, guesses: { "wget" => 90.0 })).to eq([90.0, false, true])
     end
 
     it "falls back to the log's estimate of that kind otherwise, marked as a fallback" do
       expect([estimate("go", pour: false), estimate("llvm", pour: true, guesses: { "llvm" => 1.0 })])
-        .to eq([[300.0, true], [6.0, true]])
+        .to eq([[300.0, true, false], [6.0, true, false]])
+    end
+  end
+
+  describe ".estimates" do
+    let(:database) { mktmpdir/"build-log.json" }
+    let(:llm) do
+      Timed::LLM.settings(url: "http://127.0.0.1:11434/v1/chat/completions", model: "qwen2.5:7b",
+                          resolver: ->(_host) { ["127.0.0.1"] })
+    end
+    let(:machine) { { "cpu" => "x86_64 kabylake", "cores" => 8, "memory_gb" => 32, "os" => "macOS 15.7" } }
+    let(:requests) { [] }
+
+    # `history` has a source build, `cached` an LLM estimate of version 1.0
+    # and `stale` one of another version.
+    before do
+      database.write(JSON.generate(
+                       "schema_version" => 1,
+                       "packages"       => { "history" => { "builds" => [{ "status" => "built", "version" => "0.9",
+                                                                           "install_seconds" => 30.0 }] } },
+                       "estimates"      => { "cached" => { "version" => "1.0", "seconds" => 600, "model" => "old",
+                                                           "date" => "2026-10-01" },
+                                             "stale"  => { "version" => "0.9", "seconds" => 60, "model" => "old",
+                                                           "date" => "2026-10-01" } },
+                     ))
+    end
+
+    # Formulae at `version`: `history`, `guessed` (given to `--guess`),
+    # `poured` (a pour), `cached`, `stale` and `new`; the LLM answers with
+    # `answers` (by name), as OpenAI does, or raises it. `exclude` is
+    # `--exclude`'s.
+    def estimates(answers: { "stale" => 120, "new" => 7200 }, llm: self.llm, version: "1.0", exclude: [])
+      formulae = %w[history guessed poured cached stale new].to_h do |name|
+        [name, formula(name) do
+          T.bind(self, T.class_of(Formula))
+          url "https://brew.sh/#{name}-#{version}.tgz"
+          desc "The #{name} formula"
+          depends_on "cmake" => :build
+          depends_on "zlib"
+        end]
+      end
+      allow(described_class).to receive(:machine).and_return(machine)
+      allow(Timed::LLM).to receive(:post) do |request, _timeout|
+        requests << request
+        raise answers if answers.is_a?(Exception)
+
+        content = { estimates: answers.map { |name, seconds| { name:, seconds: } } }.to_json
+        Timed::LLM::Response.new(code: 200, body: { choices: [{ message: { content: } }] }.to_json)
+      end
+      described_class.estimates(formulae, pour: ->(formula) { formula.name == "poured" }, estimator: :mean,
+                                          guesses: { "guessed" => 90.0 }, llm:, database:, exclude:)
+                     .transform_values { |estimate| [estimate.seconds, estimate.fallback, estimate.guessed] }
+    end
+
+    def prompt = JSON.parse(JSON.parse(requests.fetch(0).body).dig("messages", 1, "content"))
+
+    it "asks for the source builds with no history, no `--guess` and no estimate of their version kept, in " \
+       "one request, marking every guess" do
+      expect(estimates).to eq("history" => [30.0, false, false], "guessed" => [90.0, false, true],
+                              "poured" => [15.0, true, false], "cached" => [600.0, false, true],
+                              "stale" => [120.0, false, true], "new" => [7200.0, false, true])
+    end
+
+    it "sends the machine and each formula's name, version, description and build dependencies only" do
+      estimates
+      expect(prompt).to eq(
+        "machine"  => machine,
+        "formulae" => %w[stale new].map do |name|
+          { "name" => name, "version" => "1.0", "desc" => "The #{name} formula", "build_dependencies" => ["cmake"] }
+        end,
+      )
+    end
+
+    it "says what it asks: the provider for its own API, and only the host and port of any other URL" do
+      key_file = mktmpdir/"key"
+      key_file.write("sk-proj-FAKEOPENAIKEY0123456789\n")
+      key_file.chmod(0600)
+      urls = {
+        "default"                                                        => "openai gpt-5-mini",
+        "http://127.0.0.1:11434/v1/chat/completions"                     => "qwen2.5:7b at 127.0.0.1:11434",
+        "http://user:secret@[::1]:8080/v1/chat/completions?token=secret" => "qwen2.5:7b at [::1]:8080",
+        "https://gateway.example.com/v1/chat/completions"                => "qwen2.5:7b at gateway.example.com:443",
+      }
+      original = database.read
+      asked = urls.to_h do |url, _|
+        database.write(original)
+        said = []
+        allow(described_class).to receive(:ohai) { |text| said << text }
+        settings = if url == "default"
+          Timed::LLM.settings(key_file: key_file.to_s)
+        else
+          Timed::LLM.settings(key_file: key_file.to_s, url:, model: "qwen2.5:7b", resolver: ->(_host) { ["::1"] })
+        end
+        estimates(llm: settings)
+        [url, said]
+      end
+      expect(asked).to eq(urls.transform_values { |name| ["Asking #{name} for 2 estimates"] })
+    end
+
+    it "keeps each answer for its version, with the model and date, leaving the others" do
+      estimates
+      expect(JSON.parse(database.read).fetch("estimates").transform_values { |entry| entry.except("date") })
+        .to eq("cached" => { "version" => "1.0", "seconds" => 600, "model" => "old" },
+               "stale"  => { "version" => "1.0", "seconds" => 120.0, "model" => "qwen2.5:7b" },
+               "new"    => { "version" => "1.0", "seconds" => 7200.0, "model" => "qwen2.5:7b" })
+    end
+
+    it "dates each answer it keeps" do
+      estimates
+      expect(JSON.parse(database.read).dig("estimates", "new", "date")).to match(/\A\d{4}-\d{2}-\d{2}\z/)
+    end
+
+    it "asks again for a new version, as the estimates it kept are of another" do
+      estimates(version: "2.0")
+      expect(prompt.fetch("formulae").map { |subject| subject.fetch("name") }).to eq(%w[cached stale new])
+    end
+
+    it "leaves `--exclude`d formulae to the median, out of the request and the log" do
+      result = estimates(exclude: %w[stale new])
+      expect([requests, result.values_at("stale", "new"), JSON.parse(database.read).fetch("estimates").keys])
+        .to eq([[], [[30.0, true, false]] * 2, %w[cached stale]])
+    end
+
+    it "makes no request when it has every estimate it needs" do
+      estimates
+      requests.clear
+      estimates
+      expect(requests).to eq([])
+    end
+
+    it "leaves the rest to the median, marked as a fallback, for the names the answer leaves out" do
+      expect(estimates(answers: { "new" => 7200, "history" => 1 }).values_at("stale", "history"))
+        .to eq([[30.0, true, false], [30.0, false, false]])
+    end
+
+    it "falls back to the median, with a warning, and keeps nothing, when the request fails", :aggregate_failures do
+      result = T.let(nil, T.nilable(T::Hash[String, T::Array[T.untyped]]))
+      expect { result = estimates(answers: Errno::ECONNREFUSED.new) }
+        .to output(/Warning: LLM build time estimates failed \(qwen2.5:7b at 127.0.0.1:11434\), using median/)
+        .to_stderr
+      expect(result&.values_at("stale", "new")).to eq([[30.0, true, false]] * 2)
+      expect(JSON.parse(database.read).fetch("estimates").keys).to eq(%w[cached stale])
+    end
+
+    it "uses the answers it can't keep, with a warning, rather than stopping the run", :aggregate_failures do
+      allow(Timed::BuildLog).to receive(:update).and_raise(Errno::EACCES, database.to_s)
+      result = T.let(nil, T.nilable(T::Hash[String, T::Array[T.untyped]]))
+      expect { result = estimates }
+        .to output(/Warning: Couldn't keep the LLM estimates in #{Regexp.escape(database.to_s)}: Permission denied/)
+        .to_stderr
+      expect(result&.fetch("new")).to eq([7200.0, false, true])
+    end
+
+    it "uses no kept estimate and asks nothing without LLM settings" do
+      expect(estimates(llm: nil).values_at("cached", "new")).to eq([[30.0, true, false]] * 2)
+    end
+
+    it "makes no request without LLM settings" do
+      estimates(llm: nil)
+      expect(requests).to eq([])
+    end
+  end
+
+  describe ".machine" do
+    it "gives the CPU, cores, memory and OS" do
+      machine = described_class.machine
+      expect(machine.transform_values(&:class))
+        .to eq("cpu" => String, "cores" => Integer, "memory_gb" => Integer, "os" => String)
+    end
+
+    it "leaves out any fact that can't be read, however it fails, rather than stopping the run" do
+      failing = T.let(nil, T.nilable(String))
+      # Raises `error` while `fact` is the one failing.
+      fail_for = lambda do |fact, error|
+        lambda do |original, *args|
+          raise error if failing == fact
+
+          original.call(*args)
+        end
+      end
+      allow(Hardware::CPU).to receive(:family).and_wrap_original(&fail_for.call("cpu", RuntimeError.new("no CPU")))
+      allow(Hardware::CPU).to receive(:cores).and_wrap_original(&fail_for.call("cores", ArgumentError.new("none")))
+      allow(Utils).to receive(:popen_read).and_call_original
+      allow(Utils).to receive(:popen_read).with("/usr/sbin/sysctl", "-n", "hw.memsize")
+                                          .and_wrap_original(&fail_for.call("memory_gb", IOError.new("closed")))
+      allow(File).to receive(:read).and_call_original
+      allow(File).to receive(:read).with("/proc/meminfo")
+                                   .and_wrap_original(&fail_for.call("memory_gb", IOError.new("closed")))
+      facts = %w[cpu cores memory_gb os]
+      left = facts.first(3).to_h do |fact|
+        failing = fact
+        [fact, described_class.machine.keys]
+      end
+      expect(left).to eq(facts.first(3).to_h { |fact| [fact, facts - [fact]] })
     end
   end
 
@@ -1173,7 +1411,7 @@ RSpec.describe Timed::Command do
 
     it "marks `--last` batches, gives split reasons and lists `--exclude`d formulae" do
       result = Timed::Planner::Result.new(batches:  [batch("main", nil, "a"), batch("last", "--last", "b"),
-                                                     batch("last", "slow c needs slow b", "c")],
+                                                     batch("last", "c needs b", "c")],
                                           warnings: [])
       expect { described_class.show_plan("upgrade", result, estimates, excluded: %w[x y]) }
         .to output(<<~EOS).to_stdout
@@ -1182,7 +1420,7 @@ RSpec.describe Timed::Command do
           a                            build     0m10s
           ==> Batch 2 of 3 (--last): 1m40s
           b                            build     1m40s
-          ==> Batch 3 of 3 (--last): 3m20s, slow c needs slow b
+          ==> Batch 3 of 3 (--last): 3m20s, c needs b
           c                            build     3m20s
           ==> Excluded
           x y
@@ -1227,6 +1465,22 @@ RSpec.describe Timed::Command do
         ==> Excluded
         x
       EOS
+    end
+
+    it "marks guessed estimates with `*` and fallbacks with `?`" do
+      marks = { "a" => [true, false], "b" => [false, true], "c" => [false, false] }
+      estimates = marks.to_h do |name, (guessed, fallback)|
+        [name, Timed::Command::Estimate.new(seconds: 60.0, pour: false, fallback:, guessed:)]
+      end
+      result = Timed::Planner::Result.new(batches: [batch("main", nil, "a", "b", "c")], warnings: [])
+      expect { described_class.show_plan("upgrade", result, estimates, excluded: []) }
+        .to output(<<~EOS).to_stdout
+          ==> Would upgrade 3 formulae in 1 batch, estimated 3m00s
+          ==> Batch 1 of 1: 3m00s
+          a                            build    1m00s*
+          b                            build    1m00s?
+          c                            build     1m00s
+        EOS
     end
 
     it "prints the planner's warnings" do

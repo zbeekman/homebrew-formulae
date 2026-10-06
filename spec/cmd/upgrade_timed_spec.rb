@@ -9,6 +9,7 @@
 require "cmd/upgrade"
 require_relative "../../cmd/upgrade-timed"
 require_relative "../support/casks"
+require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::UpgradeTimed do
   include TimedCaskHelper
@@ -122,6 +123,28 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(described_class.new(%w[--cask --no-stamp-receipts]).args.no_stamp_receipts?).to be(true)
     end
 
+    it "adds the LLM flags, which need `--llm-estimates` and can't be used with `--cask`", :aggregate_failures do
+      argv = %w[--llm-estimates --llm-api-key-file=/key --llm-provider=openai --llm-url=https://example.com/v1
+                --llm-model=m]
+      args = described_class.new(argv).args
+      expect([args.llm_estimates?, args.llm_api_key_file, args.llm_provider, args.llm_url, args.llm_model])
+        .to eq([true, "/key", "openai", "https://example.com/v1", "m"])
+      expect { described_class.new(%w[--llm-model=m]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
+      expect { described_class.new(%w[--no-llm-estimates --llm-url=http://localhost]) }
+        .to raise_error(Homebrew::CLI::OptionConstraintError)
+      expect { described_class.new(%w[--cask --llm-estimates]) }.to raise_error(Homebrew::CLI::OptionConflictError)
+    end
+
+    it "takes `--llm-estimates` from `HOMEBREW_TIMED_LLM_ESTIMATES` set to anything, unless overridden or with " \
+       "`--cask`" do
+      ENV["HOMEBREW_TIMED_LLM_ESTIMATES"] = "0"
+      enabled = [[], %w[--no-llm-estimates], %w[--cask], %w[--llm-model=m]].to_h do |argv|
+        [argv, described_class.new(argv).args.llm_estimates?]
+      end
+      expect(enabled).to eq([] => true, %w[--no-llm-estimates] => false, %w[--cask] => false,
+                            %w[--llm-model=m] => true)
+    end
+
     it "takes `--no-stamp-receipts` from `HOMEBREW_TIMED_NO_STAMP_RECEIPTS` set to anything" do
       ENV["HOMEBREW_TIMED_NO_STAMP_RECEIPTS"] = "0"
       expect(described_class.new([]).args.no_stamp_receipts?).to be(true)
@@ -169,6 +192,13 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(help).to include("Upgrade outdated, unpinned formulae like brew upgrade, in timed batches:")
       expect(help).to include("Enabled by default if $HOMEBREW_TIMED_NO_STAMP_RECEIPTS is set.")
     end
+
+    it "names the variable of every LLM setting", :aggregate_failures do
+      expect(help).to include("Enabled by default if $HOMEBREW_TIMED_LLM_ESTIMATES is set.")
+      %w[API_KEY_FILE PROVIDER URL MODEL].each do |name|
+        expect(help).to include("$HOMEBREW_TIMED_LLM_#{name}"), "no $HOMEBREW_TIMED_LLM_#{name}"
+      end
+    end
   end
 
   describe "--dry-run" do
@@ -201,7 +231,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         ==> Batch 1 of 2: 3m35s
         lib                          pour     0m15s?
         cmake                        build     3m20s
-        ==> Batch 2 of 2: 50m00s, slow app needs slow cmake
+        ==> Batch 2 of 2: 50m00s, app needs cmake
         app                          build   50m00s?
         ==> Then check dependents for broken linkage, and reinstall broken ones from source
       EOS
@@ -225,7 +255,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         ==> Would upgrade 3 formulae in 3 batches, estimated 2h16m
         ==> Batch 1 of 3: 3m20s
         cmake                        build     3m20s
-        ==> Batch 2 of 3: 1h23m, slow keg-only llvm
+        ==> Batch 2 of 3: 1h23m, keg-only llvm
         llvm                         build     1h23m
         ==> Batch 3 of 3 (--last): 50m00s
         gcc                          build    50m00s
@@ -241,7 +271,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         .to output(<<~EOS).to_stdout
           ==> Would upgrade 2 formulae in 1 batch, estimated 4m20s
           ==> Batch 1 of 1: 4m20s
-          new                          build     1m00s
+          new                          build    1m00s*
           cmake                        build     3m20s
           ==> Then check dependents for broken linkage, and reinstall broken ones from source
           ==> Excluded
@@ -509,6 +539,82 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("cmake")
       run_command
       expect(brew_calls.last).to eq(%w[upgrade --formula --yes --display-times cmake])
+    end
+  end
+
+  describe "LLM estimates" do
+    include TimedLLMHelper
+
+    let(:key_file) { llm_key_file }
+    let(:requests) { [] }
+
+    it "asks for the source builds with no history and no `--guess`, and marks every guess with `*`" do
+      stub_formula("cmake")
+      stub_formula("new")
+      stub_formula("other")
+      answer_with({ "new" => 300, "cmake" => 1 }, requests)
+      expect { run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}", "--guess=other=1m") }
+        .to output(<<~EOS).to_stdout
+          ==> Asking anthropic claude-haiku-4-5 for 1 estimate
+          ==> Would upgrade 3 formulae in 1 batch, estimated 9m20s
+          ==> Batch 1 of 1: 9m20s
+          other                        build    1m00s*
+          cmake                        build     3m20s
+          new                          build    5m00s*
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
+        EOS
+    end
+
+    it "falls back to the median, marked `?`, with a warning, when the provider fails", :aggregate_failures do
+      stub_formula("new")
+      answer_with(500, requests)
+      expect { run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}") }
+        .to output(/^new +build +50m00s\?$/).to_stdout
+        .and output(/estimates failed \(anthropic claude-haiku-4-5\), using median build times: HTTP 500/).to_stderr
+      expect(requests.length).to eq(2)
+    end
+
+    it "asks nothing about `--exclude`d formulae, and keeps nothing for them" do
+      stub_formula("new")
+      answer_with({ "new" => 300 }, requests)
+      run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}", "--exclude=new")
+      expect([requests, JSON.parse(database.read).key?("estimates")]).to eq([[], false])
+    end
+
+    it "is off by default, whatever the other LLM settings" do
+      stub_formula("new")
+      answer_with({ "new" => 300 }, requests)
+      ENV["HOMEBREW_TIMED_LLM_URL"] = "not a URL"
+      ENV["HOMEBREW_TIMED_LLM_API_KEY_FILE"] = "/missing"
+      run_command("--dry-run")
+      expect(requests).to eq([])
+    end
+
+    it "stops on a settings error before any work" do
+      expect(Timed::Command).not_to receive(:auto_update)
+      expect { run_command("--dry-run", "--llm-estimates") }
+        .to raise_error(UsageError, /LLM estimates need `--llm-api-key-file` unless `--llm-url` is set/)
+    end
+
+    it "never lets the key out, whether the provider answers, refuses it or can't be reached: not on screen, " \
+       "in the log, receipts or batch logs, nor in any sub-call's arguments or environment, the calls after the " \
+       "batches' too, which get no LLM flag either" do
+      stub_formula("new")
+      user = stub_formula("user", bottled: true, deps: %w[new])
+      broken = stub_formula("broken", "2.0")
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: []))
+      installers = [instance_double(FormulaInstaller, formula: user)]
+      allow(Homebrew::Upgrade).to receive_messages(dependent_formula_installers:        installers,
+                                                   filter_dependent_formula_installers: installers)
+      allow(Timed::Command).to receive(:broken_dependents).and_return([broken])
+      results = key_leaks(database, receipt) do |argv|
+        # Outdated again.
+        FileUtils.rm_rf [HOMEBREW_CELLAR/"new/2.0", HOMEBREW_CELLAR/"user/2.0"]
+        run_command(*argv, "new")
+      end
+      calls = ["upgrade new", "upgrade new", "upgrade user", "reinstall broken"]
+      expect(results).to eq(%w[answered refused unreachable].to_h { |way| [way, [1, [], calls]] })
     end
   end
 

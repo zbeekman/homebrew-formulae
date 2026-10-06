@@ -52,6 +52,14 @@ successful builds, it is the median of the per-formula mean build times
 (10 minutes if there are none). For pours it is the median of every timed pour
 (15 seconds if there are none).
 
+Then, if the log keeps any LLM estimates (see `--llm-estimates` in
+[`brew upgrade-timed`](upgrade-timed.md#options)) for the formulae shown, a
+second table lists each with its `version`, the `estimate`, the `actual` time
+of the latest source build of that version (`-` if there is none yet), and the
+model and date of the estimate, to judge whether the model is good enough.
+The log keeps one estimate per formula, under `estimates`; a formula's own
+source builds always take its place once there are any.
+
 ### `note` *`formula`* *`text`*
 
 Append *`text`* to the problems recorded for the latest logged build of

@@ -76,6 +76,38 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       expect { described_class.new(%w[stats]).run }.to output(/^bad +- +0 +- +- +- +- +10m00s\? +1 failed/).to_stdout
     end
 
+    describe "LLM estimates" do
+      before do
+        estimates = {
+          "llvm"   => { "version" => "23.1.2", "seconds" => 4800.0, "model" => "claude-haiku-4-5",
+                        "date" => "2026-09-20" },
+          "awscli" => { "version" => "2.38.0", "seconds" => 120, "model" => "gpt-5-mini", "date" => "2026-09-28" },
+          "new"    => { "version" => "1.0", "seconds" => 30, "model" => "qwen2.5:7b", "date" => "2026-09-29" },
+        }
+        database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
+      end
+
+      it "follows the table with each kept estimate and the source build of its version, to compare" do
+        expect { described_class.new(%w[stats]).run }.to output(<<~EOS).to_stdout
+          #{table.chomp}
+          fallback for unknown formulae (median of per-package means): 3m15s
+          LLM estimates and the source builds of the same version:
+          formula                      version       estimate    actual  model date
+          awscli                       2.38.0           2m00s         -  gpt-5-mini 2026-09-28
+          llvm                         23.1.2           1h20m     1h26m  claude-haiku-4-5 2026-09-20
+          new                          1.0              0m30s         -  qwen2.5:7b 2026-09-29
+        EOS
+      end
+
+      it "limits the estimates to the named formulae, ending after the fallback when none of them has one",
+         :aggregate_failures do
+        expect { described_class.new(%w[stats homebrew/core/llvm openexr]).run }
+          .to output(/^LLM estimates .*\n.*\nllvm .*\n\z/).to_stdout
+        expect { described_class.new(%w[stats openexr]).run }
+          .to output(/^fallback for unknown formulae .*\n\z/).to_stdout
+      end
+    end
+
     it "handles a missing database" do
       database.delete
       expect { described_class.new(%w[stats]).run }

@@ -218,8 +218,8 @@ RSpec.describe Timed::LLM do
     end
 
     it "prints nothing on success" do
-      expect { estimates(anthropic, anthropic_response([{ name: "llvm", seconds: 3000 }])) }
-        .to not_to_output.to_stdout.and not_to_output.to_stderr
+      answer = anthropic_response([{ name: "llvm", seconds: 3000 }, { name: "lld", seconds: 600 }])
+      expect { estimates(anthropic, answer) }.to not_to_output.to_stdout.and not_to_output.to_stderr
     end
 
     it "redacts the key from the warning on every failure" do
@@ -350,6 +350,43 @@ RSpec.describe Timed::LLM do
         [url, usage_error(url:, model: "m", resolver: no_lookup).include?("--llm-url")]
       end
       expect(names_flag_by_url).to eq(urls.to_h { |url| [url, true] })
+    end
+
+    it "rejects a port outside 1 to 65535 before looking the host up, without echoing the URL" do
+      invalid = "Invalid usage: `--llm-url` port must be between 1 and 65535."
+      expected = {
+        "https://llm.example:1/v1"     => "no UsageError",
+        "https://llm.example:65535/v1" => "no UsageError",
+        "https://llm.example:0/v1"     => invalid,
+        "https://llm.example:65536/v1" => invalid,
+        "http://127.0.0.1:0/v1"        => invalid,
+      }
+      outcomes = expected.keys.to_h { |url| [url, usage_error(url:, model: "m", resolver: no_lookup)] }
+      expect(outcomes).to eq(expected)
+    end
+
+    it "takes a host name, an IPv4 or a bracketed IPv6 address as the host, and rejects any other host before " \
+       "looking it up, without echoing it, as it could only fail and may hide a credential" do
+      invalid = "Invalid usage: `--llm-url` host is not a valid host name: use a host name or an IPv4 or bracketed " \
+                "IPv6 address."
+      expected = {
+        "https://llm.example/v1"         => "no UsageError",
+        "https://10.0.0.5/v1"            => "no UsageError",
+        "https://[::1]/v1"               => "no UsageError",
+        "http://my_host:11434/v1"        => "no UsageError",
+        "https://host;token=abc:8080/v1" => invalid,
+        "http://host;token=abc:8080/v1"  => invalid,
+        "https://a%2Cb/v1"               => invalid,
+        "https://a&b=c/v1"               => invalid,
+        "https://[v1.abc]/v1"            => invalid,
+      }
+      looked_up = []
+      resolver = lambda do |host|
+        looked_up << host
+        ["127.0.0.1"]
+      end
+      outcomes = expected.keys.to_h { |url| [url, usage_error(url:, model: "m", resolver:)] }
+      expect([outcomes, looked_up]).to eq([expected, ["my_host"]])
     end
 
     it "pins plain `http://` to the loopback address it names" do
@@ -491,6 +528,48 @@ RSpec.describe Timed::LLM do
         [[settings.provider, body.to_json], warning.match?(failed)]
       end
       expect(warned_by_reply).to eq(replies.to_h { |settings, body| [[settings.provider, body.to_json], true] })
+    end
+
+    it "warns, returning none, for an answer with no valid estimate of a formula asked about" do
+      answers = {
+        "empty"       => [],
+        "invalid"     => [{ name: "llvm", seconds: "3000" }, { name: "lld" }, "lld"],
+        "unrequested" => [{ name: "gcc", seconds: 5000 }, { name: key, seconds: 1 }],
+      }
+      outcome_by_answer = answers.to_h do |label, answer|
+        result = T.let(nil, T.nilable(T::Hash[String, Float]))
+        warning = stderr_of { result = estimates(anthropic, anthropic_response(answer)) }
+        [label, [result, warning]]
+      end
+      expect(outcome_by_answer).to eq(answers.to_h do |label, _|
+        [label, [{}, "Warning: LLM build time estimates failed (anthropic claude-haiku-4-5), using median build " \
+                     "times: the response has no valid estimates\n"]]
+      end)
+    end
+
+    it "keeps a partial answer, warning in one line of the formulae it left out, quoting none of it",
+       :aggregate_failures do
+      result = T.let(nil, T.nilable(T::Hash[String, Float]))
+      answer = openai_response([{ name: "llvm", seconds: 3000 }, { name: key, seconds: 1 }, { name: "lld" }])
+      warning = stderr_of { result = estimates(openai, answer) }
+      expect(result).to eq("llvm" => 3000.0)
+      expect(warning).to eq("Warning: LLM build time estimates left some out (openai gpt-5-mini), using median " \
+                            "build times for: lld\n")
+    end
+
+    it "names the model and only the host and port of `--llm-url` in its warnings, not the provider" do
+      settings = described_class.settings(url: "http://user:secret@127.0.0.1:11434/v1/chat/completions?token=secret",
+                                          model: "qwen2.5:7b", resolver: resolving("127.0.0.1"))
+      warning_by_outcome = {
+        "failed"  => stderr_of { estimates(settings, Errno::ECONNREFUSED.new) },
+        "partial" => stderr_of { estimates(settings, openai_response([{ name: "llvm", seconds: 3000 }])) },
+      }
+      expect(warning_by_outcome).to eq(
+        "failed"  => "Warning: LLM build time estimates failed (qwen2.5:7b at 127.0.0.1:11434), using median " \
+                     "build times: Connection refused\n",
+        "partial" => "Warning: LLM build time estimates left some out (qwen2.5:7b at 127.0.0.1:11434), using " \
+                     "median build times for: lld\n",
+      )
     end
 
     it "warns that a response isn't JSON" do
