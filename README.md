@@ -66,5 +66,72 @@ brew build-times stats                        # the times estimates come from
 - Each command's page above says what it runs, including what happens to the
   installed dependents of the formulae it installs, upgrades or reinstalls.
 
+## LLM estimates
+A formula built from source with no history in `brew build-times` is estimated
+from `--guess`, or else gets the median of the other formulae's mean build
+times, marked `?` in the plan. With `--llm-estimates`, the `-timed` commands
+ask an LLM for those estimates instead, in one request for the whole run, and
+mark them `*` in the plan, as they do `--guess`'s. The plan says so first:
+`Asking` *`provider`* *`model`* `for` *`N`* `estimates`, or, with
+`--llm-url`, `Asking` *`model`* `at` *`host`*`:`*`port`* `for` *`N`*
+`estimates`, naming only the host and port of the URL.
+
+It is off unless you turn it on. Every setting is an option, or a variable
+when the option isn't given:
+
+| Option | Variable | Default |
+| ------ | -------- | ------- |
+| `--[no-]llm-estimates` | `HOMEBREW_TIMED_LLM_ESTIMATES` (set to any value) | off |
+| `--llm-api-key-file=`*`path`* | `HOMEBREW_TIMED_LLM_API_KEY_FILE` | none; needed unless `--llm-url` is set |
+| `--llm-provider=anthropic`\|`openai` | `HOMEBREW_TIMED_LLM_PROVIDER` | `anthropic` for a key starting with `sk-ant-`, `openai` otherwise |
+| `--llm-url=`*`url`* | `HOMEBREW_TIMED_LLM_URL` | the provider's API |
+| `--llm-model=`*`name`* | `HOMEBREW_TIMED_LLM_MODEL` | `claude-haiku-4-5` or `gpt-5-mini`; none, so needed, with `--llm-url` |
+
+For example, with the key in a file only you can read:
+
+```sh
+chmod 600 ~/.config/anthropic-key
+brew upgrade-timed --dry-run --llm-estimates --llm-api-key-file ~/.config/anthropic-key
+# or a server on this computer that speaks OpenAI's API, without a key:
+export HOMEBREW_TIMED_LLM_ESTIMATES=1
+brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completions --llm-model qwen2.5:7b
+```
+
+- What is sent: for each formula asked about, its name, version, description
+  and build dependencies; and this computer's CPU, number of cores, memory and
+  OS version. Nothing else: no build times, so nothing about what else is
+  installed. Turning it on agrees to sending that to the provider.
+- Only source builds with no history, no `--guess` and not `--exclude`d are
+  asked about, and none means no request. Each answer is kept in
+  `build-log.json` under `estimates`, with the model and date, and used again
+  for the same version, so a later run or `--dry-run` doesn't ask again; once
+  a formula has a source build, that is used instead. `brew build-times stats`
+  shows each estimate next to the source build of its version, to judge
+  whether the model is good enough.
+- It never holds up a run: the whole request, including one retry on HTTP 429
+  or 5xx, has 45 seconds. If it fails for any reason (no answer in time,
+  offline, a refused key, an unknown model, an answer with no valid
+  estimate), a warning says why (for an HTTP error, only its status and a
+  hint), and those formulae keep the median. Answers are checked: only the
+  formulae asked about are used, each between 1 second and 48 hours, and a
+  warning names any that an answer leaves out, which keep the median.
+  Settings that can't work (no key without `--llm-url`, `--llm-url` without
+  `--llm-model`, an `--llm-url` host that isn't a host name or an IPv4 or
+  bracketed IPv6 address, an `--llm-url` port outside 1 to 65535, `http://`
+  to an address that isn't on this computer or a private network, a key file
+  that can't be read, an unknown provider) stop the command before it does
+  anything.
+- The key is read from a file only, never from an option or a variable:
+  options show up in `ps`, shell history and debug output, and a variable
+  holding it could reach any formula or cask download. The file must hold
+  just the key; a warning asks you to `chmod 600` it if other users can read
+  it. The key is never shown, logged, written to a file or passed to the
+  `brew` calls the commands make, and nothing the server answers is shown
+  either.
+- `--llm-url` is sent the key, whatever it names. Only give it a server you
+  trust with your key. Plain `http://` only goes to this computer or a
+  private network address, checked after the host name is looked up;
+  anything else needs `https://`. Redirects are never followed.
+
 ## Documentation
 `brew help`, `man brew` or check [Homebrew's documentation](https://docs.brew.sh).

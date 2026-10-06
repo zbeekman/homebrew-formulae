@@ -49,6 +49,7 @@ module Homebrew
           args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
+        llm = Timed::Command.llm_settings(args)
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
 
         # As `brew install` does, which has disabled it.
@@ -186,15 +187,12 @@ module Homebrew
         current = formulae.select { |_, formula| formula.latest_version_installed? }
                           .transform_values { |formula| Timed::Receipts.receipt_stat(formula) }
         deps = formulae.transform_values { |formula| Timed::Command.dependency_names(formula) }
-        log = Timed::BuildLog.load(Timed::BuildLog.default_path)
-        estimates = set.to_h do |name|
-          estimate = if args.only_dependencies?
-            # What a formula needs has no estimate yet, so isn't slow.
-            Timed::Command::Estimate.new(seconds: 0.0, pour: false, fallback: true)
-          else
-            Timed::Command.estimate(log, name, pour: installers.fetch(name).pour_bottle?, estimator:, guesses:)
-          end
-          [name, estimate]
+        estimates = if args.only_dependencies?
+          # What a formula needs has no estimate yet, so isn't slow.
+          set.to_h { |name| [name, Timed::Command::Estimate.new(seconds: 0.0, pour: false, fallback: true)] }
+        else
+          Timed::Command.estimates(formulae, pour: ->(formula) { installers.fetch(formula.full_name).pour_bottle? },
+                                             estimator:, guesses:, llm:, exclude:)
         end
         result = Timed::Planner.plan(verb: :install, names: set, deps:,
                                      estimates: estimates.transform_values(&:seconds), last:, exclude:)

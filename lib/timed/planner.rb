@@ -188,9 +188,9 @@ module Timed
         slow_need = current.find { |other| needs.fetch(name).include?(other) && estimates.fetch(other) > SLOW_SPLIT }
         why = if verb == :upgrade && slow && keg_only.include?(name) &&
                  current.any? { |other| keg_only.exclude?(other) }
-          "slow keg-only #{name}"
+          "keg-only #{name}"
         elsif verb != :reinstall && slow && slow_need
-          "slow #{name} needs slow #{slow_need}"
+          "#{name} needs #{slow_need}"
         end
 
         if why

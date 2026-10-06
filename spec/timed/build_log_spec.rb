@@ -128,6 +128,39 @@ RSpec.describe Timed::BuildLog do
       expect(described_class.load(path).builds("x").length).to eq(1)
     end
 
+    it "names the file and formula for every malformed cached estimate, taking only what LLM answers are " \
+       "clamped to" do
+      not_entry = "<path> is not a build log: estimate of `x` must be a JSON object with a `version` string and " \
+                  "`seconds` from 1 to 172800."
+      cases = {
+        "[]"                                              =>
+          "<path> is not a build log: `estimates` must be a JSON object.",
+        '{"x": 5}'                                        => not_entry,
+        '{"x": {"seconds": 5}}'                           => not_entry,
+        '{"x": {"version": 1, "seconds": 5}}'             => not_entry,
+        '{"x": {"version": "1"}}'                         => not_entry,
+        '{"x": {"version": "1", "seconds": "5"}}'         => not_entry,
+        '{"x": {"version": "1", "seconds": 0}}'           => not_entry,
+        '{"x": {"version": "1", "seconds": 0.5}}'         => not_entry,
+        '{"x": {"version": "1", "seconds": 172801}}'      => not_entry,
+        '{"x": {"version": "1", "seconds": 1}}'           => nil,
+        '{"x": {"version": "1", "seconds": 172800.0}}'    => nil,
+        '{"x": {"version": "1", "seconds": 5, "a": "b"}}' => nil,
+      }
+      messages = cases.keys.to_h do |estimates|
+        path.dirname.mkpath
+        path.write(%Q({"schema_version": 1, "packages": {}, "estimates": #{estimates}}))
+        message = begin
+          described_class.load(path)
+          nil
+        rescue RuntimeError => e
+          e.message.sub(path.to_s, "<path>")
+        end
+        [estimates, message]
+      end
+      expect(messages).to eq(cases)
+    end
+
     it "names the file when `packages` is not an object" do
       path.dirname.mkpath
       path.write('{"schema_version": 1, "packages": []}')
@@ -348,7 +381,38 @@ RSpec.describe Timed::BuildLog do
     end
   end
 
+  describe "#cache_estimate" do
+    it "keeps one LLM estimate per formula, under its short name, replacing an older one" do
+      new_log = described_class.new
+      new_log.cache_estimate("homebrew/core/foo", version: "1.0", seconds: 60.0, model: "m1", date: "2026-10-01")
+      new_log.cache_estimate("foo", version: "1.1", seconds: 90.0, model: "m2", date: "2026-10-02")
+      expect(new_log.to_h["estimates"])
+        .to eq("foo" => { "version" => "1.1", "seconds" => 90.0, "model" => "m2", "date" => "2026-10-02" })
+    end
+  end
+
+  describe "#cached_estimate" do
+    let(:cached) do
+      described_class.new.tap do |cache|
+        cache.cache_estimate("foo", version: "1.0", seconds: 60.0, model: "m", date: "2026-10-01")
+      end
+    end
+
+    it "gives the cached estimate for the same version only" do
+      expect([cached.cached_estimate("homebrew/core/foo", "1.0"), cached.cached_estimate("foo", "1.1"),
+              cached.cached_estimate("bar", "1.0")]).to eq([60.0, nil, nil])
+    end
+
+    it "gives nothing for a log without estimates" do
+      expect(log.cached_estimate("llvm", "23.1.2")).to be_nil
+    end
+  end
+
   describe "#durations" do
+    it "only counts builds of the version given" do
+      expect(log.durations("awscli", status: "built", version: "2.37.2")).to eq([190.868])
+    end
+
     it "prefers `install_seconds` and falls back to `build_seconds` when it is zero" do
       expect(log.durations("awscli")).to eq([189.52, 190.868, 205.0])
     end

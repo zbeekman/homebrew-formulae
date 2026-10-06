@@ -51,6 +51,7 @@ module Homebrew
           args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
+        llm = Timed::Command.llm_settings(args)
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
 
         items = named_items
@@ -78,11 +79,9 @@ module Homebrew
         deps = needs.transform_values { |dependencies| dependencies.map(&:full_name) }
         formulae = needs.values.flatten.concat(roots).to_h { |formula| [formula.full_name, formula] }
         set = needs.keys
-        log = Timed::BuildLog.load(Timed::BuildLog.default_path)
-        estimates = set.to_h do |name|
-          pour = installer(formulae.fetch(name)).pour_bottle?
-          [name, Timed::Command.estimate(log, name, pour:, estimator:, guesses:)]
-        end
+        estimates = Timed::Command.estimates(set.to_h { |name| [name, formulae.fetch(name)] },
+                                             pour: ->(formula) { installer(formula).pour_bottle? },
+                                             estimator:, guesses:, llm:, exclude:)
         result = Timed::Planner.plan(
           verb:      :upgrade,
           names:     set,

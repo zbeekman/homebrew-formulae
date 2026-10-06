@@ -9,6 +9,7 @@
 require "cmd/reinstall"
 require_relative "../../cmd/reinstall-timed"
 require_relative "../support/casks"
+require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::ReinstallTimed do
   include TimedCaskHelper
@@ -182,7 +183,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
           ==> Batch 1 of 1: 4h06m
           cmake                        build     3m20s
           gcc                          build    50m00s
-          lib                          build     1h00m
+          lib                          build    1h00m*
           app                          build   50m00s?
           llvm                         build     1h23m
         EOS
@@ -255,6 +256,48 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       allow(Homebrew::Install).to receive(:formulae_ask_prompt_needed?).and_return(true)
       expect(Homebrew::Ask).not_to receive(:confirm?)
       run_command("--dry-run", "cmake")
+    end
+  end
+
+  describe "LLM estimates" do
+    include TimedLLMHelper
+
+    let(:requests) { [] }
+
+    it "asks the provider of the key for the source builds with no history, and marks them `*`" do
+      key_file = mktmpdir/"key"
+      key_file.write("sk-proj-FAKEOPENAIKEY0123456789\n")
+      key_file.chmod(0600)
+      answer_with({ "new" => 300 }, requests, provider: "openai")
+      stub_formula("cmake")
+      stub_formula("new")
+      expect { run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}", "cmake", "new") }
+        .to output(<<~EOS).to_stdout
+          ==> Asking openai gpt-5-mini for 1 estimate
+          ==> Would reinstall 2 formulae:
+          cmake  2.0
+          new    2.0
+          ==> Would reinstall 2 formulae in 1 batch, estimated 8m20s
+          ==> Batch 1 of 1: 8m20s
+          cmake                        build     3m20s
+          new                          build    5m00s*
+        EOS
+    end
+
+    it "asks nothing about `--exclude`d formulae, and keeps nothing for them" do
+      answer_with({ "new" => 300 }, requests, provider: "openai")
+      stub_formula("cmake")
+      stub_formula("new")
+      run_command("--dry-run", "--llm-estimates", "--llm-url=http://127.0.0.1:11434/v1/chat/completions",
+                  "--llm-model=qwen2.5:7b", "--exclude=new", "cmake", "new")
+      expect([requests, JSON.parse(database.read).key?("estimates")]).to eq([[], false])
+    end
+
+    it "never lets the key out, whether the provider answers, refuses it or can't be reached: not on screen, " \
+       "in the log, receipts or batch logs, nor in any sub-call's arguments or environment" do
+      stub_formula("new")
+      results = key_leaks(database, receipt) { |argv| run_to_end(*argv, "new") }
+      expect(results).to eq(%w[answered refused unreachable].to_h { |way| [way, [1, [], ["reinstall new"]]] })
     end
   end
 

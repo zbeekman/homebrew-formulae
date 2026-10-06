@@ -118,29 +118,29 @@ jobs:
         run: |
           config_home="$(brew ruby -e 'puts ENV.fetch("HOMEBREW_USER_CONFIG_HOME")')"
           echo "BUILD_LOG=${config_home}/build-log.json" >>"${GITHUB_ENV}"
-          echo "RECEIPT=$(brew --prefix hello)/INSTALL_RECEIPT.json" >>"${GITHUB_ENV}"
+          echo "RECEIPT=$(brew --prefix tree)/INSTALL_RECEIPT.json" >>"${GITHUB_ENV}"
 
-      - run: brew install-timed --yes --build-from-source hello
+      - run: brew install-timed --yes --build-from-source tree
 
       # Logged and stamped as a source build, and brew still reads the receipt.
       - name: Check the install
         run: |
-          jq -e '[.packages.hello.builds[] | [.verb, .status]] == [["install", "built"]]' "${BUILD_LOG}"
+          jq -e '[.packages.tree.builds[] | [.verb, .status]] == [["install", "built"]]' "${BUILD_LOG}"
           jq -e '.build_times.verb == "install" and .build_times.install_seconds > 0' "${RECEIPT}"
-          brew info --json=v2 hello |
+          brew info --json=v2 tree |
             jq -e '.formulae[0].installed[0] | .installed_on_request and .poured_from_bottle == false'
 
-      - run: brew build-times stats hello
+      - run: brew build-times stats tree
 
-      - run: brew upgrade-timed --dry-run hello
+      - run: brew upgrade-timed --dry-run tree
 
-      - run: brew reinstall-timed --yes hello
+      - run: brew reinstall-timed --yes tree
 
       - name: Check the reinstall
         run: |
-          jq -e '[.packages.hello.builds[].verb] == ["install", "reinstall"]' "${BUILD_LOG}"
+          jq -e '[.packages.tree.builds[].verb] == ["install", "reinstall"]' "${BUILD_LOG}"
           jq -e '.build_times.verb == "reinstall"' "${RECEIPT}"
-          brew info --json=v2 hello | jq -e '.formulae[0].installed[0].installed_on_request'
+          brew info --json=v2 tree | jq -e '.formulae[0].installed[0].installed_on_request'
 
   # A failed scheduled or manual run on `main` opens an issue, or comments on
   # the open one; the failed job still fails the run, so GitHub's failure
