@@ -72,6 +72,15 @@ module Timed
       const :model, String
       const :key, T.nilable(Secret)
       const :addresses, T::Array[String]
+
+      # Who is asked, for messages: the provider for its own API, else the
+      # host and port of the URL, never its credentials, path or query.
+      sig { returns(String) }
+      def target
+        return "#{provider} #{model}" if url.to_s == PROVIDERS.fetch(provider).url
+
+        "#{model} at #{url.host}:#{url.port}"
+      end
     end
 
     # A formula to estimate.
@@ -283,12 +292,12 @@ module Timed
 
       answers = valid(response_estimates(adapter, response.body), names)
       if (missing = names - answers.keys).any?
-        opoo redact("LLM build time estimates left some out (#{settings.provider} #{settings.model}), " \
+        opoo redact("LLM build time estimates left some out (#{settings.target}), " \
                     "using median build times for: #{missing.join(", ")}", settings)
       end
       answers
     rescue => e
-      opoo redact("LLM build time estimates failed (#{settings.provider} #{settings.model}), " \
+      opoo redact("LLM build time estimates failed (#{settings.target}), " \
                   "using median build times: #{e.message}", settings)
       {}
     end

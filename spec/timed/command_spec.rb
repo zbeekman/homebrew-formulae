@@ -1341,7 +1341,7 @@ RSpec.describe Timed::Command do
     it "falls back to the median, with a warning, and keeps nothing, when the request fails", :aggregate_failures do
       result = T.let(nil, T.nilable(T::Hash[String, T::Array[T.untyped]]))
       expect { result = estimates(answers: Errno::ECONNREFUSED.new) }
-        .to output(/Warning: LLM build time estimates failed \(openai qwen2.5:7b\), using median build times/)
+        .to output(/Warning: LLM build time estimates failed \(qwen2.5:7b at 127.0.0.1:11434\), using median/)
         .to_stderr
       expect(result&.values_at("stale", "new")).to eq([[30.0, true, false]] * 2)
       expect(JSON.parse(database.read).fetch("estimates").keys).to eq(%w[cached stale])

@@ -685,15 +685,7 @@ module Timed
       end
       answers = if subjects.any?
         count = Utils.pluralize("estimate", subjects.length, include_count: true)
-        # Of another URL, only what says where it goes: no credentials, path
-        # or query.
-        url = llm.url
-        asked = if url.to_s == LLM::PROVIDERS.fetch(llm.provider).url
-          "#{llm.provider} #{llm.model}"
-        else
-          "#{llm.model} at #{url.host}:#{url.port}"
-        end
-        ohai "Asking #{asked} for #{count}"
+        ohai "Asking #{llm.target} for #{count}"
         LLM.estimates(llm, subjects, machine:)
       else
         {}

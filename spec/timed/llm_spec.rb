@@ -544,6 +544,21 @@ RSpec.describe Timed::LLM do
                             "build times for: lld\n")
     end
 
+    it "names the model and only the host and port of `--llm-url` in its warnings, not the provider" do
+      settings = described_class.settings(url: "http://user:secret@127.0.0.1:11434/v1/chat/completions?token=secret",
+                                          model: "qwen2.5:7b", resolver: resolving("127.0.0.1"))
+      warning_by_outcome = {
+        "failed"  => stderr_of { estimates(settings, Errno::ECONNREFUSED.new) },
+        "partial" => stderr_of { estimates(settings, openai_response([{ name: "llvm", seconds: 3000 }])) },
+      }
+      expect(warning_by_outcome).to eq(
+        "failed"  => "Warning: LLM build time estimates failed (qwen2.5:7b at 127.0.0.1:11434), using median " \
+                     "build times: Connection refused\n",
+        "partial" => "Warning: LLM build time estimates left some out (qwen2.5:7b at 127.0.0.1:11434), using " \
+                     "median build times for: lld\n",
+      )
+    end
+
     it "warns that a response isn't JSON" do
       expect { estimates(anthropic, response("<html>")) }.to output(/: the response is not JSON$/).to_stderr
     end
