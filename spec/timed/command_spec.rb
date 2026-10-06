@@ -86,6 +86,44 @@ RSpec.describe Timed::Command do
     end
   end
 
+  describe ".llm_settings" do
+    it "is none without `--llm-estimates`, else the settings from the `--llm-*` flags or their variables, " \
+       "raising `UsageError` for settings that can't work" do
+      key_file = mktmpdir/"key"
+      key_file.write("sk-proj-FAKEOPENAIKEY0123456789\n")
+      key_file.chmod(0600)
+      url = "http://127.0.0.1:11434/v1/chat/completions"
+      runs = {
+        "off"      => [{ "HOMEBREW_TIMED_LLM_URL" => url, "HOMEBREW_TIMED_LLM_MODEL" => "m" }, []],
+        "variable" => [{ "HOMEBREW_TIMED_LLM_ESTIMATES" => "1", "HOMEBREW_TIMED_LLM_URL" => url,
+                         "HOMEBREW_TIMED_LLM_MODEL" => "m" }, []],
+        "flags"    => [{}, ["--llm-estimates", "--llm-api-key-file=#{key_file}", "--llm-provider=anthropic",
+                            "--llm-url=#{url}", "--llm-model=qwen2.5:7b"]],
+        "unusable" => [{}, ["--llm-estimates"]],
+      }
+      settings_by_run = runs.to_h do |label, (env, argv)|
+        ENV.delete_if { |name, _| name.start_with?("HOMEBREW_TIMED_LLM_") }
+        ENV.update(env)
+        parser = Homebrew::CLI::Parser.new(described_class.builtin("upgrade"))
+        described_class.define_flags(parser)
+        settings = begin
+          described_class.llm_settings(parser.parse(argv))&.then do |found|
+            [found.provider, found.url.to_s, found.model, found.key&.value]
+          end
+        rescue UsageError => e
+          e.message
+        end
+        [label, settings]
+      end
+      expect(settings_by_run).to eq(
+        "off"      => nil,
+        "variable" => ["openai", url, "m", nil],
+        "flags"    => ["anthropic", url, "qwen2.5:7b", "sk-proj-FAKEOPENAIKEY0123456789"],
+        "unusable" => "Invalid usage: LLM estimates need `--llm-api-key-file` unless `--llm-url` is set.",
+      )
+    end
+  end
+
   describe "casks" do
     include TimedCaskHelper
 

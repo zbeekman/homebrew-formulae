@@ -40,10 +40,7 @@ module Homebrew
           args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
-        llm = if args.llm_estimates?
-          Timed::LLM.settings(key_file: args.llm_api_key_file, provider: args.llm_provider, url: args.llm_url,
-                              model: args.llm_model)
-        end
+        llm = Timed::Command.llm_settings(args)
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
         items = args.named.to_formulae_and_casks_and_unavailable(method: :resolve)
         named_casks = items.grep(Cask::Cask)

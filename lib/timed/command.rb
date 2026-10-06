@@ -99,6 +99,21 @@ module Timed
     # `--no-llm-estimates` too, as `options` adds it.
     OWN_FLAGS = T.let([*PLAN_FLAGS, "no_llm_estimates", "no_stamp_receipts"].freeze, T::Array[String])
 
+    # The LLM settings from the `--llm-*` flags of `args` of a `-timed`
+    # command, as `LLM.settings` resolves them; none without
+    # `--llm-estimates`.
+    sig { params(args: Homebrew::CLI::Args).returns(T.nilable(LLM::Settings)) }
+    def self.llm_settings(args)
+      # `Homebrew::CLI::Args` only gets these methods when a command parses
+      # its flags, so Sorbet can't see them on it.
+      # rubocop:disable Style/SendWithLiteralMethodName
+      return unless args.public_send(:llm_estimates?)
+
+      LLM.settings(key_file: args.public_send(:llm_api_key_file), provider: args.public_send(:llm_provider),
+                   url: args.public_send(:llm_url), model: args.public_send(:llm_model))
+      # rubocop:enable Style/SendWithLiteralMethodName
+    end
+
     # Handled by the `-timed` command itself, once for the whole run.
     ASK_FLAGS = %w[ask no_ask dry_run].freeze
 

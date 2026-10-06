@@ -49,10 +49,7 @@ module Homebrew
           args.interactive?
 
         estimator = Timed::Command.estimator(args.estimator)
-        llm = if args.llm_estimates?
-          Timed::LLM.settings(key_file: args.llm_api_key_file, provider: args.llm_provider, url: args.llm_url,
-                              model: args.llm_model)
-        end
+        llm = Timed::Command.llm_settings(args)
         Timed::Command.auto_update(command: self.class.command_name, argv: @argv)
 
         # As `brew install` does, which has disabled it.
