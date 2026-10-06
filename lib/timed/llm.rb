@@ -416,6 +416,7 @@ module Timed
       if !uri.is_a?(URI::HTTP) || uri.host.blank?
         raise UsageError, "`--llm-url` must be an `https://` or `http://` URL with a host."
       end
+      raise UsageError, "`--llm-url` port must be between 1 and 65535." unless (1..65535).cover?(uri.port)
 
       # Any other host could only fail to resolve, and isn't shown, as it may
       # hold a credential (e.g. `host;token=…`).

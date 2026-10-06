@@ -352,6 +352,19 @@ RSpec.describe Timed::LLM do
       expect(names_flag_by_url).to eq(urls.to_h { |url| [url, true] })
     end
 
+    it "rejects a port outside 1 to 65535 before looking the host up, without echoing the URL" do
+      invalid = "Invalid usage: `--llm-url` port must be between 1 and 65535."
+      expected = {
+        "https://llm.example:1/v1"     => "no UsageError",
+        "https://llm.example:65535/v1" => "no UsageError",
+        "https://llm.example:0/v1"     => invalid,
+        "https://llm.example:65536/v1" => invalid,
+        "http://127.0.0.1:0/v1"        => invalid,
+      }
+      outcomes = expected.keys.to_h { |url| [url, usage_error(url:, model: "m", resolver: no_lookup)] }
+      expect(outcomes).to eq(expected)
+    end
+
     it "takes a host name, an IPv4 or a bracketed IPv6 address as the host, and rejects any other host before " \
        "looking it up, without echoing it, as it could only fail and may hide a credential" do
       invalid = "Invalid usage: `--llm-url` host is not a valid host name: use a host name or an IPv4 or bracketed " \
