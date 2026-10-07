@@ -37,6 +37,9 @@ module Homebrew
         def llm_provider; end
 
         sig { returns(T.nilable(String)) }
+        def llm_timeout; end
+
+        sig { returns(T.nilable(String)) }
         def llm_url; end
 
         sig { returns(T::Boolean) }

@@ -18,6 +18,8 @@ module Timed
     extend Utils::Output::Mixin
 
     BUDGET_SECONDS = 45.0
+    # A day; far longer, and `Net::HTTP`'s waits can fail with `EINVAL`.
+    MAX_TIMEOUT_SECONDS = 86_400
     # Decoded; a real answer for hundreds of formulae is a few KB. Only the
     # body is capped: capping the status, header and chunk-size lines would
     # mean hooking private `Net::HTTP` internals, the endpoint is one the
@@ -72,6 +74,8 @@ module Timed
       const :model, String
       const :key, T.nilable(Secret)
       const :addresses, T::Array[String]
+      # Seconds for the whole request, including its one retry.
+      const :timeout, Float
 
       # Who is asked, for messages: the provider for its own API, else the
       # host and port of the URL, never its credentials, path or query.
@@ -244,10 +248,18 @@ module Timed
     sig {
       params(
         key_file: T.nilable(String), provider: T.nilable(String), url: T.nilable(String), model: T.nilable(String),
-        resolver: T.proc.params(host: String).returns(T::Array[String])
+        timeout: T.nilable(String), resolver: T.proc.params(host: String).returns(T::Array[String])
       ).returns(Settings)
     }
-    def self.settings(key_file: nil, provider: nil, url: nil, model: nil, resolver: ->(host) { resolve(host) })
+    def self.settings(key_file: nil, provider: nil, url: nil, model: nil, timeout: nil,
+                      resolver: ->(host) { resolve(host) })
+      timeout = setting(timeout, "TIMEOUT")&.then do |seconds|
+        # Digits only, so `1e3`, `0x10` and `Infinity` aren't read as numbers.
+        seconds = Float(seconds) if seconds.match?(/\A\d+(?:\.\d+)?\z/)
+        next seconds if seconds.is_a?(Float) && seconds.positive? && seconds <= MAX_TIMEOUT_SECONDS
+
+        raise UsageError, "`--llm-timeout` must be a number of seconds over 0 and at most #{MAX_TIMEOUT_SECONDS}."
+      end
       key_file = setting(key_file, "API_KEY_FILE")
       key = read_key(Pathname(key_file)) if key_file
       url = setting(url, "URL")
@@ -262,13 +274,13 @@ module Timed
 
       uri = parse_url(url || adapter.url)
       addresses = (uri.scheme == "http") ? local_addresses(uri, resolver) : []
-      Settings.new(provider:, url: uri, model:, key:, addresses:)
+      Settings.new(provider:, url: uri, model:, key:, addresses:, timeout: timeout || BUDGET_SECONDS)
     end
 
-    # Asks for build time estimates of `subjects` in one request, within
-    # 45 seconds including one retry on HTTP 429 or 5xx. Returns only valid
-    # estimates for names asked about, warning of any it leaves out; on any
-    # failure, including none valid, warns and returns none.
+    # Asks for build time estimates of `subjects` in one request, within the
+    # settings' `timeout` including one retry on HTTP 429 or 5xx. Returns
+    # only valid estimates for names asked about, warning of any it leaves
+    # out; on any failure, including none valid, warns and returns none.
     sig {
       params(
         settings: Settings, subjects: T::Array[Subject], machine: T::Hash[String, T.any(String, Integer, Float)],
@@ -279,7 +291,7 @@ module Timed
                        clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC).to_f })
       return {} if subjects.empty?
 
-      deadline = clock.call + BUDGET_SECONDS
+      deadline = clock.call + settings.timeout
       adapter = PROVIDERS.fetch(settings.provider)
       names = subjects.map(&:name)
       prompt = JSON.generate(machine:, formulae: subjects.map(&:serialize))

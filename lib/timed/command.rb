@@ -91,10 +91,14 @@ module Timed
                   description: "The model to ask, needed with `--llm-url`. " \
                                "Defaults to `$HOMEBREW_TIMED_LLM_MODEL`, else a small model of the provider.",
                   depends_on:  "--llm-estimates"
+      parser.flag "--llm-timeout=",
+                  description: "Seconds to wait for the LLM's answer, including one retry, e.g. longer for a slow " \
+                               "local server. Defaults to `$HOMEBREW_TIMED_LLM_TIMEOUT`, else 45.",
+                  depends_on:  "--llm-estimates"
       (last ? PLAN_FLAGS : PLAN_FLAGS - ["last"]).each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
-    LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model].freeze
+    LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model llm_timeout].freeze
     PLAN_FLAGS = T.let(["guess", "estimator", "last", "exclude", *LLM_FLAGS].freeze, T::Array[String])
     # `--no-llm-estimates` too, as `options` adds it.
     OWN_FLAGS = T.let([*PLAN_FLAGS, "no_llm_estimates", "no_stamp_receipts"].freeze, T::Array[String])
@@ -110,7 +114,8 @@ module Timed
       return unless args.public_send(:llm_estimates?)
 
       LLM.settings(key_file: args.public_send(:llm_api_key_file), provider: args.public_send(:llm_provider),
-                   url: args.public_send(:llm_url), model: args.public_send(:llm_model))
+                   url: args.public_send(:llm_url), model: args.public_send(:llm_model),
+                   timeout: args.public_send(:llm_timeout))
       # rubocop:enable Style/SendWithLiteralMethodName
     end
 
