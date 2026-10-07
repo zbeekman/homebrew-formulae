@@ -344,7 +344,7 @@ can't be used with `--cask`, and each name must be a formula.
 
 : Ask an LLM for estimates of the source builds with no history, no `--guess`
   and not `--exclude`d, which would otherwise get the fallback, in one request
-  of at most 45 seconds; the plan marks these estimates with `*`. If it fails,
+  within `--llm-timeout`; the plan marks these estimates with `*`. If it fails,
   they keep the fallback, with a warning. It sends the formulae's names,
   versions, descriptions and build dependencies, and this computer's CPU,
   cores, memory and OS, nothing else. Off by default; enabled by default if
@@ -373,6 +373,14 @@ can't be used with `--cask`, and each name must be a formula.
   `$HOMEBREW_TIMED_LLM_MODEL`, else the provider's small model
   (`claude-haiku-4-5` or `gpt-5-mini`).
 
-`--llm-api-key-file`, `--llm-provider`, `--llm-url` and `--llm-model` need
-`--llm-estimates` (or `$HOMEBREW_TIMED_LLM_ESTIMATES`), and none of the LLM
-options can be used with `--cask`.
+`--llm-timeout`
+
+: Seconds to wait for the answer, including one retry on HTTP 429 or 5xx: a
+  number over 0 and at most 86400 (a day). Defaults to
+  `$HOMEBREW_TIMED_LLM_TIMEOUT`, else 45. A server on this computer may need
+  minutes for a long list, and more for its first request, while it loads
+  the model.
+
+`--llm-api-key-file`, `--llm-provider`, `--llm-url`, `--llm-model` and
+`--llm-timeout` need `--llm-estimates` (or `$HOMEBREW_TIMED_LLM_ESTIMATES`),
+and none of the LLM options can be used with `--cask`.

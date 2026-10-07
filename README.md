@@ -86,15 +86,18 @@ when the option isn't given:
 | `--llm-provider=anthropic`\|`openai` | `HOMEBREW_TIMED_LLM_PROVIDER` | `anthropic` for a key starting with `sk-ant-`, `openai` otherwise |
 | `--llm-url=`*`url`* | `HOMEBREW_TIMED_LLM_URL` | the provider's API |
 | `--llm-model=`*`name`* | `HOMEBREW_TIMED_LLM_MODEL` | `claude-haiku-4-5` or `gpt-5-mini`; none, so needed, with `--llm-url` |
+| `--llm-timeout=`*`seconds`* | `HOMEBREW_TIMED_LLM_TIMEOUT` | 45 |
 
 For example, with the key in a file only you can read:
 
 ```sh
 chmod 600 ~/.config/anthropic-key
 brew upgrade-timed --dry-run --llm-estimates --llm-api-key-file ~/.config/anthropic-key
-# or a server on this computer that speaks OpenAI's API, without a key:
+# or a server on this computer that speaks OpenAI's API, without a key,
+# given 10 minutes, as it may be slow:
 export HOMEBREW_TIMED_LLM_ESTIMATES=1
-brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completions --llm-model qwen2.5:7b
+brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completions --llm-model qwen2.5:7b \
+  --llm-timeout 600
 ```
 
 - What is sent: for each formula asked about, its name, version, description
@@ -108,19 +111,22 @@ brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completion
   a formula has a source build, that is used instead. `brew build-times stats`
   shows each estimate next to the source build of its version, to judge
   whether the model is good enough.
-- It never holds up a run: the whole request, including one retry on HTTP 429
-  or 5xx, has 45 seconds. If it fails for any reason (no answer in time,
-  offline, a refused key, an unknown model, an answer with no valid
-  estimate), a warning says why (for an HTTP error, only its status and a
-  hint), and those formulae keep the median. Answers are checked: only the
-  formulae asked about are used, each between 1 second and 48 hours, and a
-  warning names any that an answer leaves out, which keep the median.
-  Settings that can't work (no key without `--llm-url`, `--llm-url` without
-  `--llm-model`, an `--llm-url` host that isn't a host name or an IPv4 or
-  bracketed IPv6 address, an `--llm-url` port outside 1 to 65535, `http://`
-  to an address that isn't on this computer or a private network, a key file
-  that can't be read, an unknown provider) stop the command before it does
-  anything.
+- It never holds up a run for long: the whole request, including one retry on
+  HTTP 429 or 5xx, has `--llm-timeout` seconds, 45 unless set. That suits the
+  providers' APIs; a server on this computer, without a fast GPU, may need
+  minutes for a long list, and more for its first request, while it loads the
+  model. If it fails for any reason (no answer in time, offline, a refused
+  key, an unknown model, an answer with no valid estimate), a warning says
+  why (for an HTTP error, only its status and a hint), and those formulae keep
+  the median. Answers are checked: only the formulae asked about are used,
+  each between 1 second and 48 hours, and a warning names any that an answer
+  leaves out, which keep the median. Settings that can't work (no key without
+  `--llm-url`, `--llm-url` without `--llm-model`, an `--llm-url` host that
+  isn't a host name or an IPv4 or bracketed IPv6 address, an `--llm-url` port
+  outside 1 to 65535, `http://` to an address that isn't on this computer or
+  a private network, a key file that can't be read, an unknown provider, an
+  `--llm-timeout` that isn't a number of seconds over 0 and at most 86400)
+  stop the command before it does anything.
 - The key is read from a file only, never from an option or a variable:
   options show up in `ps`, shell history and debug output, and a variable
   holding it could reach any formula or cask download. The file must hold

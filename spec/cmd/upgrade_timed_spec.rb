@@ -125,11 +125,13 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
     it "adds the LLM flags, which need `--llm-estimates` and can't be used with `--cask`", :aggregate_failures do
       argv = %w[--llm-estimates --llm-api-key-file=/key --llm-provider=openai --llm-url=https://example.com/v1
-                --llm-model=m]
+                --llm-model=m --llm-timeout=300]
       args = described_class.new(argv).args
-      expect([args.llm_estimates?, args.llm_api_key_file, args.llm_provider, args.llm_url, args.llm_model])
-        .to eq([true, "/key", "openai", "https://example.com/v1", "m"])
+      expect([args.llm_estimates?, args.llm_api_key_file, args.llm_provider, args.llm_url, args.llm_model,
+              args.llm_timeout])
+        .to eq([true, "/key", "openai", "https://example.com/v1", "m", "300"])
       expect { described_class.new(%w[--llm-model=m]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
+      expect { described_class.new(%w[--llm-timeout=300]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
       expect { described_class.new(%w[--no-llm-estimates --llm-url=http://localhost]) }
         .to raise_error(Homebrew::CLI::OptionConstraintError)
       expect { described_class.new(%w[--cask --llm-estimates]) }.to raise_error(Homebrew::CLI::OptionConflictError)

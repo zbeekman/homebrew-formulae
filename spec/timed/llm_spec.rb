@@ -338,6 +338,31 @@ RSpec.describe Timed::LLM do
       expect(usage_error(url: local_url)).to include("--llm-model")
     end
 
+    it "gives the request 45 seconds by default, as when its variable is empty" do
+      ENV["HOMEBREW_TIMED_LLM_TIMEOUT"] = ""
+      expect(anthropic.timeout).to eq(45.0)
+    end
+
+    it "reads the time limit from `HOMEBREW_TIMED_LLM_TIMEOUT`" do
+      ENV["HOMEBREW_TIMED_LLM_TIMEOUT"] = "300"
+      expect(described_class.settings(key_file: key_file.to_s).timeout).to eq(300.0)
+    end
+
+    it "prefers `--llm-timeout` to its environment variable" do
+      ENV["HOMEBREW_TIMED_LLM_TIMEOUT"] = "300"
+      expect(described_class.settings(key_file: key_file.to_s, timeout: "90.5").timeout).to eq(90.5)
+    end
+
+    it "rejects a time limit that isn't a number of seconds over 0 and at most a day, before any request" do
+      invalid = "Invalid usage: `--llm-timeout` must be a number of seconds over 0 and at most 86400."
+      values = ["0", "0.0", "-5", "abc", "5s", "1e400", "Infinity", "NaN", "0x10", " 5", "86400.5", "100000000",
+                "9" * 400]
+      expected = values.to_h { |timeout| [timeout, invalid] }
+                       .merge("0.5" => "no UsageError", "86400" => "no UsageError")
+      outcomes = expected.keys.to_h { |timeout| [timeout, usage_error(key_file: key_file.to_s, timeout:)] }
+      expect(outcomes).to eq(expected)
+    end
+
     it "accepts `https://` anywhere without looking the host up" do
       settings = described_class.settings(key_file: key_file.to_s, url: "https://llm.example/v1/messages",
                                           model: "m", resolver: no_lookup)
@@ -656,6 +681,18 @@ RSpec.describe Timed::LLM do
       expect(requests.size).to eq(1)
     end
 
+    it "gives the request and its retry a custom time limit, and no more" do
+      slow = described_class.settings(key_file: key_file.to_s, timeout: "300")
+      runs = { 120.0 => [], 300.0 => [] }
+      runs.each_key do |seconds|
+        timeouts.clear
+        now[0] = 0.0
+        estimates(slow, response("", code: 429), anthropic_response([]), seconds:)
+        runs[seconds] = timeouts.dup
+      end
+      expect(runs).to eq(120.0 => [300.0, 180.0], 300.0 => [300.0])
+    end
+
     it "doesn't retry on other HTTP errors" do
       codes = [401, 403, 404]
       requests_by_code = codes.to_h do |code|
@@ -903,6 +940,15 @@ RSpec.describe Timed::LLM do
       settings = described_class.settings(url: "http://127.0.0.1:#{port}/v1/chat/completions", model: "m")
       times = [0.0, 44.7]
       expect { described_class.estimates(settings, subjects, machine:, clock: -> { times.shift || 45.0 }) }
+        .to output(/LLM build time estimates failed .*: (execution expired|Net::ReadTimeout)/).to_stderr
+    end
+
+    it "warns and gives up once a custom time limit is spent" do
+      port = serve { sleep }
+      settings = described_class.settings(url: "http://127.0.0.1:#{port}/v1/chat/completions", model: "m",
+                                          timeout: "120")
+      times = [0.0, 119.7]
+      expect { described_class.estimates(settings, subjects, machine:, clock: -> { times.shift || 120.0 }) }
         .to output(/LLM build time estimates failed .*: (execution expired|Net::ReadTimeout)/).to_stderr
     end
 
