@@ -73,8 +73,8 @@ module Timed
       parser.switch "--[no-]llm-estimates",
                     description: "Ask an LLM for estimates of source builds with no history, no `--guess` and " \
                                  "not `--exclude`d, sending it their names, descriptions, versions and build " \
-                                 "dependencies, and this machine's hardware and build setup: CPU, cores, model, " \
-                                 "memory, OS and make jobs. Off by default.",
+                                 "dependencies, and this machine's hardware and build setup, e.g. CPU, cores, " \
+                                 "model, memory, OS and make jobs. Off by default.",
                     env:         :timed_llm_estimates
       parser.flag "--llm-api-key-file=",
                   description: "File holding the LLM API key, needed unless `--llm-url` is set. " \
