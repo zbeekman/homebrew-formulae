@@ -322,10 +322,14 @@ can't be used with `--cask`, and each name must be a formula.
   and not `--exclude`d, which would otherwise get the fallback, in one request
   within `--llm-timeout`; the plan marks these estimates with `*`. If it fails,
   they keep the fallback, with a warning. It sends the formulae's names,
-  versions, descriptions and build dependencies, and this computer's CPU,
-  cores, memory and OS, nothing else. Off by default; enabled by default if
-  `$HOMEBREW_TIMED_LLM_ESTIMATES` is set, to any value. See
-  [LLM estimates](../README.md#llm-estimates).
+  versions, descriptions and build dependencies; this computer's CPU and
+  architecture, cores and threads (and performance and efficiency cores on
+  Apple Silicon), any container CPU limit, model, form (laptop, desktop or
+  server), whether it is virtualised, memory and OS; Homebrew's make jobs;
+  and what the estimate is for, at temperature 0 for models known to take
+  it. Nothing else: no host name, user name, serial number or path. Off by
+  default; enabled by default if `$HOMEBREW_TIMED_LLM_ESTIMATES` is set, to
+  any value. See [LLM estimates](../README.md#llm-estimates).
 
 `--llm-api-key-file`
 

@@ -16,7 +16,7 @@ RSpec.describe Timed::LLM do
                               build_dependencies: ["cmake"]),
     ]
   end
-  let(:machine) { { "cpu" => "Intel Core i9-9980HK", "cores" => 8, "memory_gb" => 32, "os" => "macOS 15.7.5" } }
+  let(:machine) { { "cpu" => "Intel Core i9-9980HK", "threads" => 16, "virtualised" => false, "os" => "macOS 26.7" } }
   let(:anthropic) { described_class.settings(key_file: key_file.to_s) }
   let(:openai) { described_class.settings(key_file: write_key_file(openai_key).to_s) }
   let(:local) { described_class.settings(url: local_url, model: "qwen2.5:7b") }
@@ -477,9 +477,21 @@ RSpec.describe Timed::LLM do
 
     it "asks Anthropic for the estimates through a strict tool it isn't forced to call" do
       estimates(anthropic, anthropic_response([]))
-      expect([sent["model"], sent["tool_choice"], sent.dig("tools", 0, "strict"),
-              sent.dig("tools", 0, "input_schema", "properties", "estimates", "items", "properties", "name", "enum")])
-        .to eq(["claude-haiku-4-5", { "type" => "auto" }, true, ["llvm", "lld"]])
+      expect([sent["model"], sent["tool_choice"], sent.dig("tools", 0, "strict")])
+        .to eq(["claude-haiku-4-5", { "type" => "auto" }, true])
+    end
+
+    it "asks every provider for a list of names, as plain strings that can be any name, with seconds" do
+      estimates(anthropic, anthropic_response([]))
+      estimates(openai, openai_response([]))
+      schemas = [sent.dig("tools", 0, "input_schema"),
+                 JSON.parse(requests.fetch(1).body).dig("response_format", "json_schema", "schema")]
+      properties = { "name" => { "type" => "string" }, "seconds" => { "type" => "number" } }
+      estimate = { "type" => "object", "properties" => properties, "required" => ["name", "seconds"],
+                   "additionalProperties" => false }
+      list = { "estimates" => { "type" => "array", "items" => estimate } }
+      expect(schemas).to eq([{ "type" => "object", "properties" => list, "required" => ["estimates"],
+                               "additionalProperties" => false }] * 2)
     end
 
     it "sends Anthropic's API version and no extended thinking" do
@@ -504,6 +516,54 @@ RSpec.describe Timed::LLM do
       expect(sent.key?("reasoning_effort")).to be(false)
     end
 
+    it "sends `temperature: 0` only to models known to take it: on a provider's own API, those it lists (none " \
+       "for OpenAI yet); on any other URL, all but hosted models known or expected to reject it" do
+      anthropic_key = key_file.to_s
+      openai_key_file = write_key_file(openai_key).to_s
+      gateway = "https://gateway.example/v1/messages"
+      cases = {
+        "Anthropic, listed"        => [{ key_file: anthropic_key }, 0],
+        "Anthropic, rejecting"     => [{ key_file: anthropic_key, model: "claude-sonnet-5-5" }, nil],
+        "Anthropic, unknown"       => [{ key_file: anthropic_key, model: "claude-opus-4-1" }, nil],
+        "Anthropic URL, listed"    => [{ key_file: anthropic_key, url: gateway, model: "claude-haiku-4-5" }, 0],
+        "Anthropic URL, unknown"   => [{ key_file: anthropic_key, url: gateway, model: "claude-opus-4-1" }, 0],
+        "Anthropic URL, rejecting" => [{ key_file: anthropic_key, url: gateway, model: "claude-opus-5-5" }, nil],
+        "OpenAI, rejecting"        => [{ key_file: openai_key_file }, nil],
+        "OpenAI, reasoning"        => [{ key_file: openai_key_file, model: "o3-mini" }, nil],
+        "OpenAI, unknown"          => [{ key_file: openai_key_file, model: "gpt-4o" }, nil],
+        "local"                    => [{ url: local_url, model: "qwen2.5:7b" }, 0],
+        "local, unknown hosted"    => [{ url: local_url, model: "gpt-4o" }, 0],
+        "local, Claude 4"          => [{ url: local_url, model: "claude-haiku-4-5" }, 0],
+        "local, gpt-5"             => [{ url: local_url, model: "gpt-5-mini" }, nil],
+        "local, o1"                => [{ url: local_url, model: "o1" }, nil],
+        "local, o4"                => [{ url: local_url, model: "o4-mini" }, nil],
+        "local, prefixed gpt-5"    => [{ url: local_url, model: "openai/gpt-5" }, nil],
+        "local, prefixed Claude 5" => [{ url: local_url, model: "anthropic/claude-sonnet-5-5" }, nil],
+        "local, bare Claude 5"     => [{ url: local_url, model: "claude-opus-5" }, nil],
+        "local, Claude 5.5"        => [{ url: local_url, model: "anthropic/claude-sonnet-5.5" }, nil],
+        "local, Bedrock Claude 5"  => [{ url: local_url, model: "anthropic.claude-opus-5-5-v1:0" }, nil],
+        "local, regional Claude 5" => [{ url: local_url, model: "us.anthropic.claude-sonnet-5-5" }, nil],
+        "local, Vertex Claude 5"   => [{ url: local_url, model: "claude-opus-5-5@20260101" }, nil],
+        "local, Claude 6"          => [{ url: local_url, model: "claude-opus-6" }, nil],
+        "local, Claude 10"         => [{ url: local_url, model: "claude-opus-10" }, nil],
+        "local, gpt-6"             => [{ url: local_url, model: "gpt-6" }, nil],
+        "local, o5"                => [{ url: local_url, model: "o5" }, nil],
+        "local, o10"               => [{ url: local_url, model: "openai/o10-mini" }, nil],
+        "local, o3 tag"            => [{ url: local_url, model: "o3:latest" }, nil],
+        "local, Claude 3.5"        => [{ url: local_url, model: "claude-3-5-sonnet" }, 0],
+        "local, Vertex Claude 4"   => [{ url: local_url, model: "claude-sonnet-4-5@20250929" }, 0],
+        "local, gpt-oss"           => [{ url: local_url, model: "gpt-oss:20b" }, 0],
+        "local, ollama"            => [{ url: local_url, model: "llama3.1:8b" }, 0],
+      }
+      temperatures = cases.to_h do |label, (options, _)|
+        requests.clear
+        settings = described_class.settings(**options, resolver: resolving("127.0.0.1"))
+        estimates(settings, response("", code: 500), response("", code: 500))
+        [label, sent.fetch("temperature", nil)]
+      end
+      expect(temperatures).to eq(cases.transform_values(&:last))
+    end
+
     it "sends no key header without a key" do
       estimates(local, openai_response([]))
       expect(requests.fetch(0).headers.keys).to eq(["Content-Type"])
@@ -518,9 +578,10 @@ RSpec.describe Timed::LLM do
       expect(estimates(openai, openai_response([{ name: "llvm", seconds: 3000.5 }]))).to eq("llvm" => 3000.5)
     end
 
-    it "keeps only names it asked about, with numeric seconds" do
+    it "keeps only names it asked about, spelt exactly, with numeric seconds" do
       expect(estimates(anthropic, anthropic_response([
-        { name: "gcc", seconds: 5000 }, { name: "llvm", seconds: "3000" }, { name: "llvm", seconds: nil },
+        { name: "gcc", seconds: 5000 }, { name: "LLVM", seconds: 30 }, { name: "llvm ", seconds: 30 },
+        { name: "lvm", seconds: 30 }, { name: "llvm", seconds: "3000" }, { name: "llvm", seconds: nil },
         { name: "llvm", seconds: true }, { name: ["lld"], seconds: 1 }, "lld", { name: "lld", seconds: 600, extra: 1 }
       ]))).to eq("lld" => 600.0)
     end
@@ -693,8 +754,8 @@ RSpec.describe Timed::LLM do
       expect(runs).to eq(120.0 => [300.0, 180.0], 300.0 => [300.0])
     end
 
-    it "doesn't retry on other HTTP errors" do
-      codes = [401, 403, 404]
+    it "doesn't retry on other HTTP errors, nor resend without `temperature` on HTTP 400" do
+      codes = [400, 401, 403, 404]
       requests_by_code = codes.to_h do |code|
         requests.clear
         estimates(anthropic, response("", code:), anthropic_response([]))

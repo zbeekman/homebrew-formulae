@@ -33,8 +33,8 @@ module TimedLLMHelper
            provider: String).void
   }
   def answer_with(answer, requests, provider: "anthropic")
-    allow(Timed::Command).to receive(:machine).and_return("cpu" => "x86_64 kabylake", "cores" => 8,
-                                                          "os" => "macOS 15.7")
+    allow(Timed::Machine).to receive(:facts).and_return("cpu" => "Apple M2 Pro", "threads" => 12,
+                                                        "os" => "macOS 15.7")
     allow(Timed::LLM).to receive(:post) do |request, _timeout|
       requests << request
       case answer
