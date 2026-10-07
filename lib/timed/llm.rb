@@ -35,6 +35,15 @@ module Timed
     # also allow `_`; IPv4 addresses match too.
     HOST_NAME = /\A(?:[a-z\d_](?:[a-z\d_-]*[a-z\d_])?\.)*[a-z\d_](?:[a-z\d_-]*[a-z\d_])?\.?\z/i
     TOOL = "build_estimates"
+    # Hosted models known or expected to reject `temperature`, which another
+    # URL may proxy, also as e.g. `openai/gpt-5` or
+    # `us.anthropic.claude-opus-5-5-v1:0`: OpenAI's reasoning models (`gpt-5`
+    # and later, every `o` series) take only the default, and Claude 5
+    # models (and, it is assumed, later ones) call it deprecated.
+    NO_TEMPERATURE = %r{
+      (?:\A|[/.])
+      (?:gpt-(?:[5-9]|\d{2})|o[1-9]\d*(?:[-:]|\z)|claude-[a-z]+-(?:[5-9]|\d{2})(?:[-.@:]|\z))
+    }xi
     SYSTEM_PROMPT = "You estimate how long Homebrew takes to build formulae from source on one machine. " \
                     "Give every formula asked about an estimated build time in seconds."
 
@@ -81,10 +90,28 @@ module Timed
       # host and port of the URL, never its credentials, path or query.
       sig { returns(String) }
       def target
-        return "#{provider} #{model}" if url.to_s == PROVIDERS.fetch(provider).url
+        return "#{provider} #{model}" if own_api?
 
         "#{model} at #{url.host}:#{url.port}"
       end
+
+      # Whether to send `temperature: 0`, for the same estimates on every
+      # run. Decided up front, never by trial and error, as a model that
+      # rejects it fails the whole request with HTTP 400: on the provider's
+      # own API, only for the models its adapter lists; on any other URL
+      # (e.g. a local server, which takes it), unless it names a hosted model
+      # known or expected to reject it, which that URL may proxy.
+      sig { returns(T::Boolean) }
+      def temperature?
+        return PROVIDERS.fetch(provider).temperature_models.include?(model) if own_api?
+
+        !model.match?(NO_TEMPERATURE)
+      end
+
+      private
+
+      sig { returns(T::Boolean) }
+      def own_api? = url.to_s == PROVIDERS.fetch(provider).url
     end
 
     # A formula to estimate.
@@ -143,6 +170,11 @@ module Timed
       sig { abstract.returns(String) }
       def model; end
 
+      # The models the provider's own API is checked to take `temperature: 0`
+      # from, each checked with a live request before it is listed.
+      sig { abstract.returns(T::Array[String]) }
+      def temperature_models; end
+
       sig { abstract.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def headers(key); end
 
@@ -170,6 +202,11 @@ module Timed
 
       sig { override.returns(String) }
       def self.model = "claude-haiku-4-5"
+
+      # Claude 4 and earlier models are expected to take it too, but aren't
+      # checked; `claude-sonnet-5-5` rejects it.
+      sig { override.returns(T::Array[String]) }
+      def self.temperature_models = ["claude-haiku-4-5"]
 
       sig { override.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def self.headers(key)
@@ -211,6 +248,11 @@ module Timed
 
       sig { override.returns(String) }
       def self.model = "gpt-5-mini"
+
+      # None checked yet. Its reasoning models, `gpt-5-mini` among them, take
+      # only the default.
+      sig { override.returns(T::Array[String]) }
+      def self.temperature_models = []
 
       sig { override.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def self.headers(key)
@@ -283,7 +325,8 @@ module Timed
     # out; on any failure, including none valid, warns and returns none.
     sig {
       params(
-        settings: Settings, subjects: T::Array[Subject], machine: T::Hash[String, T.any(String, Integer, Float)],
+        settings: Settings, subjects: T::Array[Subject],
+        machine: T::Hash[String, T.any(String, Integer, Float, T::Boolean)],
         http: T.proc.params(request: Request, timeout: Float).returns(Response), clock: T.proc.returns(Float)
       ).returns(T::Hash[String, Float])
     }
@@ -295,9 +338,11 @@ module Timed
       adapter = PROVIDERS.fetch(settings.provider)
       names = subjects.map(&:name)
       prompt = JSON.generate(machine:, formulae: subjects.map(&:serialize))
+      body = adapter.body(settings.model, prompt, schema)
+      body[:temperature] = 0 if settings.temperature?
       request = Request.new(uri: settings.url, addresses: settings.addresses,
                             headers: { "Content-Type" => "application/json", **adapter.headers(settings.key) },
-                            body: JSON.generate(adapter.body(settings.model, prompt, schema(names))))
+                            body: JSON.generate(body))
       response = http.call(request, deadline - clock.call)
       if retry?(response.code) && (time_left = deadline - clock.call).positive?
         response = http.call(request, time_left)
@@ -490,12 +535,15 @@ module Timed
       Secret.new(key.force_encoding(Encoding::UTF_8))
     end
 
-    # A JSON schema for a list of `{name, seconds}` for `names`.
-    sig { params(names: T::Array[String]).returns(T::Hash[Symbol, T.anything]) }
-    private_class_method def self.schema(names)
+    # A JSON schema for a list of `{name, seconds}`. A name isn't limited to
+    # those asked about with an `enum`: providers cap the size of a strict
+    # schema, so a long list could fail the whole request, and `valid` drops
+    # any other name.
+    sig { returns(T::Hash[Symbol, T.anything]) }
+    private_class_method def self.schema
       estimate = {
         type:                 "object",
-        properties:           { name: { type: "string", enum: names }, seconds: { type: "number" } },
+        properties:           { name: { type: "string" }, seconds: { type: "number" } },
         required:             ["name", "seconds"],
         additionalProperties: false,
       }

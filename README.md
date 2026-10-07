@@ -101,9 +101,22 @@ brew upgrade-timed --dry-run --llm-url http://127.0.0.1:11434/v1/chat/completion
 ```
 
 - What is sent: for each formula asked about, its name, version, description
-  and build dependencies; and this computer's CPU, number of cores, memory and
-  OS version. Nothing else: no build times, so nothing about what else is
-  installed. Turning it on agrees to sending that to the provider.
+  and build dependencies; this computer's hardware and setup, as far as it can
+  be read quickly: the CPU's name and architecture, its cores and threads (and
+  performance and efficiency cores on Apple Silicon), any container CPU limit,
+  the computer's model (e.g. `MacBookPro16,4`) and form (laptop, desktop or
+  server), whether it is virtualised, its memory and OS version; how many
+  jobs Homebrew runs `make` with; and a sentence saying the estimate is for
+  building and installing the formula alone, not downloads or dependencies.
+  Nothing else: no host name, user name, serial number or path, and no build
+  times, so nothing about what else is installed. Turning it on agrees to
+  sending that to the provider.
+- Models known to take it are asked at temperature 0, so the same request
+  gets the same estimates: `claude-haiku-4-5` on Anthropic's API, and any
+  model on an `--llm-url` server other than a hosted one known or expected to
+  reject it (OpenAI's `o` series and `gpt-5` and later, Claude 5 and later,
+  also behind a prefix such as `openai/` or `us.anthropic.`). Others,
+  including every model on OpenAI's API so far, get the provider's default.
 - Only source builds with no history, no `--guess` and not `--exclude`d are
   asked about, and none means no request. Each answer is kept in
   `build-log.json` under `estimates`, with the model and date, and used again

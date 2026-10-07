@@ -16,6 +16,7 @@ require_relative "after"
 require_relative "build_log"
 require_relative "casks"
 require_relative "llm"
+require_relative "machine"
 require_relative "planner"
 
 module Timed
@@ -72,7 +73,8 @@ module Timed
       parser.switch "--[no-]llm-estimates",
                     description: "Ask an LLM for estimates of source builds with no history, no `--guess` and " \
                                  "not `--exclude`d, sending it their names, descriptions, versions and build " \
-                                 "dependencies, and this machine's CPU, cores, memory and OS. Off by default.",
+                                 "dependencies, and this machine's hardware and build setup: CPU, cores, model, " \
+                                 "memory, OS and make jobs. Off by default.",
                     env:         :timed_llm_estimates
       parser.flag "--llm-api-key-file=",
                   description: "File holding the LLM API key, needed unless `--llm-url` is set. " \
@@ -691,7 +693,7 @@ module Timed
       answers = if subjects.any?
         count = Utils.pluralize("estimate", subjects.length, include_count: true)
         ohai "Asking #{llm.target} for #{count}"
-        LLM.estimates(llm, subjects, machine:)
+        LLM.estimates(llm, subjects, machine: Machine.facts)
       else
         {}
       end
@@ -710,34 +712,6 @@ module Timed
       estimates.merge(kept.merge(answers).transform_values do |seconds|
         Estimate.new(seconds:, pour: false, fallback: false, guessed: true)
       end)
-    end
-
-    # What an LLM is told of this machine: CPU, cores, memory and OS, as
-    # `brew config` describes them, leaving out any that can't be read, as
-    # the request is never worth stopping the run for.
-    sig { returns(T::Hash[String, T.any(String, Integer)]) }
-    def self.machine
-      facts = {
-        "cpu"       => -> { "#{Hardware::CPU.arch} #{Hardware::CPU.family}" },
-        "cores"     => -> { Hardware::CPU.cores },
-        "memory_gb" => lambda do
-          bytes = if OS.mac?
-            Utils.popen_read("/usr/sbin/sysctl", "-n", "hw.memsize").to_i
-          else
-            File.read("/proc/meminfo")[/^MemTotal:\s+(\d+) kB/, 1].to_i * 1024
-          end
-          (bytes / (1024.0**3)).round if bytes.positive?
-        end,
-        "os"        => -> { OS_VERSION },
-      }
-      facts.filter_map do |name, fact|
-        value = begin
-          fact.call
-        rescue
-          nil
-        end
-        [name, value] unless value.nil?
-      end.to_h
     end
 
     # Prints the batches with their estimates, why each starts where it does,

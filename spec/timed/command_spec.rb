@@ -1215,7 +1215,7 @@ RSpec.describe Timed::Command do
       Timed::LLM.settings(url: "http://127.0.0.1:11434/v1/chat/completions", model: "qwen2.5:7b",
                           resolver: ->(_host) { ["127.0.0.1"] })
     end
-    let(:machine) { { "cpu" => "x86_64 kabylake", "cores" => 8, "memory_gb" => 32, "os" => "macOS 15.7" } }
+    let(:machine) { { "cpu" => "Apple M2 Pro", "threads" => 12, "virtualised" => false, "os" => "macOS 15.7" } }
     let(:requests) { [] }
 
     # `history` has a source build, `cached` an LLM estimate of version 1.0
@@ -1246,7 +1246,7 @@ RSpec.describe Timed::Command do
           depends_on "zlib"
         end]
       end
-      allow(described_class).to receive(:machine).and_return(machine)
+      allow(Timed::Machine).to receive(:facts).and_return(machine)
       allow(Timed::LLM).to receive(:post) do |request, _timeout|
         requests << request
         raise answers if answers.is_a?(Exception)
@@ -1365,40 +1365,6 @@ RSpec.describe Timed::Command do
     it "makes no request without LLM settings" do
       estimates(llm: nil)
       expect(requests).to eq([])
-    end
-  end
-
-  describe ".machine" do
-    it "gives the CPU, cores, memory and OS" do
-      machine = described_class.machine
-      expect(machine.transform_values(&:class))
-        .to eq("cpu" => String, "cores" => Integer, "memory_gb" => Integer, "os" => String)
-    end
-
-    it "leaves out any fact that can't be read, however it fails, rather than stopping the run" do
-      failing = T.let(nil, T.nilable(String))
-      # Raises `error` while `fact` is the one failing.
-      fail_for = lambda do |fact, error|
-        lambda do |original, *args|
-          raise error if failing == fact
-
-          original.call(*args)
-        end
-      end
-      allow(Hardware::CPU).to receive(:family).and_wrap_original(&fail_for.call("cpu", RuntimeError.new("no CPU")))
-      allow(Hardware::CPU).to receive(:cores).and_wrap_original(&fail_for.call("cores", ArgumentError.new("none")))
-      allow(Utils).to receive(:popen_read).and_call_original
-      allow(Utils).to receive(:popen_read).with("/usr/sbin/sysctl", "-n", "hw.memsize")
-                                          .and_wrap_original(&fail_for.call("memory_gb", IOError.new("closed")))
-      allow(File).to receive(:read).and_call_original
-      allow(File).to receive(:read).with("/proc/meminfo")
-                                   .and_wrap_original(&fail_for.call("memory_gb", IOError.new("closed")))
-      facts = %w[cpu cores memory_gb os]
-      left = facts.first(3).to_h do |fact|
-        failing = fact
-        [fact, described_class.machine.keys]
-      end
-      expect(left).to eq(facts.first(3).to_h { |fact| [fact, facts - [fact]] })
     end
   end
 
