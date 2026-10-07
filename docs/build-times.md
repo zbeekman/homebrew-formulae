@@ -2,7 +2,7 @@
 
 ## Usage
 
-`brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[*`formula`* ...\]
+`brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
 `brew build-times note` *`formula`* *`text`*
 
@@ -28,7 +28,7 @@ default, `$XDG_CONFIG_HOME/homebrew` when that is set). It is written with mode
 
 ## Subcommands
 
-### `stats` \[`--sort=`*`key`*\] \[`--reverse`\] \[*`formula`* ...\]
+### `stats` \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
 The default subcommand. Print a table with a row for each logged formula, or
 for each *`formula`* named, then the fallback estimate for formulae with no
@@ -79,6 +79,9 @@ stay together, ordered by its first row.
   name, and a row with no history counts as zero. Any other key is a usage
   error naming these.
 - `--reverse`: reverse the order of the rows, whether sorted or not.
+- `--json`\[=*`version`*\]: print the build history as JSON instead of the
+  tables, as `brew tap-info --json` does. `v1` is the default and the only
+  accepted *`version`*; any other is a usage error. See [JSON](#json).
 
 The `estimate` of a source build is its mean plus 1.5 standard deviations, and
 of a pour its mean. An estimate ending in `?` is a guess, because there is no
@@ -94,6 +97,56 @@ of the latest source build of that version (`-` if there is none yet), and the
 model and date of the estimate, to judge whether the model is good enough.
 The log keeps one estimate per formula, under `estimates`; a formula's own
 source builds always take its place once there are any.
+
+#### JSON
+
+`--json` prints a JSON array to standard output, never coloured, with an object
+for each row of the table, in the same order (the named formulae, `--sort` and
+`--reverse` apply). The `built` and `poured` rows of a formula are separate, as
+in the table. The objects have these keys, in this order:
+
+- `name`: the formula's short name;
+- `kind`: `built` or `poured`, or `null` for a formula with no successful
+  build;
+- `n`: the number of builds of that kind that have a time;
+- `median`, `mean` and `stdev`: the median, mean and standard deviation of
+  those times, in seconds, as numbers, or `null` without any;
+- `builds`: every logged build of that kind, oldest first, each an object with
+  `seconds` (its time in seconds, as the statistics use it, or `null` if none
+  was logged), `date` (when it started, as logged: a date alone in older
+  entries, else a timestamp), `version` and `status` (`built`, `poured` or
+  `failed`). A failed build is of neither kind, so it is listed in every row of
+  its formula, as in the trend.
+
+Left out: the `last` column (the last entry of `builds`), the estimate and
+whether it is a guess, the fallback estimate for unknown formulae and the LLM
+estimates. A formula named but not logged has a row with a `null` kind and no
+builds.
+
+```sh
+brew build-times stats --json llvm
+```
+
+```json
+[
+  {
+    "name": "llvm",
+    "kind": "built",
+    "n": 1,
+    "median": 5163.1,
+    "mean": 5163.1,
+    "stdev": 0.0,
+    "builds": [
+      {
+        "seconds": 5163.1,
+        "date": "2026-09-25",
+        "version": "23.1.2",
+        "status": "built"
+      }
+    ]
+  }
+]
+```
 
 ### `note` *`formula`* *`text`*
 

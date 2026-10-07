@@ -53,7 +53,7 @@ module Homebrew
       class StatsSubcommand < Homebrew::AbstractSubcommand
         subcommand_args default: true do
           usage_banner <<~EOS
-            `brew build-times stats` [`--sort=`<key>] [`--reverse`] [<formula> ...]:
+            `brew build-times stats` [`--sort=`<key>] [`--reverse`] [`--json`[`=`<version>]] [<formula> ...]:
             Show build time statistics and estimates for <formula> or every logged formula.
             Builds that poured a bottle and builds from source are never mixed.
             The estimate of a source build is its mean plus 1.5 standard deviations, and of a pour its mean.
@@ -64,6 +64,8 @@ module Homebrew
             A failed build is shown as `×` in the trend of every row of the formula.
             With colour, the column names of the header are bold and underlined.
             Colour follows Homebrew's own rules (off when not a terminal or with `HOMEBREW_NO_COLOR`).
+            With `--json`, print a JSON array instead, never coloured: for each row `name`, `kind`, `n`, `median`,
+            `mean` and `stdev` (seconds) and its `builds`, each with `seconds`, `date`, `version` and `status`.
           EOS
           flag "--sort=",
                description: "Order the rows by <key>: `name`, `estimate`, `median`, `mean`, `n` or `last` " \
@@ -71,6 +73,9 @@ module Homebrew
                             "Without it the rows are in the order of the log, or of the formulae named."
           switch "--reverse",
                  description: "Reverse the order of the rows."
+          flag "--json",
+               description: "Print the build history as JSON instead of the tables. Currently the default and " \
+                            "only accepted value for <version> is `v1`."
           named_args :formula
         end
 
@@ -81,10 +86,15 @@ module Homebrew
             raise UsageError, "`--sort` must be one of #{Timed::StatsTable::SORT_KEYS.join(", ")}."
           end
 
+          json = args.json
+          raise UsageError, "invalid JSON version: #{json} (use `v1`)." unless [nil, "v1", true].include?(json)
+
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
           names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
           rows = Timed::StatsTable.sort(names.flat_map { |name| Timed::StatsTable.rows(log, name) }, key,
                                         reverse: args.reverse? || false)
+          return puts JSON.pretty_generate(Timed::StatsTable.json_rows(log, rows)) if json
+
           Timed::StatsTable.lines(rows).each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
