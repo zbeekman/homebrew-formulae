@@ -1018,7 +1018,12 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
-  describe "`Tty`, which paints `brew build-times stats`" do
+  describe "`Tty`, which paints `brew build-times stats` and `histogram`" do
+    # It can be 0; `histogram` draws at least 40 columns whatever it is.
+    it "gives the width of the terminal, which `histogram` fits, as a number of columns" do
+      expect(Tty.width).to be_a(Integer)
+    end
+
     it "has the colours and reset the table paints with, as escape sequences when colour is on" do
       ENV["HOMEBREW_COLOR"] = "1"
       codes = [:green, :yellow, :red, :cyan, :magenta, :italic, :bold, :underline].to_h do |colour|

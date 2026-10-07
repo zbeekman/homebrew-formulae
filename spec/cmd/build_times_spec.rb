@@ -347,14 +347,72 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     end
   end
 
+  describe "histogram" do
+    let(:awscli) { [189.52, 190.868, 205.0].sum / 3 }
+
+    before { allow(Tty).to receive(:width).and_return(60) }
+
+    def histogram(*args) = capture_stdout { described_class.new(["histogram", *args]).run }
+
+    def plot(title, values, width: 60, smooth: false)
+      "#{["==> #{title}", *Timed::Plot.histogram(values, width:, smooth:)].join("\n")}\n"
+    end
+
+    it "plots source builds or pours, by the mean of each formula or every build, under a title" do
+      outputs = [[], %w[--builds], %w[--poured], %w[--poured --builds]].to_h { |args| [args, histogram(*args)] }
+      expect(outputs).to eq(
+        []                    => plot("Mean source build time of 3 formulae, from 1m06s to 1h26m",
+                                      [awscli, 5163.1, 66.5]),
+        %w[--builds]          => plot("Time of 5 source builds, from 1m06s to 1h26m",
+                                      [189.52, 190.868, 205.0, 5163.1, 66.5]),
+        %w[--poured]          => plot("Mean pour time of 3 formulae, from 0m01s to 0m20s", [1.408, 3.0, 20.0]),
+        %w[--poured --builds] => plot("Time of 3 pours, from 0m01s to 0m20s", [1.408, 3.0, 20.0]),
+      )
+    end
+
+    it "plots only the formulae named" do
+      expect(histogram("awscli", "homebrew/core/llvm", "nope"))
+        .to eq(plot("Mean source build time of 2 formulae, from 3m15s to 1h26m", [awscli, 5163.1]))
+    end
+
+    it "draws the smoothed curve with `--smooth`" do
+      expect(histogram("--smooth")).to eq(plot("Mean source build time of 3 formulae, from 1m06s to 1h26m",
+                                               [awscli, 5163.1, 66.5], smooth: true))
+    end
+
+    it "fits the width of the terminal" do
+      allow(Tty).to receive(:width).and_return(100)
+      expect(histogram).to eq(plot("Mean source build time of 3 formulae, from 1m06s to 1h26m",
+                                   [awscli, 5163.1, 66.5], width: 100))
+    end
+
+    it "says so instead of plotting fewer than 2 times" do
+      outputs = [%w[llvm], %w[--builds wget], %w[--poured nope]].to_h { |args| [args, histogram(*args)] }
+      expect(outputs).to eq(
+        %w[llvm]          => "==> No histogram: 1 formula with a source build time, at least 2 are needed\n",
+        %w[--builds wget] => "==> No histogram: 0 source builds, at least 2 are needed\n",
+        %w[--poured nope] => "==> No histogram: 0 formulae with a pour time, at least 2 are needed\n",
+      )
+    end
+
+    it "paints the bars by band with colour, the same plot without the colour codes" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      output = histogram
+      expect([output.scan(/\e\[(\d+)m█/).flatten.uniq, Tty.strip_ansi(output)])
+        .to eq([%w[33 31], plot("Mean source build time of 3 formulae, from 1m06s to 1h26m",
+                                [awscli, 5163.1, 66.5])])
+    end
+  end
+
   describe "help" do
     let(:help) { described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ") }
 
     it "gives each subcommand a complete one-line summary" do
       summaries = {
-        "stats"   => "Show build time statistics and estimates for formula or every logged formula.",
-        "note"    => "Append text to the problems recorded for the latest logged build of formula.",
-        "restamp" => "Add the logged build times to the install receipts of installed formulae that lack them.",
+        "stats"     => "Show build time statistics and estimates for formula or every logged formula.",
+        "histogram" => "Plot a histogram of the source build times of formula or every logged formula.",
+        "note"      => "Append text to the problems recorded for the latest logged build of formula.",
+        "restamp"   => "Add the logged build times to the install receipts of installed formulae that lack them.",
       }
       found = summaries.to_h { |subcommand, summary| [subcommand, help[/#{subcommand}: #{Regexp.escape(summary)}/]] }
       expect(found).to eq(summaries.to_h { |subcommand, summary| [subcommand, "#{subcommand}: #{summary}"] })

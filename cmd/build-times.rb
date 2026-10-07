@@ -4,6 +4,7 @@
 require "abstract_command"
 require "abstract_subcommand"
 require_relative "../lib/timed/build_log"
+require_relative "../lib/timed/plot"
 require_relative "../lib/timed/receipts"
 require_relative "../lib/timed/stats_table"
 
@@ -47,6 +48,45 @@ module Homebrew
           name, text = args.named
           noted = Timed::BuildLog.update(Timed::BuildLog.default_path) { |log| log.add_note(name.to_s, text.to_s) }
           odie "no builds logged for #{name}" if noted.nil?
+        end
+      end
+
+      class HistogramSubcommand < Homebrew::AbstractSubcommand
+        subcommand_args do
+          usage_banner <<~EOS
+            `brew build-times histogram` [`--poured`] [`--builds`] [`--smooth`] [<formula> ...]:
+            Plot a histogram of the source build times of <formula> or every logged formula.
+            Each formula counts once, with the mean of its times. Time is on a log scale, from the shortest to the longest,
+            with ticks at 1s, 10s, 1m, 10m, 1h and 10h; `┊` marks 75 seconds, where the `-timed` commands start to split
+            batches. With colour, each bar is green up to 75 seconds, yellow up to 10 minutes and red above, by the
+            median of its times. It needs at least 2 times to plot.
+          EOS
+          switch "--poured",
+                 description: "Plot the times of pours instead of source builds."
+          switch "--builds",
+                 description: "Count every build, not one mean for each formula."
+          switch "--smooth",
+                 description: "Draw a smoothed curve with the bars, behind their full cells: a Gaussian kernel " \
+                              "density estimate of the log times, with Silverman's bandwidth."
+          named_args :formula
+        end
+
+        sig { override.void }
+        def run
+          log = Timed::BuildLog.load(Timed::BuildLog.default_path)
+          names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
+          times = names.map { |name| log.durations(name, status: args.poured? ? "poured" : "built") }.reject(&:empty?)
+          what = args.poured? ? "pour" : "source build"
+          values = args.builds? ? times.flatten : times.map { |durations| Timed::BuildLog.mean(durations) }
+          counted = Utils.pluralize(args.builds? ? what : "formula", values.length, include_count: true)
+          if values.length < 2
+            return ohai "No histogram: #{counted}#{" with a #{what} time" unless args.builds?}, at least 2 are needed"
+          end
+
+          title = args.builds? ? "Time of #{counted}" : "Mean #{what} time of #{counted}"
+          ohai "#{title}, from #{Timed::BuildLog.format_duration(values.min)} to " \
+               "#{Timed::BuildLog.format_duration(values.max)}",
+               *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, paint: Timed::StatsTable::PAINT)
         end
       end
 

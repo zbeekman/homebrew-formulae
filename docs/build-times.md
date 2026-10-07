@@ -4,6 +4,8 @@
 
 `brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
+`brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[*`formula`* ...\]
+
 `brew build-times note` *`formula`* *`text`*
 
 `brew build-times restamp` \[*`formula`* ...\]
@@ -146,6 +148,68 @@ brew build-times stats --json llvm
     ]
   }
 ]
+```
+
+### `histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[*`formula`* ...\]
+
+Plot a histogram of the source build times of every logged formula, or of
+each *`formula`* named: a heading naming what is counted and the shortest and
+longest time, then bars of how many took how long, with the count on the y axis
+and the time on the x axis. Each formula counts once, with the mean of its
+times, so a formula built many times does not outweigh the others.
+
+- The x axis is on a log scale, as build times run from seconds to hours, from
+  the shortest time to the longest. It has ticks at `1s`, `10s`, `1m`, `10m`,
+  `1h` and `10h` where they are in that range, edges included, so a narrow
+  range may have none. A label that would touch the one before it is left out.
+- `┊` marks 75 seconds, where the `-timed` commands start to split batches:
+  in the axis, unless a tick is there, and above the bars.
+- The plot is as wide as the terminal (at least 40 columns) and 10 rows high.
+  The bins are of equal width on the log scale: at least 2 per cube root of the
+  number of times (5 for 10 formulae, 10 for 100), sometimes a few more so the
+  bins fill the width evenly, so a bar is one or more columns wide. The y axis
+  is labelled with the highest count. The top of a bar is drawn in eighths of a
+  row (`▁▂▃▄▅▆▇█`), and a bin with any time in it is at least `▁` high.
+- With colour, each bar is green up to 75 seconds, yellow up to 10 minutes and
+  red above, by the median of the times in it, as `estimate` is in `stats`.
+  Colour follows the same rules as in `stats`; without it the plot is plain
+  text.
+- With fewer than 2 times to plot, it says so (`No histogram:` and what it
+  found) instead of plotting.
+
+There is no `--json`; `stats --json` gives every time plotted.
+
+- `--poured`: plot the times of pours instead of source builds. The two are
+  never mixed.
+- `--builds`: count every build, not one mean for each formula.
+- `--smooth`: draw a smoothed curve with the bars, in braille: a Gaussian
+  kernel density estimate of the log times, with Silverman's rule-of-thumb
+  bandwidth (0.9 times the smaller of the standard deviation and the
+  interquartile range divided by 1.34, or the one that is not zero, times the
+  number of times to the power -1/5; one bin's width if the times are all
+  equal). At each point it shows how many times the estimate puts within one
+  bin's width centred there, so it is on the scale of the bars: a lone time
+  is never higher than 1, and a cluster of times narrower than the plot can
+  show is still drawn. It is drawn behind the bars' full cells (`█`), so a
+  bar always keeps its height, and over the top cell of a bar and empty
+  cells; it is never coloured. If its peak is higher than the highest bar, as
+  when a cluster straddles the edge of two bins, the y axis goes up to it.
+
+```console
+$ brew build-times histogram
+==> Mean source build time of 91 formulae, from 0m05s to 3h08m
+20 ┤                        ████████
+   │                        ████████
+   │                        ████████████████
+   │                ████████████████████████
+   │                ████████████████████████▄▄▄▄▄▄▄▄
+   │        ████████████████████████████████████████
+   │▄▄▄▄▄▄▄▄████████████████████████████████████████████████
+   │████████████████████████████████████████████████████████
+   │████████████████████████████████████████████████████████        ▄▄▄▄▄▄▄▄
+   │████████████████████████████████████████████████████████████████████████
+ 0 └──────┬────────────────┬─┊──────────────────┬────────────────┬──────────
+          10s              1m                   10m              1h
 ```
 
 ### `note` *`formula`* *`text`*
