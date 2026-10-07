@@ -60,11 +60,11 @@ The latest 8 count the failed builds too.
 With colour, `estimate` and the blocks of the trend are green up to 75 seconds
 (where the planner starts splitting batches), yellow up to 10 minutes and red
 above; `×` and the `last` of a failed build are red; an estimate that is a
-guess (ending in `?`) is in italics; and `built` and `poured` are cyan and
-magenta. Colour follows Homebrew's own rules: it is off unless the output is a
-terminal or `$HOMEBREW_COLOR` is set, and always off with `$HOMEBREW_NO_COLOR`.
-Without it the table is plain text. The LLM estimates table below gets the same
-colours for `estimate` and `actual`.
+guess (ending in `?`) is also in italics; and `built` and `poured` are cyan
+and magenta. Colour follows Homebrew's own rules: it is off unless the output
+is a terminal or `$HOMEBREW_COLOR` is set, and always off with
+`$HOMEBREW_NO_COLOR`. Without it the table is plain text. The LLM estimates
+table below gets the same colours for `estimate` and `actual`.
 
 The rows are in the order of the log (by formula name), or of the formulae
 named, unless `--sort` is given. A formula's `built` and `poured` rows always

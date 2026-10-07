@@ -53,7 +53,7 @@ module Homebrew
       class StatsSubcommand < Homebrew::AbstractSubcommand
         subcommand_args default: true do
           usage_banner <<~EOS
-            `brew build-times stats` [<formula> ...]:
+            `brew build-times stats` [`--sort=`<key>] [`--reverse`] [<formula> ...]:
             Show build time statistics and estimates for <formula> or every logged formula.
             Builds that poured a bottle and builds from source are never mixed.
             The estimate of a source build is its mean plus 1.5 standard deviations, and of a pour its mean.

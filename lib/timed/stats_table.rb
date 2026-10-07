@@ -156,7 +156,7 @@ module Timed
         pad(kind || "-", 6, paint, style: kind && KIND_STYLES[kind]),
         row.n.to_s.rjust(3),
         *row.statistics.map { |text| text.rjust(8) },
-        pad(estimate, 9, paint, style: row.guess ? :italic : Plot.band(row.estimate), right: true),
+        pad(estimate, 9, paint, style: Plot.band(row.estimate), right: true, italic: row.guess),
       ]
       last = pad(row.last, last_width, paint, style: row.last_failed ? :red : nil)
       "#{columns.join(" ")}  #{last}  #{Plot.sparkline(row.trend, paint:)}"
@@ -189,14 +189,16 @@ module Timed
     end
     private_class_method :seconds_cell
 
-    # `text` padded to `width` visible characters; only the text is painted.
+    # `text` padded to `width` visible characters; only the text is painted,
+    # in `style` and also in italics if `italic`.
     sig {
-      params(text: String, width: Integer, paint: Plot::Paint, style: T.nilable(Symbol), right: T::Boolean)
-        .returns(String)
+      params(text: String, width: Integer, paint: Plot::Paint, style: T.nilable(Symbol), right: T::Boolean,
+             italic: T::Boolean).returns(String)
     }
-    def self.pad(text, width, paint, style: nil, right: false)
+    def self.pad(text, width, paint, style: nil, right: false, italic: false)
       gap = " " * [width - text.length, 0].max
       painted = style ? paint.call(text, style) : text
+      painted = paint.call(painted, :italic) if italic
       right ? "#{gap}#{painted}" : "#{painted}#{gap}"
     end
     private_class_method :pad

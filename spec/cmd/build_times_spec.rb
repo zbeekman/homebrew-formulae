@@ -132,9 +132,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
           .to eq([["\e[36mbuilt\e[0m", "\e[33m3m28s\e[0m  "], ["\e[36mbuilt\e[0m", "\e[31m1h26m\e[0m  "]])
       end
 
-      it "italicises an estimate that is a guess" do
+      it "italicises an estimate that is a guess, keeping the colour of its band" do
         line = capture_stdout { described_class.new(%w[stats nope]).run }.lines.fetch(1)
-        expect(line).to include("   \e[3m3m15s?\e[0m  ?")
+        expect(line).to include("   \e[3m\e[33m3m15s?\e[0m\e[0m  ?")
       end
 
       it "paints the `estimate` and `actual` of the LLM estimates by band" do
