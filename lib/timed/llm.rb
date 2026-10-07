@@ -155,7 +155,9 @@ module Timed
       def estimates(response); end
     end
 
-    # Anthropic's Messages API, answering through a forced tool call.
+    # Anthropic's Messages API, answering through a tool call. Newer models
+    # reject a forced tool, so it only asks; a reply without one fails the
+    # parse.
     module Anthropic
       extend Adapter
 
@@ -183,8 +185,8 @@ module Timed
           system:      SYSTEM_PROMPT,
           messages:    [{ role: "user", content: prompt }],
           tools:       [{ name: TOOL, description: "Record each formula's estimated build time.",
-                          input_schema: schema }],
-          tool_choice: { type: "tool", name: TOOL },
+                          input_schema: schema, strict: true }],
+          tool_choice: { type: "auto" },
         }
       end
 
