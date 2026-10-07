@@ -54,12 +54,12 @@ module Homebrew
       class HistogramSubcommand < Homebrew::AbstractSubcommand
         subcommand_args do
           usage_banner <<~EOS
-            `brew build-times histogram` [`--poured`] [`--builds`] [`--smooth`] [<formula> ...]:
+            `brew build-times histogram` [`--poured`] [`--builds`] [`--smooth`] [`--linear`] [<formula> ...]:
             Plot a histogram of the source build times of <formula> or every logged formula.
             Each formula counts once, with the mean of its times. Time is on a log scale, from the shortest to the longest,
-            with ticks at 1s, 10s, 1m, 10m, 1h and 10h; `┊` marks 75 seconds, where the `-timed` commands start to split
-            batches. With colour, each bar is green up to 75 seconds, yellow up to 10 minutes and red above, by the
-            median of its times. It needs at least 2 times to plot.
+            with ticks at 1s, 10s, 1m, 10m, 1h and 10h, or with `--linear` on a linear scale from 0; `┊` marks 75
+            seconds, where the `-timed` commands start to split batches. With colour, each bar is green up to 75 seconds,
+            yellow up to 10 minutes and red above, by the median of its times. It needs at least 2 times to plot.
           EOS
           switch "--poured",
                  description: "Plot the times of pours instead of source builds."
@@ -68,6 +68,9 @@ module Homebrew
           switch "--smooth",
                  description: "Draw a smoothed curve with the bars, behind their full cells: a Gaussian kernel " \
                               "density estimate of the log times, with Silverman's bandwidth."
+          switch "--linear",
+                 description: "Plot time on a linear scale from 0 instead, in bins of a round width near the " \
+                              "Freedman–Diaconis width, such as 20s, 5m or 2h, with ticks on their edges."
           named_args :formula
         end
 
@@ -86,7 +89,8 @@ module Homebrew
           title = args.builds? ? "Time of #{counted}" : "Mean #{what} time of #{counted}"
           ohai "#{title}, from #{Timed::BuildLog.format_duration(values.min)} to " \
                "#{Timed::BuildLog.format_duration(values.max)}",
-               *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, paint: Timed::StatsTable::PAINT)
+               *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, linear: args.linear?,
+                                                paint: Timed::StatsTable::PAINT)
         end
       end
 

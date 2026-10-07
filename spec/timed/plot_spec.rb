@@ -147,15 +147,15 @@ RSpec.describe Timed::Plot do
         .to eq("  │<green:████████████>   ┊        <red:████████████>")
     end
 
-    describe "with `smooth`" do
-      # How many rows up the curve reaches in `columns` of the plot, 0 if it
-      # is not drawn there.
-      def curve_height(lines, columns)
-        rows = lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[columns].to_s }
-        row = rows.index { |cells| cells.match?(/[⠁-⣿]/) }
-        row ? Timed::Plot::HEIGHT - row : 0
-      end
+    # How many rows up the curve reaches in `columns` of the plot, 0 if it is
+    # not drawn there.
+    def curve_height(lines, columns)
+      rows = lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[columns].to_s }
+      row = rows.index { |cells| cells.match?(/[⠁-⣿]/) }
+      row ? Timed::Plot::HEIGHT - row : 0
+    end
 
+    describe "with `smooth`" do
       # 5 in the first bin of 4, and 1 in the last: the curve is no higher
       # than either bar, so it is all behind them.
       it "draws a tight cluster no higher than its count, and a lone value no higher than 1" do
@@ -212,6 +212,121 @@ RSpec.describe Timed::Plot do
         values = [1.0, 9.0, 11.0, 100.0]
         tops = [false, true].map { |smooth| described_class.histogram(values, width: 40, smooth:).fetch(0)[0, 3] }
         expect(tops).to eq(["1 ┤", "2 ┤"])
+      end
+    end
+
+    describe "with `linear`" do
+      def linear(values, width: 40, **options) = described_class.histogram(values, width:, linear: true, **options)
+
+      # The Freedman–Diaconis width, 11m26s, rounds to 10m, but 10m gives 2
+      # bins and the Rice rule at least 3, so they are 5m: 4 of 9 columns.
+      it "draws equal round-width bins from 0, ticks at round values and the 75 s mark" do
+        expect(linear([10.0, 10.0, 1000.0])).to eq(
+          [
+            "2 ┤█████████",
+            *["  │█████████"] * 4,
+            *["  │█████████                  █████████"] * 5,
+            "0 └┬─┊──────┬────────┬────────┬───────┬",
+            "   0        5m       10m      15m   20m",
+          ],
+        )
+      end
+
+      # Freedman–Diaconis: 1m39s, rounded to 2m; 3000 s is in the 26th bin.
+      it "rounds the Freedman–Diaconis width to 1, 2 or 5 seconds, minutes or hours, or 10 or 20" do
+        expect(linear([60.0, 60.0, 120.0, 120.0, 180.0, 3000.0]).last(3))
+          .to eq(["  │██                       █",
+                  "0 └┬────┬────┬────┬────┬────┬",
+                  "   0    10m  20m  30m  40m"])
+      end
+
+      # Freedman–Diaconis: 2 s, but 1801 bins of 2 s do not fit in 37
+      # columns; 31 of 2m do.
+      it "widens the bins to fit the width" do
+        expect(linear([10.0, 11.0, 12.0, 13.0, 3600.0]).last(3))
+          .to eq(["  │█                             █",
+                  "0 └┬────┬────┬────┬────┬────┬────┬",
+                  "   0    10m  20m  30m  40m  50m 1h"])
+      end
+
+      it "gives values with no interquartile range the Rice rule's number of bins" do
+        expect(linear([30.0, 30.0])).to eq(
+          [
+            "2 ┤                           █████████",
+            *["  │                           █████████"] * 9,
+            "0 └┬────────┬────────┬────────┬───────┬",
+            "   0        10s      20s      30s   40s",
+          ],
+        )
+      end
+
+      it "labels ticks with the parts of the time that are not 0, at a step a multiple of the bin width" do
+        labels = {
+          "seconds" => [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 100.0],
+          "minutes" => [600.0, 1500.0, 2400.0, 3000.0, 4000.0, 5400.0, 9000.0],
+          "hours"   => [3600.0, 7200.0, 36_000.0, 72_000.0],
+        }.transform_values { |values| linear(values, width: 80).last }
+        expect(labels).to eq(
+          "seconds" => "   0        15s      30s      45s      1m       1m15s    1m30s",
+          "minutes" => "   0        20m      40m      1h       1h20m    1h40m    2h       2h20m",
+          "hours"   => "   0              5h             10h            15h            20h         25h",
+        )
+      end
+
+      # The first bin, of 0 to 5m, holds two of 10 s.
+      it "paints each bar by the band of the median of its values" do
+        paint = ->(text, style) { "<#{style}:#{text}>" }
+        expect(linear([10.0, 10.0, 1000.0], paint:).fetch(-3))
+          .to eq("  │<green:█████████>                  <red:█████████>")
+      end
+
+      describe "and `smooth`" do
+        # The estimate of 10 s, on log seconds, is all within the first 5m,
+        # which the curve shows from 0 to 2m30s; beyond, 10 s leaves the bin's
+        # width centred on the dot and the curve drops.
+        it "fits the estimate on log seconds, so nothing is below 0 s, and shows each bin's expected count" do
+          expect(linear([10.0, 10.0, 1000.0], smooth: true)).to eq(
+            [
+              "3 ┤  ┊",
+              "  │  ┊",
+              "  │  ┊⢀⡀",
+              "  │⠒⠉⠉⠁⢸▅▅▅▅",
+              *["  │█████████"] * 2,
+              "  │█████████                  ▃▃▃▃▃▃▃▃▃",
+              *["  │█████████                  █████████"] * 2,
+              "  │█████████⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀█████████",
+              "0 └┬─┊──────┬────────┬────────┬───────┬",
+              "   0        5m       10m      15m   20m",
+            ],
+          )
+        end
+
+        # 5 in the bin of 1m to 2m, and 1 in the bin of 1h; its estimate is
+        # wider than that bin, so about half of it is drawn in one row (of 2
+        # for a count of 1).
+        it "draws a tight cluster as high as its count, and a lone value no higher than 1" do
+          lines = linear([100.0, 101.0, 102.0, 103.0, 104.0, 3600.0], width: 80, smooth: true)
+          expect("top" => lines.fetch(0)[0, 3], "cluster" => curve_height(lines, 0...10),
+                 "lone" => curve_height(lines, 10..))
+            .to eq("top" => "5 ┤", "cluster" => 10, "lone" => 1)
+        end
+
+        # 50 of 10 s in the first of 16 bins of 20 s, 2 columns wide, which
+        # the curve crosses.
+        it "draws the curve behind the full cells of a narrow bar, so it keeps its height" do
+          lines = linear([*[10.0] * 50, 299.0, 300.0], smooth: true)
+          expect(lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[0, 2] })
+            .to eq(["██"] * Timed::Plot::HEIGHT)
+        end
+
+        it "smooths equal values over about the width of a bin at them" do
+          expect(linear([30.0, 30.0], smooth: true).values_at(6, 7, 8, 9)).to eq(
+            ["  │                   ⣀⠤⠒⠊⠉⠉⠉⠉█████████",
+             "  │                ⢀⠔⠊        █████████",
+             "  │             ⢀⡠⠊⠁          █████████",
+             "  │        ⢀⣀⡠⠔⠊⠁             █████████"],
+          )
+        end
       end
     end
   end

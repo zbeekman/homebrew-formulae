@@ -4,7 +4,7 @@
 
 `brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
-`brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[*`formula`* ...\]
+`brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[*`formula`* ...\]
 
 `brew build-times note` *`formula`* *`text`*
 
@@ -150,7 +150,7 @@ brew build-times stats --json llvm
 ]
 ```
 
-### `histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[*`formula`* ...\]
+### `histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[*`formula`* ...\]
 
 Plot a histogram of the source build times of every logged formula, or of
 each *`formula`* named: a heading naming what is counted and the shortest and
@@ -159,9 +159,10 @@ and the time on the x axis. Each formula counts once, with the mean of its
 times, so a formula built many times does not outweigh the others.
 
 - The x axis is on a log scale, as build times run from seconds to hours, from
-  the shortest time to the longest. It has ticks at `1s`, `10s`, `1m`, `10m`,
-  `1h` and `10h` where they are in that range, edges included, so a narrow
-  range may have none. A label that would touch the one before it is left out.
+  the shortest time to the longest (see `--linear` for a linear one). It has
+  ticks at `1s`, `10s`, `1m`, `10m`, `1h` and `10h` where they are in that
+  range, edges included, so a narrow range may have none. A label that would
+  touch the one before it is left out.
 - `┊` marks 75 seconds, where the `-timed` commands start to split batches:
   in the axis, unless a tick is there, and above the bars.
 - The plot is as wide as the terminal (at least 40 columns) and 10 rows high.
@@ -194,6 +195,30 @@ There is no `--json`; `stats --json` gives every time plotted.
   bar always keeps its height, and over the top cell of a bar and empty
   cells; it is never coloured. If its peak is higher than the highest bar, as
   when a cluster straddles the edge of two bins, the y axis goes up to it.
+- `--linear`: put time on a linear scale instead, from 0 to the end of the bin
+  of the longest time. The bins are of equal width, a round time, so their
+  edges fall on whole minutes and hours and on the ticks: the
+  Freedman–Diaconis width (twice the interquartile range times the number of
+  times to the power -1/3), rounded to the nearest of 1, 2, 5, 10 or 20
+  seconds or minutes or 1, 2 or 5 times a power of ten of hours; made
+  narrower if that gives fewer bins than the log scale has at least (2 per
+  cube root of the number of times), and wider if the bins would not each get
+  a column. With no interquartile range, as when more than half the times are
+  equal, it is the widest that gives that many bins. A bin is never narrower
+  than 1 second, so very short times, such as pours, can get fewer bins than
+  that. Each bin is the same whole number of columns wide, so the plot can be
+  narrower than the terminal. The ticks are at the multiples of the first step
+  of 1, 2, 5, 10, 15, 20 or 30 seconds or minutes or 1, 2, 3, 5, 6, 10, 12, 20,
+  50 or more hours that is a multiple of the bin width and puts them at least
+  an eighth of the axis apart, with room for their labels: the time as in
+  `stats` without the parts that are 0 (`0`, `30s`, `1m15s`, `10m`, `1h`,
+  `1h30m`). `┊` still marks 75 seconds, and each bar is coloured by the median
+  of its times, so a first bin of quick builds is green even when it runs past
+  75 seconds. With `--smooth`, the estimate is still of the log times, so none
+  of it is below 0 seconds, and at each point the curve shows how many times it
+  puts in one bin's width centred there, so where it crosses the middle of a
+  bin it is the bin's expected count. Equal times are smoothed over about one
+  bin's width at them.
 
 ```console
 $ brew build-times histogram
@@ -210,6 +235,23 @@ $ brew build-times histogram
    │████████████████████████████████████████████████████████████████████████
  0 └──────┬────────────────┬─┊──────────────────┬────────────────┬──────────
           10s              1m                   10m              1h
+```
+
+```console
+$ brew build-times histogram --linear
+==> Mean source build time of 91 formulae, from 0m05s to 3h08m
+64 ┤██
+   │██
+   │██
+   │██
+   │██
+   │██
+   │██
+   │██
+   │██▃▃
+   │████▆▆▅▅▁▁▄▄    ▁▁▁▁              ▁▁          ▁▁                          ▁▁
+ 0 └┬───────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───
+    0           30m         1h          1h30m       2h          2h30m       3h
 ```
 
 ### `note` *`formula`* *`text`*

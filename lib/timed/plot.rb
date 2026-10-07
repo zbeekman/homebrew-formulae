@@ -67,6 +67,20 @@ module Timed
       { "1s" => 1.0, "10s" => 10.0, "1m" => 60.0, "10m" => 600.0, "1h" => 3600.0, "10h" => 36_000.0 }.freeze,
       T::Hash[String, Float],
     )
+    # The widths of the bins of a linear histogram, in seconds: 1, 2, 5, 10 or
+    # 20 seconds or minutes, so bin edges fall on whole minutes and hours, or
+    # 1, 2 or 5 times a power of ten of hours.
+    LINEAR_WIDTHS = T.let(
+      [1, 2, 5, 10, 20, 60, 120, 300, 600, 1200, 3600, 7200, 18_000, 36_000, 72_000, 180_000, 360_000, 720_000,
+       1_800_000, 3_600_000, 7_200_000, 18_000_000].map(&:to_f).freeze,
+      T::Array[Float],
+    )
+    # The steps between the ticks of a linear axis, the smallest of them that
+    # is a multiple of the bin width and leaves room for the labels.
+    LINEAR_TICK_STEPS = T.let(
+      (LINEAR_WIDTHS + [15.0, 30.0, 900.0, 1800.0, 10_800.0, 21_600.0, 43_200.0]).sort.freeze,
+      T::Array[Float],
+    )
     # Drawn at `GREEN_UP_TO` in the cells nothing else is drawn in.
     MARK = "┊"
     # The bit of each dot of a braille character, by row from the top, then
@@ -77,23 +91,39 @@ module Timed
     # A character of a plot and the style it is painted in, if any.
     Cell = T.type_alias { [String, T.nilable(Symbol)] }
 
-    # The x axis of a histogram: natural logs of seconds from `low` to `high`
-    # across `columns`.
+    # The x axis of a histogram: positions from `low` to `high` across
+    # `columns`, in `bins` of equal width. A position is a time in seconds on
+    # a `linear` axis and its natural log otherwise.
     class Axis < T::Struct
       const :low, Float
       const :high, Float
       const :columns, Integer
+      const :bins, Integer
+      const :linear, T::Boolean, default: false
 
       sig { returns(Float) }
       def span = high - low
 
+      sig { returns(Integer) }
+      def per_bin = columns / bins
+
+      sig { params(seconds: Float).returns(Float) }
+      def position(seconds) = linear ? seconds : Math.log(seconds)
+
+      # The natural log of the seconds at `position`, minus infinity at or
+      # below 0 s.
+      sig { params(position: Float).returns(Float) }
+      def log_seconds(position) = linear ? Math.log([position, 0.0].max) : position
+
       # Within rounding error of either edge counts, so a tick exactly at an
       # edge is drawn whichever way the edge was rounded.
-      sig { params(log_seconds: Float).returns(T::Boolean) }
-      def cover?(log_seconds) = log_seconds.between?(low - 1e-9, high + 1e-9)
+      sig { params(seconds: Float).returns(T::Boolean) }
+      def cover?(seconds) = position(seconds).between?(low - 1e-9, high + 1e-9)
 
-      sig { params(log_seconds: Float).returns(Integer) }
-      def column(log_seconds) = ((log_seconds - low) / span * columns).floor.clamp(0, columns - 1)
+      # Multiplied before it is divided, so a whole number of seconds on a bin
+      # edge of a linear axis is exactly there.
+      sig { params(seconds: Float).returns(Integer) }
+      def column(seconds) = ((position(seconds) - low) * columns / span).floor.clamp(0, columns - 1)
     end
     private_constant :Axis
 
@@ -107,32 +137,32 @@ module Timed
     # estimate of the log values, on the scale of the bars, is drawn in
     # braille, behind their full cells. With `paint`, each bar is painted in
     # the band of the median of its values.
+    #
+    # With `linear`, the x axis is linear from 0 instead, in bins of a width
+    # from `LINEAR_WIDTHS`: the nearest to the Freedman–Diaconis width (the
+    # largest with no interquartile range), narrowed to give at least as many
+    # bins as on a log axis and widened to fit the width, with ticks at the
+    # multiples of a step from `LINEAR_TICK_STEPS`.
     sig {
-      params(values: T::Array[Float], width: Integer, smooth: T::Boolean, paint: T.nilable(Paint))
+      params(values: T::Array[Float], width: Integer, smooth: T::Boolean, linear: T::Boolean,
+             paint: T.nilable(Paint))
         .returns(T::Array[String])
     }
-    def self.histogram(values, width:, smooth: false, paint: nil)
-      logs = values.map { |seconds| Math.log(seconds) }
-      low, high = logs.minmax
-      return [] if low.nil? || high.nil?
+    def self.histogram(values, width:, smooth: false, linear: false, paint: nil)
+      shortest, longest = values.minmax
+      return [] if shortest.nil? || longest.nil?
 
-      if low == high
-        low -= Math.log(2)
-        high += Math.log(2)
-      end
       label_width = values.length.to_s.length
       columns = [width, MIN_WIDTH].max - label_width - 2
-      per_bin = [columns / (2 * Math.cbrt(values.length)).ceil, 1].max
-      axis = Axis.new(low:, high:, columns: columns - (columns % per_bin))
-      binned = Array.new(axis.columns / per_bin) { [] }
-      values.each { |seconds| binned.fetch(axis.column(Math.log(seconds)) / per_bin) << seconds }
-      curve = smooth ? curve(logs, axis, binned.length) : []
+      axis = linear ? linear_axis(values, longest, columns) : log_axis(shortest, longest, values.length, columns)
+      binned = Array.new(axis.bins) { [] }
+      values.each { |seconds| binned.fetch(axis.column(seconds) / axis.per_bin) << seconds }
+      curve = smooth ? curve(values.map { |seconds| Math.log(seconds) }, axis) : []
       # Rounded first, so a peak of 1 plus rounding error is not 2.
       top = [*binned.map(&:length), curve.max&.round(6)&.ceil || 0].max.to_i.clamp(1, values.length)
 
-      mark = Math.log(GREEN_UP_TO)
-      mark_column = axis.column(mark) if axis.cover?(mark)
-      grid = bars(binned, per_bin, top)
+      mark_column = axis.column(GREEN_UP_TO) if axis.cover?(GREEN_UP_TO)
+      grid = bars(binned, axis.per_bin, top)
       if mark_column
         grid.each { |cells| cells[mark_column] = [MARK, nil] if cells.fetch(mark_column).first == " " }
       end
@@ -144,6 +174,45 @@ module Timed
       rows + x_axis(axis, label_width, mark_column)
     end
 
+    # At least 2 bins per cube root of `count` values, as the Rice rule gives.
+    sig { params(count: Integer).returns(Integer) }
+    def self.least_bins(count) = (2 * Math.cbrt(count)).ceil
+    private_class_method :least_bins
+
+    # From the shortest value to the longest, or half and twice them if they
+    # are equal, in as many bins of a whole number of columns as fill them.
+    sig { params(shortest: Float, longest: Float, count: Integer, columns: Integer).returns(Axis) }
+    def self.log_axis(shortest, longest, count, columns)
+      low = Math.log(shortest)
+      high = Math.log(longest)
+      if low == high
+        low -= Math.log(2)
+        high += Math.log(2)
+      end
+      per_bin = [columns / least_bins(count), 1].max
+      Axis.new(low:, high:, columns: columns - (columns % per_bin), bins: columns / per_bin)
+    end
+    private_class_method :log_axis
+
+    # From 0 to the end of the bin of the longest value.
+    sig { params(values: T::Array[Float], longest: Float, columns: Integer).returns(Axis) }
+    def self.linear_axis(values, longest, columns)
+      bins = ->(bin_width) { (longest / bin_width).floor + 1 }
+      freedman_diaconis = 2 * interquartile_range(values) / Math.cbrt(values.length)
+      index = if freedman_diaconis.positive?
+        LINEAR_WIDTHS.each_index.min_by { |each| Math.log(LINEAR_WIDTHS.fetch(each) / freedman_diaconis).abs } || 0
+      else
+        LINEAR_WIDTHS.length - 1
+      end
+      index -= 1 while index.positive? && bins.call(LINEAR_WIDTHS.fetch(index)) < least_bins(values.length)
+      index += 1 while index < LINEAR_WIDTHS.length - 1 && bins.call(LINEAR_WIDTHS.fetch(index)) > columns
+      bin_width = LINEAR_WIDTHS.fetch(index)
+      count = bins.call(bin_width)
+      Axis.new(low: 0.0, high: count * bin_width, columns: count * [columns / count, 1].max, bins: count,
+               linear: true)
+    end
+    private_class_method :linear_axis
+
     # Silverman's rule of thumb for the bandwidth of a Gaussian kernel density
     # estimate of `values`: 0.9 times the smaller of their standard deviation
     # and their interquartile range divided by 1.34, or the one that is not
@@ -151,16 +220,22 @@ module Timed
     # zero, as all the values are equal.
     sig { params(values: T::Array[Float]).returns(T.nilable(Float)) }
     def self.bandwidth(values)
+      spreads = [BuildLog.stdev(values), interquartile_range(values) / 1.34]
+      spread = spreads.select(&:positive?).min
+      0.9 * spread * (values.length.to_f**-0.2) if spread
+    end
+
+    sig { params(values: T::Array[Float]).returns(Float) }
+    def self.interquartile_range(values)
       sorted = values.sort
       quartile = lambda do |fraction|
         position = (sorted.length - 1) * fraction
         lower = sorted.fetch(position.floor)
         lower + ((position - position.floor) * (sorted.fetch(position.ceil) - lower))
       end
-      spreads = [BuildLog.stdev(values), (quartile.call(0.75) - quartile.call(0.25)) / 1.34]
-      spread = spreads.select(&:positive?).min
-      0.9 * spread * (values.length.to_f**-0.2) if spread
+      quartile.call(0.75) - quartile.call(0.25)
     end
+    private_class_method :interquartile_range
 
     # How many of `values` the Gaussian kernel density estimate of them with
     # `bandwidth` puts between `from` and `to`.
@@ -170,18 +245,20 @@ module Timed
       values.sum(0.0) { |value| 0.5 * (Math.erf((to - value) / scale) - Math.erf((from - value) / scale)) }
     end
 
-    # The count the kernel density estimate puts in a bin's width centred on
-    # each braille dot across the axis (two per column), so the curve is on
-    # the scale of the bars: a lone value is never higher than 1, and a
-    # cluster narrower than a dot is still drawn.
-    sig { params(logs: T::Array[Float], axis: Axis, bins: Integer).returns(T::Array[Float]) }
-    def self.curve(logs, axis, bins)
-      bin_width = axis.span / bins
-      bandwidth = bandwidth(logs) || bin_width
+    # The count the kernel density estimate of `logs` (natural logs of
+    # seconds) puts in a bin's width centred on each braille dot across the
+    # axis (two per column), so the curve is on the scale of the bars: a lone
+    # value is never higher than 1, and a cluster narrower than a dot is still
+    # drawn. Equal values are smoothed over a bin's width at them.
+    sig { params(logs: T::Array[Float], axis: Axis).returns(T::Array[Float]) }
+    def self.curve(logs, axis)
+      bin_width = axis.span / axis.bins
+      bandwidth = bandwidth(logs) || (axis.linear ? bin_width / Math.exp(logs.fetch(0)) : bin_width)
       dots = axis.columns * 2
       (0...dots).map do |dot|
         middle = axis.low + ((dot + 0.5) * axis.span / dots)
-        count_between(logs, bandwidth, middle - (bin_width / 2), middle + (bin_width / 2))
+        count_between(logs, bandwidth, axis.log_seconds(middle - (bin_width / 2)),
+                      axis.log_seconds(middle + (bin_width / 2)))
       end
     end
     private_class_method :curve
@@ -232,21 +309,20 @@ module Timed
     end
     private_class_method :draw_curve
 
-    # The axis line, with a tick at each of `TICKS` in the range and `MARK` in
-    # `mark_column` unless a tick is there, and the line of their labels, if
-    # any: each at its tick or as far right as fits, left out if it would
-    # touch the label before.
+    # The axis line, with a tick at each of `TICKS` (or `linear_ticks`) in the
+    # range and `MARK` in `mark_column` unless a tick is there, and the line of
+    # their labels, if any: each at its tick or as far right as fits, left out
+    # if it would touch the label before.
     sig { params(axis: Axis, label_width: Integer, mark_column: T.nilable(Integer)).returns(T::Array[String]) }
     def self.x_axis(axis, label_width, mark_column)
       line = Array.new(axis.columns, "─")
       line[mark_column] = MARK if mark_column
       labels = " " * axis.columns
       label_end = -2
-      TICKS.each do |label, seconds|
-        log_seconds = Math.log(seconds)
-        next unless axis.cover?(log_seconds)
+      (axis.linear ? linear_ticks(axis) : TICKS).each do |label, seconds|
+        next unless axis.cover?(seconds)
 
-        column = axis.column(log_seconds)
+        column = axis.column(seconds)
         line[column] = "┬"
         start = [column, axis.columns - label.length].min
         next if start <= label_end + 1
@@ -258,6 +334,33 @@ module Timed
       labels.strip.empty? ? [axis_line] : [axis_line, "#{" " * (label_width + 2)}#{labels.rstrip}"]
     end
     private_class_method :x_axis
+
+    # Ticks at the multiples of the first of `LINEAR_TICK_STEPS` that is a
+    # multiple of the bin width and puts them at least an eighth of the axis
+    # apart, with 2 columns more than the longest label.
+    sig { params(axis: Axis).returns(T::Hash[String, Float]) }
+    def self.linear_ticks(axis)
+      bin_width = axis.span / axis.bins
+      LINEAR_TICK_STEPS.each do |step|
+        next unless (step % bin_width).zero?
+
+        ticks = (0..(axis.high / step).floor).to_h { |multiple| [tick_label(multiple * step), multiple * step] }
+        apart = step / bin_width * axis.per_bin
+        return ticks if apart >= [(ticks.keys.map(&:length).max || 0) + 2, axis.columns / 8.0].max
+      end
+      { "0" => 0.0 }
+    end
+    private_class_method :linear_ticks
+
+    # `BuildLog.format_duration` without the parts that are 0: `30s`, `1m15s`,
+    # `10m`, `1h`, `1h30m`.
+    sig { params(seconds: Float).returns(String) }
+    def self.tick_label(seconds)
+      return "0" if seconds.zero?
+
+      BuildLog.format_duration(seconds).sub(/\A0m0?/, "").delete_suffix("00s").delete_suffix("00m")
+    end
+    private_class_method :tick_label
 
     sig { params(cells: T::Array[Cell], paint: T.nilable(Paint)).returns(String) }
     def self.paint_cells(cells, paint)
