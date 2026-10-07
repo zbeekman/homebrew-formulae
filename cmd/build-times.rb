@@ -5,6 +5,7 @@ require "abstract_command"
 require "abstract_subcommand"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/receipts"
+require_relative "../lib/timed/stats_table"
 
 module Homebrew
   module Cmd
@@ -59,67 +60,38 @@ module Homebrew
             A formula with both kinds gets a row for each, with the estimate used to order its next build of that kind.
             An estimate ending in `?` is a guess, as the formula has no usable history of that kind.
             Then the LLM estimates kept by `--llm-estimates`, each with the source build of its version, if any.
+            The trend shows the latest 8 builds of that kind, oldest first, each scaled to the row's own range.
+            A failed build is shown as `×` in the trend of every row of the formula.
+            Colour follows Homebrew's own rules (off when not a terminal or with `HOMEBREW_NO_COLOR`).
           EOS
+          flag "--sort=",
+               description: "Order the rows by <key>: `name`, `estimate`, `median`, `mean`, `n` or `last` " \
+                            "(largest first for numbers, newest first for `last`). " \
+                            "Without it the rows are in the order of the log, or of the formulae named."
+          switch "--reverse",
+                 description: "Reverse the order of the rows."
           named_args :formula
         end
 
         sig { override.void }
         def run
+          key = args.sort
+          if key && Timed::StatsTable::SORT_KEYS.exclude?(key)
+            raise UsageError, "`--sort` must be one of #{Timed::StatsTable::SORT_KEYS.join(", ")}."
+          end
+
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
           names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
-          puts "formula                      kind     n   median     mean     mode    stdev  estimate  last"
-          names.flat_map { |name| rows(log, name) }.each { |line| puts line }
+          rows = Timed::StatsTable.sort(names.flat_map { |name| Timed::StatsTable.rows(log, name) }, key,
+                                        reverse: args.reverse? || false)
+          Timed::StatsTable.lines(rows).each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
           estimates = args.named.empty? ? log.estimates.sort.to_h : log.estimates.slice(*names)
           return if estimates.empty?
 
           puts "LLM estimates and the source builds of the same version:"
-          puts format(ESTIMATE_ROW, name: "formula", version: "version", estimate: "estimate", actual: "actual",
-                                    model: "model", date: "date")
-          estimates.each do |name, estimate|
-            version = estimate.fetch("version")
-            actual = log.durations(name, status: "built", version:).last
-            puts format(ESTIMATE_ROW, name:, version:,
-                                      estimate: Timed::BuildLog.format_duration(estimate.fetch("seconds").to_f),
-                                      actual: actual ? Timed::BuildLog.format_duration(actual) : "-",
-                                      model: estimate["model"], date: estimate["date"])
-          end
-        end
-
-        ESTIMATE_ROW = "%<name>-28s %<version>-12s %<estimate>9s %<actual>9s  %<model>s %<date>s"
-
-        private
-
-        # One row per kind of build the formula has (source builds, then
-        # pours), each with statistics from that kind only. `last` is always
-        # the formula's latest build, whatever its kind or outcome.
-        sig { params(log: Timed::BuildLog, name: String).returns(T::Array[String]) }
-        def rows(log, name)
-          builds = log.builds(name)
-          kinds = %w[built poured].select { |kind| builds.any? { |build| build["status"] == kind } }
-          (kinds.empty? ? [nil] : kinds).map { |kind| row(log, name, kind) }
-        end
-
-        # A row without usable history (no builds, only failed ones, or zero
-        # durations) shows the estimate the planner would use, marked with `?`.
-        sig { params(log: Timed::BuildLog, name: String, kind: T.nilable(String)).returns(String) }
-        def row(log, name, kind)
-          latest = log.builds(name).last || {}
-          last_text = [latest.fetch("version", "?"), latest.fetch("status", ""), latest.fetch("started", "")[0, 10]]
-                      .join(" ")
-          summary = Timed::BuildLog.summarise(log.durations(name, status: kind))
-          durations = if summary
-            times = [summary.median, summary.mean, summary.mode, summary.stdev]
-            [summary.n, *times.map { |seconds| Timed::BuildLog.format_duration(seconds.to_f) }]
-          else
-            [0, "-", "-", "-", "-"]
-          end
-          seconds = log.estimate(name, pour: kind == "poured") || log.fallback_estimate
-          estimate = "#{Timed::BuildLog.format_duration(seconds)}#{"?" if summary.nil?}"
-          format("%<name>-28s %<kind>-6s %<n>3s %<median>8s %<mean>8s %<mode>8s %<stdev>8s %<estimate>9s  %<last>s",
-                 name:, kind: kind || "-", n: durations[0], median: durations[1], mean: durations[2],
-                 mode: durations[3], stdev: durations[4], estimate:, last: last_text)
+          Timed::StatsTable.estimate_lines(log, estimates).each { |line| puts line }
         end
       end
 

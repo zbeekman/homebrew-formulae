@@ -2,7 +2,7 @@
 
 ## Usage
 
-`brew build-times` \[`stats`\] \[*`formula`* ...\]
+`brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[*`formula`* ...\]
 
 `brew build-times note` *`formula`* *`text`*
 
@@ -28,7 +28,7 @@ default, `$XDG_CONFIG_HOME/homebrew` when that is set). It is written with mode
 
 ## Subcommands
 
-### `stats` \[*`formula`* ...\]
+### `stats` \[`--sort=`*`key`*\] \[`--reverse`\] \[*`formula`* ...\]
 
 The default subcommand. Print a table with a row for each logged formula, or
 for each *`formula`* named, then the fallback estimate for formulae with no
@@ -40,10 +40,43 @@ history. The columns are:
 - `median`, `mean`, `mode` and `stdev`: the median, mean, most common whole
   number of minutes and standard deviation of the build times;
 - `estimate`: how long the formula's next build is expected to take;
-- `last`: the version, status and date of the latest build.
+- `last`: the version, status and date of the latest build;
+- `trend`: one block character (`▁▂▃▄▅▆▇█`) for each of the latest 8 builds of
+  that kind, oldest first. Each row is scaled to its own range, on a log scale
+  (build times run from seconds to hours), so a row only shows how that
+  formula's times moved, not how long they are. Builds whose times differ by
+  under 10 % are drawn flat (`▄`), so noise does not look like a trend. `-`
+  means no builds with a time.
 
 A formula with both source builds and pours gets a row for each. The two kinds
-are never mixed: each row's statistics and estimate use only that kind.
+are never mixed: each row's statistics, estimate and trend use only that kind.
+
+A failed build has no time and is of neither kind, so, as `last` shows the
+latest build of the formula whatever its kind, a failed build is drawn as `×`
+in the trend of every row of the formula, at its place among the builds. A
+formula with only failed builds has a single row (kind `-`) with only `×`.
+The latest 8 count the failed builds too.
+
+With colour, `estimate` and the blocks of the trend are green up to 75 seconds
+(where the planner starts splitting batches), yellow up to 10 minutes and red
+above; `×` and the `last` of a failed build are red; an estimate that is a
+guess (ending in `?`) is in italics; and `built` and `poured` are cyan and
+magenta. Colour follows Homebrew's own rules: it is off unless the output is a
+terminal or `$HOMEBREW_COLOR` is set, and always off with `$HOMEBREW_NO_COLOR`.
+Without it the table is plain text. The LLM estimates table below gets the same
+colours for `estimate` and `actual`.
+
+The rows are in the order of the log (by formula name), or of the formulae
+named, unless `--sort` is given. A formula's `built` and `poured` rows always
+stay together, ordered by its first row.
+
+- `--sort=`*`key`*: order the rows by *`key`*, one of `name`, `estimate`,
+  `median`, `mean`, `n` or `last` (when the latest build started, by the
+  instant, so a UTC offset is accounted for; a date alone counts as midnight
+  UTC). Numbers go largest first and `last` newest first; ties are ordered by
+  name, and a row with no history counts as zero. Any other key is a usage
+  error naming these.
+- `--reverse`: reverse the order of the rows, whether sorted or not.
 
 The `estimate` of a source build is its mean plus 1.5 standard deviations, and
 of a pour its mean. An estimate ending in `?` is a guess, because there is no

@@ -286,9 +286,16 @@ module Timed
         next unless (status ? [status] : %w[built poured]).include?(build["status"])
         next if version && build["version"] != version
 
-        seconds = [build["install_seconds"], build["build_seconds"]].find { |value| value.to_f.nonzero? }
-        seconds&.to_f
+        self.class.duration(build)
       end
+    end
+
+    # Seconds a build took: `install_seconds` unless it is zero or missing,
+    # else `build_seconds`; nil if neither is.
+    sig { params(build: Build).returns(T.nilable(Float)) }
+    def self.duration(build)
+      seconds = [build["install_seconds"], build["build_seconds"]].find { |value| value.to_f.nonzero? }
+      seconds&.to_f
     end
 
     # Seconds the formula is expected to take, from history of the same kind

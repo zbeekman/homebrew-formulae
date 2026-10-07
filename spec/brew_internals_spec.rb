@@ -1018,6 +1018,32 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
+  describe "`Tty`, which paints `brew build-times stats`" do
+    it "has the colours and reset the table paints with, as escape sequences when colour is on" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      codes = [:green, :yellow, :red, :cyan, :magenta, :italic].to_h do |colour|
+        [colour, "#{Tty.public_send(colour)}x#{Tty.reset}"]
+      end
+      expect(codes).to eq(green: "\e[32mx\e[0m", yellow: "\e[33mx\e[0m", red: "\e[31mx\e[0m",
+                          cyan: "\e[36mx\e[0m", magenta: "\e[35mx\e[0m", italic: "\e[3mx\e[0m")
+    end
+
+    it "is in colour with `HOMEBREW_COLOR`, never with `HOMEBREW_NO_COLOR`, and not when not a terminal" do
+      colour = lambda do |env|
+        ENV.delete("HOMEBREW_COLOR")
+        ENV.delete("HOMEBREW_NO_COLOR")
+        env.each { |key, value| ENV[key] = value }
+        Tty.color?
+      end
+      expect([colour.call({}), colour.call("HOMEBREW_COLOR" => "1"),
+              colour.call("HOMEBREW_COLOR" => "1", "HOMEBREW_NO_COLOR" => "1")]).to eq([false, true, false])
+    end
+
+    it "strips the escape sequences it writes" do
+      expect(Tty.strip_ansi("\e[31mred\e[0m")).to eq("red")
+    end
+  end
+
   describe "the summary `FormulaInstaller` prints for each formula it installs" do
     let(:installer) do
       formula = formula("foo") do
