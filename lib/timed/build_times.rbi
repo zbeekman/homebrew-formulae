@@ -14,6 +14,9 @@ module Homebrew
           def builds?; end
 
           sig { returns(T::Boolean) }
+          def linear?; end
+
+          sig { returns(T::Boolean) }
           def poured?; end
 
           sig { returns(T::Boolean) }
