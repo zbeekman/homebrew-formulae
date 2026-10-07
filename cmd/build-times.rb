@@ -62,6 +62,7 @@ module Homebrew
             Then the LLM estimates kept by `--llm-estimates`, each with the source build of its version, if any.
             The trend shows the latest 8 builds of that kind, oldest first, each scaled to the row's own range.
             A failed build is shown as `×` in the trend of every row of the formula.
+            With colour, the column names of the header are bold and underlined.
             Colour follows Homebrew's own rules (off when not a terminal or with `HOMEBREW_NO_COLOR`).
           EOS
           flag "--sort=",

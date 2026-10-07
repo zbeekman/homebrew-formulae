@@ -111,14 +111,39 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     describe "colour" do
       def strip(text) = Tty.strip_ansi(text)
 
+      # A column name painted bold and underlined, padded to `width` columns.
+      def heading(text, width, right: false)
+        gap = " " * (width - text.length)
+        painted = "\e[4m\e[1m#{text}\e[0m\e[0m"
+        right ? "#{gap}#{painted}" : "#{painted}#{gap}"
+      end
+
       before { ENV["HOMEBREW_COLOR"] = "1" }
+
+      it "makes each column name of the stats header bold and underlined, not the gaps between them" do
+        header = capture_stdout { described_class.new(%w[stats wget]).run }.lines.fetch(0)
+        columns = [heading("formula", 28), heading("kind", 6), heading("n", 3, right: true),
+                   *%w[median mean mode stdev].map { |name| heading(name, 8, right: true) },
+                   heading("estimate", 9, right: true)]
+        expect(header).to eq("#{columns.join(" ")}  #{heading("last", 24)}  #{heading("trend", 5)}\n")
+      end
+
+      it "makes each column name of the LLM estimates header bold and underlined" do
+        estimates = { "llvm" => { "version" => "23.1.2", "seconds" => 4800.0, "model" => "m",
+                                  "date" => "2026-09-20" } }
+        database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
+        header = capture_stdout { described_class.new(%w[stats llvm]).run }.lines.fetch(-2)
+        expect(header).to eq("#{heading("formula", 28)} #{heading("version", 12)} " \
+                             "#{heading("estimate", 9, right: true)} #{heading("actual", 9, right: true)}  " \
+                             "#{heading("model", 5)} #{heading("date", 4)}\n")
+      end
 
       it "keeps every column aligned, as the same table without the colour codes" do
         coloured = capture_stdout { described_class.new(%w[stats]).run }
         expect(strip(coloured)).to eq("#{table}fallback for unknown formulae (median of per-package means): 3m15s\n")
       end
 
-      it "paints the kind, the estimate by its band, a failed `last` and the trend, but not the header" do
+      it "paints the kind, the estimate by its band, a failed `last` and the trend" do
         wget = capture_stdout { described_class.new(%w[stats wget]).run }.lines.fetch(1)
         expect(wget).to eq(
           "wget                         \e[35mpoured\e[0m   1    0m20s    0m20s    0m00s    0m00s     " \

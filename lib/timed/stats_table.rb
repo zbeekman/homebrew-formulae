@@ -40,8 +40,8 @@ module Timed
     end
 
     # Paints `text` in `style`, one of the bands of `Plot.band`, the kinds'
-    # colours or `:italic`, through Homebrew's `Tty`, so colour is on only when
-    # Homebrew's own output would be coloured.
+    # colours, `:italic`, `:bold` or `:underline`, through Homebrew's `Tty`, so
+    # colour is on only when Homebrew's own output would be coloured.
     PAINT = T.let(
       lambda do |text, style|
         next text unless Tty.color?
@@ -142,8 +142,14 @@ module Timed
     sig { params(rows: T::Array[Row], paint: Plot::Paint).returns(T::Array[String]) }
     def self.lines(rows, paint: PAINT)
       last_width = rows.map { |row| row.last.length }.push(4).max.to_i
-      header = "#{"formula".ljust(NAME_WIDTH)} kind     n   median     mean     mode    stdev  estimate  " \
-               "#{"last".ljust(last_width)}  trend"
+      columns = [
+        heading("formula", NAME_WIDTH, paint),
+        heading("kind", 6, paint),
+        heading("n", 3, paint, right: true),
+        *%w[median mean mode stdev].map { |name| heading(name, 8, paint, right: true) },
+        heading("estimate", 9, paint, right: true),
+      ]
+      header = "#{columns.join(" ")}  #{heading("last", last_width, paint)}  #{heading("trend", 5, paint)}"
       [header] + rows.map { |row| line(row, last_width, paint) }
     end
 
@@ -170,8 +176,9 @@ module Timed
         .returns(T::Array[String])
     }
     def self.estimate_lines(log, estimates, paint: PAINT)
-      header = "#{"formula".ljust(NAME_WIDTH)} #{"version".ljust(12)} #{"estimate".rjust(9)} " \
-               "#{"actual".rjust(9)}  model date"
+      header = "#{heading("formula", NAME_WIDTH, paint)} #{heading("version", 12, paint)} " \
+               "#{heading("estimate", 9, paint, right: true)} #{heading("actual", 9, paint, right: true)}  " \
+               "#{heading("model", 5, paint)} #{heading("date", 4, paint)}"
       rows = estimates.map do |name, estimate|
         version = estimate.fetch("version")
         actual = log.durations(name, status: "built", version:).last
@@ -188,6 +195,16 @@ module Timed
       pad(BuildLog.format_duration(seconds), 9, paint, style: Plot.band(seconds), right: true)
     end
     private_class_method :seconds_cell
+
+    # A column name, bold and underlined, padded to `width` visible characters;
+    # the padding is not underlined, so the columns stand apart.
+    sig { params(text: String, width: Integer, paint: Plot::Paint, right: T::Boolean).returns(String) }
+    def self.heading(text, width, paint, right: false)
+      gap = " " * [width - text.length, 0].max
+      painted = paint.call(paint.call(text, :bold), :underline)
+      right ? "#{gap}#{painted}" : "#{painted}#{gap}"
+    end
+    private_class_method :heading
 
     # `text` padded to `width` visible characters; only the text is painted,
     # in `style` and also in italics if `italic`.
