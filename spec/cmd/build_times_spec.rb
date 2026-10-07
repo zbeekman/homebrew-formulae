@@ -243,6 +243,69 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       end
     end
 
+    describe "`--json`" do
+      def json(*args) = JSON.parse(capture_stdout { described_class.new(["stats", *args]).run })
+
+      def rows(*args) = json(*args).map { |row| [row["name"], row["kind"]] }
+
+      it "prints a JSON array with a row per row of the table, in `JSON.pretty_generate` form" do
+        output = capture_stdout { described_class.new(%w[stats --json wget]).run }
+        expect(output).to eq("#{JSON.pretty_generate(JSON.parse(output))}\n")
+      end
+
+      it "has the keys, in seconds, and every build of the kind, with the failed build" do
+        expect(json("--json", "wget")).to eq(
+          [{ "name"   => "wget", "kind" => "poured", "n" => 1, "median" => 20.0, "mean" => 20.0, "stdev" => 0.0,
+             "builds" => [
+               { "seconds" => 20.0, "date" => "2026-09-27", "version" => "1.25.0", "status" => "poured" },
+               { "seconds" => nil, "date" => "2026-09-27", "version" => "1.25.1", "status" => "failed" },
+             ] }],
+        )
+      end
+
+      it "accepts `v1` as the version, as `--json` alone" do
+        expect(json("--json=v1", "wget")).to eq(json("--json", "wget"))
+      end
+
+      it "rejects any other version with a usage error naming `v1`" do
+        expect { described_class.new(%w[stats --json=v2]).run }
+          .to raise_error(UsageError, "Invalid usage: invalid JSON version: v2 (use `v1`).")
+      end
+
+      it "has a row for every formula and kind, in the order of the table" do
+        expect(rows("--json")).to eq([["asciidoc", "poured"], ["awscli", "built"], ["llvm", "built"],
+                                      ["openexr", "built"], ["openexr", "poured"], ["wget", "poured"]])
+      end
+
+      it "respects the formulae named, `--sort` and `--reverse`" do
+        by_flags = [[], ["--sort=n"], ["--reverse"], ["--sort=n", "--reverse"]].to_h do |flags|
+          [flags, rows("--json", *flags, "wget", "awscli")]
+        end
+        wget_first = [["wget", "poured"], ["awscli", "built"]]
+        awscli_first = wget_first.reverse
+        expected = { [] => wget_first, ["--sort=n"] => awscli_first, ["--reverse"] => awscli_first,
+                     ["--sort=n", "--reverse"] => wget_first }
+        expect(by_flags).to eq(expected)
+      end
+
+      it "sorts as the table does" do
+        expect(rows("--json", "--sort=estimate").map(&:first).uniq).to eq(%w[llvm awscli openexr wget asciidoc])
+      end
+
+      it "leaves out the fallback line and the LLM estimates, and is never coloured" do
+        estimates = { "llvm" => { "version" => "23.1.2", "seconds" => 4800.0, "model" => "m",
+                                  "date" => "2026-09-20" } }
+        database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
+        ENV["HOMEBREW_COLOR"] = "1"
+        output = capture_stdout { described_class.new(%w[stats --json llvm]).run }
+        expect(output).not_to match(/\e|fallback|LLM|model/)
+      end
+
+      it "rejects an unknown `--sort` key as the table does" do
+        expect { described_class.new(%w[stats --json --sort=speed]).run }.to raise_error(UsageError, /--sort/)
+      end
+    end
+
     describe "LLM estimates" do
       before do
         estimates = {

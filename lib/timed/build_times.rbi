@@ -10,6 +10,9 @@ module Homebrew
         def args; end
 
         module Args
+          sig { returns(T.nilable(T.any(String, TrueClass))) }
+          def json; end
+
           sig { returns(T::Boolean) }
           def reverse?; end
 

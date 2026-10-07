@@ -24,6 +24,8 @@ module Timed
       const :name, String
       const :kind, T.nilable(String)
       const :n, Integer
+      # The statistics of the row's builds, nil without history.
+      const :summary, T.nilable(BuildLog::Summary)
       # Median, mean, most common minute and stdev as shown, `-` without history.
       const :statistics, T::Array[String]
       const :median, Float
@@ -74,6 +76,7 @@ module Timed
         name:,
         kind:,
         n:            summary&.n || 0,
+        summary:,
         statistics:   times.empty? ? %w[- - - -] : times.map { |seconds| BuildLog.format_duration(seconds.to_f) },
         median:       summary&.median || 0.0,
         mean:         summary&.mean || 0.0,
@@ -137,6 +140,31 @@ module Timed
       (by_value || 0).nonzero? || (first.name <=> second.name) || 0
     end
     private_class_method :compare
+
+    # The rows as plain data for `--json`, in the same order: the statistics
+    # of the row's kind in seconds (nil without history) and every logged
+    # build of that kind, oldest first, with the failed builds, which are of
+    # no kind. Nothing is formatted or painted.
+    sig { params(log: BuildLog, rows: T::Array[Row]).returns(T::Array[T::Hash[String, T.untyped]]) }
+    def self.json_rows(log, rows)
+      rows.map do |row|
+        kind = row.kind
+        summary = row.summary
+        builds = log.builds(row.name).select { |build| [kind, "failed"].compact.include?(build["status"]) }
+        {
+          "name"   => row.name,
+          "kind"   => kind,
+          "n"      => row.n,
+          "median" => summary&.median,
+          "mean"   => summary&.mean,
+          "stdev"  => summary&.stdev,
+          "builds" => builds.map do |build|
+            { "seconds" => BuildLog.duration(build), "date" => build["started"], "version" => build["version"],
+              "status" => build["status"] }
+          end,
+        }
+      end
+    end
 
     # The header and a line for each row. `paint` is how the colour is added.
     sig { params(rows: T::Array[Row], paint: Plot::Paint).returns(T::Array[String]) }
