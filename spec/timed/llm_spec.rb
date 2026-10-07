@@ -450,11 +450,11 @@ RSpec.describe Timed::LLM do
       )
     end
 
-    it "asks Anthropic for the estimates through a forced tool call" do
+    it "asks Anthropic for the estimates through a strict tool it isn't forced to call" do
       estimates(anthropic, anthropic_response([]))
-      expect([sent["model"], sent["tool_choice"],
+      expect([sent["model"], sent["tool_choice"], sent.dig("tools", 0, "strict"),
               sent.dig("tools", 0, "input_schema", "properties", "estimates", "items", "properties", "name", "enum")])
-        .to eq(["claude-haiku-4-5", { "type" => "tool", "name" => "build_estimates" }, ["llvm", "lld"]])
+        .to eq(["claude-haiku-4-5", { "type" => "auto" }, true, ["llvm", "lld"]])
     end
 
     it "sends Anthropic's API version and no extended thinking" do
