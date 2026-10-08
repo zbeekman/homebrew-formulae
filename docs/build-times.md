@@ -299,7 +299,9 @@ line each, under a header:
   formulae, so a formula built in a batch and reinstalled after the batches
   counts twice;
 - `length`: from when its first formula started to when its last one
-  finished.
+  finished. When the run ends with a formula with no time, such as a failed
+  one, its end isn't logged, so the length runs to that formula's start and
+  ends in `+`, e.g. `1h03m+`: the run took at least that long.
 
 With colour, the column names are bold and underlined, as in `stats`, and a
 number of failed builds other than 0 is red. With no runs in the log, it
@@ -333,9 +335,12 @@ mark, as the axis is the run's clock, not a build's length.
   which batch skipped them.
 - The gaps between the bars are brew's own work, such as downloads and
   checks. The last lines give the run's length and how much of it is between
-  the bars, and, if the run has a formula with no time, such as a failed one,
-  say that the gaps include it. A run that only skipped formulae has no time
-  axis, and its last line says that nothing ran.
+  the bars, and, if a formula with no time, such as a failed one, started
+  before the run's end, say that the gaps include it. If the run ends with
+  such a formula, its end isn't logged: the axis and the total give its length
+  as a lower bound, `1h03m+` and `at least 1h03m`, and the last line says so.
+  A run that only skipped formulae has no time axis, and its last line says
+  that nothing ran.
 - The bars are as wide as the terminal allows (it is taken to be at least 40
   columns) after the name, status and time, and never narrower than 10
   columns.

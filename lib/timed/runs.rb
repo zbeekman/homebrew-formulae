@@ -73,6 +73,29 @@ module Timed
       sig { returns(Float) }
       def length = finished - started
 
+      # Whether the run's end isn't logged, as a build with no time, such as a
+      # failed one, starts at or after the last finish of a build with a time,
+      # or none has a time, so it ran at least `length`.
+      sig { returns(T::Boolean) }
+      def open_end?
+        return false if skipped_only?
+
+        known = ran.filter_map { |build| build.finished if build.seconds }.max
+        ran.any? { |build| build.seconds.nil? && (known.nil? || build.started >= known) }
+      end
+
+      # Whether a build with no time starts before the run's end, so the gaps
+      # between the bars include it.
+      sig { returns(T::Boolean) }
+      def unfinished_within?
+        last = finished
+        ran.any? { |build| build.seconds.nil? && build.started < last }
+      end
+
+      # `length` as a duration, with `+` if the run's end isn't logged.
+      sig { returns(String) }
+      def length_text = "#{BuildLog.format_duration(length)}#{"+" if open_end?}"
+
       # Seconds of the run that no build covers: brew's own work, such as
       # downloads and checks, between the builds, and failed builds, which
       # have no logged finish.
@@ -157,7 +180,7 @@ module Timed
           pad(count.to_s, status.length, paint, style: (:red if status == "failed" && count.positive?), right: true)
         end
         [number.to_s.rjust(3), run.started.strftime("%Y-%m-%d %H:%M"), run.verbs.join(",").ljust(verbs_width),
-         *counts, BuildLog.format_duration(run.length).rjust(7)]
+         *counts, run.length_text.rjust(7)]
       end
       [header, *rows].map { |columns| columns.join("  ") }
     end
@@ -177,7 +200,7 @@ module Timed
       # At least as wide as `formula`.
       name_width = run.builds.map { |build| build.name.length }.push(7).max.to_i
       columns = [[width, Plot::MIN_WIDTH].max - name_width - 20, MIN_COLUMNS].max
-      length = BuildLog.format_duration(run.length)
+      length = run.length_text
       axis = "  0#{length.rjust(columns - 1)}" unless run.skipped_only?
       header = "#{heading("formula", name_width, paint)}  #{heading("status", 7, paint)}  " \
                "#{heading("time", 7, paint, right: true)}#{axis}"
@@ -201,18 +224,20 @@ module Timed
        *sections]
     end
 
-    # The run's length, the time between its bars and what that is: brew's
-    # own work, and builds with no time, such as failed ones, whose end isn't
-    # logged; or, if it only skipped formulae, that nothing ran.
+    # The run's length, at least that if its end isn't logged, the time
+    # between its bars and what that is: brew's own work, and builds with no
+    # time, such as failed ones, that start before its end; or, if it only
+    # skipped formulae, that nothing ran.
     sig { params(run: Run).returns(T::Array[String]) }
     def self.total(run)
       return ["Nothing ran: every formula was skipped."] if run.skipped_only?
 
-      unfinished = run.ran.any? { |build| build.seconds.nil? }
-      ["Total #{BuildLog.format_duration(run.length)}, #{BuildLog.format_duration(run.between)} of it between the " \
-       "bars.",
+      open_end = run.open_end?
+      ["Total #{"at least " if open_end}#{BuildLog.format_duration(run.length)}, " \
+       "#{BuildLog.format_duration(run.between)} of it between the bars.",
        "The gaps between the bars are brew's own work, such as downloads and checks.",
-       *("The gaps also include builds with no logged end, such as failed builds." if unfinished)]
+       *("The gaps also include builds with no logged end, such as failed builds." if run.unfinished_within?),
+       *("The run's end isn't logged: its last build has no time, such as a failed one." if open_end)]
     end
 
     # What a call after the batches does, as the plan heads it; `Batch <n>`,
