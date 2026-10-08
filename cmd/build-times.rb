@@ -46,8 +46,9 @@ module Homebrew
         sig { override.void }
         def run
           name, text = args.named
-          noted = Timed::BuildLog.update(Timed::BuildLog.default_path) { |log| log.add_note(name.to_s, text.to_s) }
-          odie "no builds logged for #{name}" if noted.nil?
+          formula = Timed::BuildLog.formula_names([name.to_s]).fetch(0)
+          noted = Timed::BuildLog.update(Timed::BuildLog.default_path) { |log| log.add_note(formula, text.to_s) }
+          odie "no builds logged for #{formula}" if noted.nil?
         end
       end
 
@@ -78,7 +79,7 @@ module Homebrew
         sig { override.void }
         def run
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
-          names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
+          names = args.named.empty? ? log.package_names : Timed::BuildLog.formula_names(args.named)
           times = names.map { |name| log.durations(name, status: args.poured? ? "poured" : "built") }.reject(&:empty?)
           what = args.poured? ? "pour" : "source build"
           values = args.builds? ? times.flatten : times.map { |durations| Timed::BuildLog.mean(durations) }
@@ -135,7 +136,7 @@ module Homebrew
           raise UsageError, "invalid JSON version: #{json} (use `v1`)." unless [nil, "v1", true].include?(json)
 
           log = Timed::BuildLog.load(Timed::BuildLog.default_path)
-          names = args.named.empty? ? log.package_names : args.named.map { |name| Utils.name_from_full_name(name) }
+          names = args.named.empty? ? log.package_names : Timed::BuildLog.formula_names(args.named)
           rows = Timed::StatsTable.sort(names.flat_map { |name| Timed::StatsTable.rows(log, name) }, key,
                                         reverse: args.reverse? || false)
           return puts JSON.pretty_generate(Timed::StatsTable.json_rows(log, rows)) if json

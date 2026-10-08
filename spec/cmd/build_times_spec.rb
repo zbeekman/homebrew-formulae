@@ -54,6 +54,23 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         .to output(/\Aformula.*\nllvm .*\nnope +- +0 +- +- +- +- +3m15s\? +\?/).to_stdout
     end
 
+    def stats(*args) = capture_stdout { described_class.new(["stats", *args]).run }
+
+    # Not in alphabetical order, so sorting the names would fail it.
+    it "shows a formula named twice, or by its full name too, once, where first named, in the table and in JSON" do
+      named = %w[openexr homebrew/core/llvm openexr llvm]
+      outputs = [[], %w[--json]].to_h { |json| [json, stats(*json, *named)] }
+      rows = JSON.parse(outputs.fetch(%w[--json])).map { |row| row["name"] }
+      expect([outputs, rows]).to eq([[[], %w[--json]].to_h { |json| [json, stats(*json, "openexr", "llvm")] },
+                                     %w[openexr openexr llvm]])
+    end
+
+    it "takes names in any case, as brew does" do
+      outputs = [%w[LLVM], %w[homebrew/core/LLVM], %w[--json LLVM]].to_h { |args| [args, stats(*args)] }
+      expect(outputs).to eq(%w[LLVM] => stats("llvm"), %w[homebrew/core/LLVM] => stats("llvm"),
+                            %w[--json LLVM] => stats("--json", "llvm"))
+    end
+
     it "rejects `--estimator=median` as an invalid option" do
       expect { described_class.new(%w[stats awscli --estimator=median]) }
         .to raise_error(OptionParser::InvalidOption, /estimator/)
@@ -375,6 +392,27 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         .to eq(plot("Mean source build time of 2 formulae, from 3m15s to 1h26m", [awscli, 5163.1]))
     end
 
+    it "counts a formula named twice, or by its full name too, once" do
+      outputs = [%w[awscli awscli llvm], %w[awscli homebrew/core/awscli llvm], %w[--builds awscli awscli llvm],
+                 %w[--builds awscli homebrew/core/awscli llvm]].to_h { |args| [args, histogram(*args)] }
+      mean = plot("Mean source build time of 2 formulae, from 3m15s to 1h26m", [awscli, 5163.1])
+      builds = plot("Time of 4 source builds, from 3m10s to 1h26m", [189.52, 190.868, 205.0, 5163.1])
+      expect(outputs).to eq(
+        %w[awscli awscli llvm]                        => mean,
+        %w[awscli homebrew/core/awscli llvm]          => mean,
+        %w[--builds awscli awscli llvm]               => builds,
+        %w[--builds awscli homebrew/core/awscli llvm] => builds,
+      )
+    end
+
+    it "takes names in any case, as brew does, counting each formula once" do
+      outputs = [%w[AwsCli llvm LLVM], %w[--builds AwsCli llvm homebrew/core/LLVM]]
+                .to_h { |args| [args, histogram(*args)] }
+      mean = plot("Mean source build time of 2 formulae, from 3m15s to 1h26m", [awscli, 5163.1])
+      builds = plot("Time of 4 source builds, from 3m10s to 1h26m", [189.52, 190.868, 205.0, 5163.1])
+      expect(outputs).to eq(%w[AwsCli llvm LLVM] => mean, %w[--builds AwsCli llvm homebrew/core/LLVM] => builds)
+    end
+
     it "draws the smoothed curve with `--smooth`" do
       expect(histogram("--smooth")).to eq(plot("Mean source build time of 3 formulae, from 1m06s to 1h26m",
                                                [awscli, 5163.1, 66.5], smooth: true))
@@ -400,10 +438,11 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     end
 
     it "says so instead of plotting fewer than 2 times" do
-      outputs = [%w[llvm], %w[--linear llvm], %w[--builds wget], %w[--poured nope]]
+      outputs = [%w[llvm], %w[llvm llvm], %w[--linear llvm], %w[--builds wget], %w[--poured nope]]
                 .to_h { |args| [args, histogram(*args)] }
       expect(outputs).to eq(
         %w[llvm]          => "==> No histogram: 1 formula with a source build time, at least 2 are needed\n",
+        %w[llvm llvm]     => "==> No histogram: 1 formula with a source build time, at least 2 are needed\n",
         %w[--linear llvm] => "==> No histogram: 1 formula with a source build time, at least 2 are needed\n",
         %w[--builds wget] => "==> No histogram: 0 source builds, at least 2 are needed\n",
         %w[--poured nope] => "==> No histogram: 0 formulae with a pour time, at least 2 are needed\n",
@@ -450,6 +489,12 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     it "appends a problem to the formula's latest build" do
       described_class.new(["note", "wget", "needs --with-x"]).run
       expect(JSON.parse(database.read).dig("packages", "wget", "builds", -1, "problems")).to eq(["needs --with-x"])
+    end
+
+    it "matches the name as brew does, ignoring case and tap" do
+      %w[LLVM homebrew/core/LLVM].each { |name| described_class.new(["note", name, "from #{name}"]).run }
+      expect(JSON.parse(database.read).dig("packages", "llvm", "builds", -1, "problems"))
+        .to eq(["from LLVM", "from homebrew/core/LLVM"])
     end
 
     it "fails for a formula with no builds logged" do

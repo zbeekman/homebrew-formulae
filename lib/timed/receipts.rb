@@ -75,7 +75,7 @@ module Timed
     # bottle, `built` otherwise. Returns the receipts stamped.
     sig { params(log: BuildLog, names: T::Array[String], cellar: Pathname).returns(T::Array[Pathname]) }
     def self.restamp(log, names, cellar: HOMEBREW_CELLAR)
-      names.map { |name| Utils.name_from_full_name(name) }.uniq.sort.flat_map do |name|
+      BuildLog.formula_names(names).sort.flat_map do |name|
         builds = log.builds(name)
         (cellar/name).glob("*/#{AbstractTab::FILENAME}").sort.select do |receipt|
           version = receipt.dirname.basename.to_s
