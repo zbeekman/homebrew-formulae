@@ -14,8 +14,10 @@ module Timed
   # process, so every build logged with the same `run`, or, logged before
   # `run` was, with a log of the same run, is of that run. A skipped formula
   # logged with no `run` has no log either, so it is put in the latest run
-  # that started at or before it, by the local time logged. Other builds
-  # with no such log, and those with a date alone (logged before the
+  # that started at or before it, by the local time logged. A build with
+  # such a log but no start, as the runner once logged a failed formula
+  # brew never named, starts at the first start in its log, if any. Other
+  # builds with no such log, and those with a date alone (logged before the
   # runner), are of no run.
   module Runs
     extend Columns
@@ -145,18 +147,19 @@ module Timed
     def self.all(log)
       runs = T.let({}, T::Hash[String, T::Array[Build]])
       skipped = T.let([], T::Array[Build])
+      unstarted = T.let([], T::Array[[String, BuildLog::Build, MatchData]])
       log.package_names.each do |name|
         log.builds(name).each do |entry|
-          started = timestamp(entry["started"])
-          next if started.nil?
-
           match = LOG_NAME.match(File.basename(entry["log"].to_s))
-          seconds = entry["wall_seconds"]&.to_f
-          # The runner once missed brew's dependency heading with a version,
-          # and so logged a dependency's wall time as 0.
-          seconds = nil if seconds&.zero? && entry["install_seconds"].to_f.positive?
-          build = Build.new(name:, status: entry["status"].to_s, verb: entry["verb"]&.to_s,
-                            label: entry["batch"]&.to_s, batch: match && match[:batch].to_i, started:, seconds:)
+          started = timestamp(entry["started"])
+          if started.nil?
+            # The runner once logged a failed formula brew never named with
+            # no start.
+            unstarted << [name, entry, match] if match && entry["started"].nil?
+            next
+          end
+
+          build = build_from(name, entry, match, started)
           id = text(entry["run"])
           if match
             (runs[id || match[:run].to_s] ||= []) << build
@@ -164,6 +167,13 @@ module Timed
             id ? (runs[id] ||= []) << build : skipped << build
           end
         end
+      end
+      # At the first start in its log, the nearest to its batch's start the
+      # log knows; left out if nothing in its log has one.
+      unstarted.each do |name, entry, match|
+        run = runs.fetch(text(entry["run"]) || match[:run].to_s, [])
+        started = run.select { |build| build.batch == match[:batch].to_i }.map(&:started).min
+        run << build_from(name, entry, match, started) if started
       end
       skipped.each do |build|
         local = build.started.strftime("%Y%m%d-%H%M%S")
@@ -287,6 +297,21 @@ module Timed
       [*section(build), build.skipped? ? 1 : 0, build.started, build.name]
     end
     private_class_method :order
+
+    # The build of `name` logged as `entry`, with the log `match`, from
+    # `started`.
+    sig {
+      params(name: String, entry: BuildLog::Build, match: T.nilable(MatchData), started: Time).returns(Build)
+    }
+    def self.build_from(name, entry, match, started)
+      seconds = entry["wall_seconds"]&.to_f
+      # The runner once missed brew's dependency heading with a version,
+      # and so logged a dependency's wall time as 0.
+      seconds = nil if seconds&.zero? && entry["install_seconds"].to_f.positive?
+      Build.new(name:, status: entry["status"].to_s, verb: entry["verb"]&.to_s, label: entry["batch"]&.to_s,
+                batch: match && match[:batch].to_i, started:, seconds:)
+    end
+    private_class_method :build_from
 
     # A string that isn't empty, or nil.
     sig { params(value: T.anything).returns(T.nilable(String)) }

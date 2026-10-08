@@ -276,8 +276,11 @@ module Timed
                 builds[short] = build
               elsif !formula_installed
                 (call ? (failed_after[call.label] ||= []) : failed) << name
+                # A formula brew never named started, as far as the log
+                # knows, when its batch did.
                 builds[short] = build.merge("status"  => "failed",
-                                            "version" => build["version"] || formula.pkg_version.to_s)
+                                            "version" => build["version"] || formula.pkg_version.to_s,
+                                            "started" => build["started"] || started.iso8601)
               end
             end
             builds.select! { |_, build| DONE.include?(build["status"]) } if stopped

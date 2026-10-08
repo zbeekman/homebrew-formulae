@@ -383,7 +383,8 @@ The gaps also include builds with no logged end, such as failed builds.
 
 #### How builds are grouped into runs
 
-Each logged build has `started` (when brew first named the formula),
+Each logged build has `started` (when brew first named the formula, or, for
+a formula brew never named before it failed, when its batch started),
 `wall_seconds` (from then until brew's summary line for it), `batch` (the
 label of its batch: `main`, `last`, `dependents` or `linkage`), `verb`,
 `log`, the output of its batch, kept in `$HOMEBREW_LOGS/timed/` and named
@@ -398,6 +399,10 @@ with the same `run` are of the same run, each in the batch its log names.
   logged, by the local time of both. That can put it in the wrong run when
   runs overlap, and can't make a run of a run that only skipped formulae;
   builds logged with `run` have neither problem.
+- Older versions of these commands logged a failed formula brew never named
+  with its log but no `started`. It is put at the first `started` of a build
+  in the same log, the nearest to its batch's start the log knows, and left
+  out if no build in that log has one.
 - Builds other than skipped formulae with no such log, and those whose
   `started` is only a date (logged before the runs were kept), belong to no
   run and are left out.

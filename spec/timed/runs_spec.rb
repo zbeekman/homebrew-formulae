@@ -78,6 +78,19 @@ RSpec.describe Timed::Runs do
                                       %w[wget 2026-09-01T08:00:00-04:00], %w[wget 2026-09-30T09:30:00-04:00]])
     end
 
+    it "puts a build logged with a log of a run but no start, as a failure brew never named once was, at the " \
+       "first start in its log, and leaves it out if its log has none" do
+      ran = { "status" => "built", "started" => "2026-10-01T10:00:05Z", "wall_seconds" => 10.0,
+              "log"    => "/logs/20261001-100000-1-batch1.log" }
+      unnamed = { "status" => "failed", "log" => "/logs/20261001-100000-1-batch1.log" }
+      alone = unnamed.merge("log" => "/logs/20261001-100000-1-batch2.log")
+      placed = described_class.all(log_of(ran, unnamed, alone)).map do |run|
+        run.builds.map { |build| [build.name, build.status, build.batch, build.started.iso8601, build.seconds] }
+      end
+      expect(placed).to eq([[["f0", "built", 1, "2026-10-01T10:00:05Z", 10.0],
+                             ["f1", "failed", 1, "2026-10-01T10:00:05Z", nil]]])
+    end
+
     it "orders runs by when they started, not by their logs' names" do
       builds = [["10:00:00", "20261001-235959-1"], ["11:00:00", "20261001-000000-2"]].map do |time, run|
         { "status" => "built", "started" => "2026-10-01T#{time}Z", "log" => "/logs/#{run}-batch1.log" }
