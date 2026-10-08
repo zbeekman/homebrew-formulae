@@ -450,6 +450,13 @@ RSpec.describe Timed::BuildLog do
     end
   end
 
+  describe ".formula_names" do
+    it "drops the tap, lowercases as brew does and keeps the first of each, in order" do
+      expect(described_class.formula_names(%w[openexr homebrew/core/LLVM llvm OpenEXR wget]))
+        .to eq(%w[openexr llvm wget])
+    end
+  end
+
   describe ".format_duration" do
     it "shows `?` for nil" do
       expect(described_class.format_duration(nil)).to eq("?")

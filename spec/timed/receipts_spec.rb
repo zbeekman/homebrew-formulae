@@ -220,6 +220,11 @@ RSpec.describe Timed::Receipts do
       expect(described_class.restamp(log, %w[homebrew/core/foo], cellar:)).to eq([foo])
     end
 
+    it "takes names in any case, as brew does, stamping each keg once" do
+      foo = receipt("foo", "0.14.1")
+      expect(described_class.restamp(log, %w[FOO homebrew/core/Foo], cellar:)).to eq([foo])
+    end
+
     it "leaves casks alone" do
       cask = HOMEBREW_PREFIX/"Caskroom/foo/.metadata/INSTALL_RECEIPT.json"
       cask.dirname.mkpath

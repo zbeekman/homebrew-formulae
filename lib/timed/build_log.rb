@@ -195,6 +195,12 @@ module Timed
       )
     end
 
+    # The formulae named on the command line as the log keys them: without
+    # their tap and lowercased, as brew's `downcased_unique_named` lowercases
+    # them, each once, in the order first named.
+    sig { params(names: T::Array[String]).returns(T::Array[String]) }
+    def self.formula_names(names) = names.map { Utils.name_from_full_name(it).downcase }.uniq
+
     sig { params(seconds: T.nilable(Float)).returns(String) }
     def self.format_duration(seconds)
       return "?" if seconds.nil?
