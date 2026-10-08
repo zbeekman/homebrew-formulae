@@ -47,6 +47,9 @@ module Timed
       const :batch, T.nilable(Integer)
       const :started, Time
       const :seconds, T.nilable(Float)
+      # When the brew calls of its batch ended; nil for a skipped formula, or
+      # one logged before the runner logged that.
+      const :batch_ended, T.nilable(Time), default: nil
 
       sig { returns(T::Boolean) }
       def skipped? = status == "skipped"
@@ -72,29 +75,32 @@ module Timed
       sig { returns(Time) }
       def started = ran.map(&:started).min || Time.at(0)
 
+      # The last finish of a build or end of a batch's brew calls.
       sig { returns(Time) }
-      def finished = ran.map(&:finished).max || Time.at(0)
+      def finished = [*ran.map(&:finished), *ran.filter_map(&:batch_ended)].max || Time.at(0)
 
       # Seconds from the first start to the last finish.
       sig { returns(Float) }
       def length = finished - started
 
-      # Whether the run's end isn't logged, so it ran at least `length`: none
-      # of its builds has a time, or one with no time, such as a failed one,
-      # starts at or after the last finish of a build with a time, or is in
-      # that build's batch or a later one. Brew can name a formula before its
-      # dependencies, which then finish before it fails, so one in the same
-      # batch may have ended last however early it started.
+      # Whether the run's end isn't logged, so it ran at least `length`: a
+      # build with no time, such as a failed one, and no logged end of its
+      # batch's brew calls, which it can't outlast, is in a run where none
+      # has a time, or starts at or after the last finish of a build with a
+      # time, or is in that build's batch or a later one. Brew can name a
+      # formula before its dependencies, which then finish before it fails,
+      # so one in the same batch may have ended last however early it started.
       sig { returns(T::Boolean) }
       def open_end?
         return false if skipped_only?
 
+        unbounded = ran.select { |build| build.seconds.nil? && build.batch_ended.nil? }
+        return false if unbounded.empty?
+
         last = ran.select(&:seconds).max_by(&:finished)
         return true if last.nil?
 
-        ran.any? do |build|
-          build.seconds.nil? && (build.started >= last.finished || build.batch.to_i >= last.batch.to_i)
-        end
+        unbounded.any? { |build| build.started >= last.finished || build.batch.to_i >= last.batch.to_i }
       end
 
       # Whether a build with no time starts before the run's end, so the gaps
@@ -309,7 +315,7 @@ module Timed
       # and so logged a dependency's wall time as 0.
       seconds = nil if seconds&.zero? && entry["install_seconds"].to_f.positive?
       Build.new(name:, status: entry["status"].to_s, verb: entry["verb"]&.to_s, label: entry["batch"]&.to_s,
-                batch: match && match[:batch].to_i, started:, seconds:)
+                batch: match && match[:batch].to_i, started:, seconds:, batch_ended: timestamp(entry["batch_ended"]))
     end
     private_class_method :build_from
 

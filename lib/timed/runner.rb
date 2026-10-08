@@ -52,8 +52,9 @@ module Timed
     # after, with when the call started: a formula failed unless that says
     # brew installed it (by default, if its version is installed). Each
     # formula brew worked on is logged in `database` with the
-    # verb, the batch's label, its log and the run (`run`, the start of the
-    # logs' names, shared by the whole run), and each keg brew installed gets
+    # verb, the batch's label, its log, when the batch's calls ended
+    # (`batch_ended`) and the run (`run`, the start of the logs' names, shared
+    # by the whole run), and each keg brew installed gets
     # its times in its receipt unless not `stamp`. A formula that `deps` says
     # needs one that failed or was skipped is skipped and logged as such.
     # With `stops_at_failure` (brew stops a call at a failed build), brew
@@ -252,6 +253,8 @@ module Timed
                 names -= unstarted
               end
             end
+            # On the clock of `started` in `parse`.
+            ended = (started + (clock.call - start)).iso8601
             success = results.all?
             # Brew didn't finish the batch, so a formula it didn't get to
             # hasn't failed.
@@ -284,7 +287,7 @@ module Timed
               end
             end
             builds.select! { |_, build| DONE.include?(build["status"]) } if stopped
-            entries.merge!(builds.transform_values { |build| build.merge("log" => log.to_s) })
+            entries.merge!(builds.transform_values { |build| build.merge("log" => log.to_s, "batch_ended" => ended) })
           end
           # By short name, as the log keys formulae; what brew did with a
           # formula it tried anyway is kept instead.

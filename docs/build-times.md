@@ -299,15 +299,20 @@ line each, under a header:
   formulae, so a formula built in a batch and reinstalled after the batches
   counts twice;
 - `length`: from when its first formula started to when its last one
-  finished. When a formula with no time, such as a failed one, starts after
-  the last logged finish, or is in the batch (or call after the batches) of
-  the formula that finished last, or a later one, the run's end isn't logged:
-  the length runs to the last logged finish or start and ends in `+`, e.g.
-  `1h03m+`: the run took at least that long. The log doesn't say when a
-  failed formula ended, and brew can name a formula before its dependencies,
-  then build them and fail it, so a failure in that batch may have ended last
-  however early it started. A failure in an earlier batch or call doesn't
-  make the length a lower bound, as later ones start after it ends.
+  finished or the brew calls of its last batch (or call after the batches)
+  ended, whichever is later. The log doesn't say when a failed formula
+  ended, but it does say when its batch's brew calls ended, which it can't
+  outlast, so the length is exact. Builds logged before that was logged
+  have only their start: when a formula with no time, such as a failed one,
+  starts after the last logged finish, or is in the batch of the formula
+  that finished last (even in an earlier brew call of it, such as one
+  reinstall of several, as the log doesn't say which), or a later one, the
+  run's end isn't logged, so the length runs to the last logged finish or
+  start and ends in `+`, e.g. `1h03m+`: the run took at least that long.
+  Brew can name a formula before its dependencies, then build them and fail
+  it, so for those older builds a failure in that batch may have ended last
+  however early it started. A failure in an earlier batch doesn't make the
+  length a lower bound, as later ones start after it ends.
 
 With colour, the column names are bold and underlined, as in `stats`, and a
 number of failed builds other than 0 is red. With no runs in the log, it
@@ -331,23 +336,24 @@ mark, as the axis is the run's clock, not a build's length.
 
 - A bar is at least one column wide, so a quick pour still shows. A failed
   formula's bar is drawn with `×`; brew's output for a failed formula has no
-  end, so with no time it is a single `×` where it started. Any other
-  formula with no time is a single column where it started, with `-` as its
-  time; that includes a dependency logged with a time of 0 but a longer
-  install time, as older versions of these commands logged dependencies when
-  brew named them with their version.
+  end, so with no time it is a single `×` where it started, even when its
+  batch's end is logged, as a batch of several formulae doesn't say when each
+  of them failed. Any other formula with no time is a single column where it
+  started, with `-` as its time; that includes a dependency logged with a time
+  of 0 but a longer install time, as older versions of these commands logged
+  dependencies when brew named them with their version.
 - The skipped formulae of a call after the batches follow its bars, with no
   bar. Those of the batches follow under `Skipped`, as the log doesn't say
   which batch skipped them.
 - The gaps between the bars are brew's own work, such as downloads and
-  checks. The last lines give the run's length and how much of it is between
-  the bars, and, if a formula with no time, such as a failed one, started
-  before the run's end, say that the gaps include it. If the run's end isn't
-  logged, as `runs` decides for `length`, the axis and the total give its
-  length as a lower bound, `1h03m+` and `at least 1h03m`, and the last lines
-  say that such a formula may have run past the last bar; a failed formula
-  named before the last finish of its batch can be in both: partly in the
-  gaps, and perhaps after the last bar.
+  checks, up to the end of the last batch's brew calls. The last lines give
+  the run's length and how much of it is between the bars, and, if a formula
+  with no time, such as a failed one, started before the run's end, say that
+  the gaps include it. If the run's end isn't logged, as `runs` decides for
+  `length`, the axis and the total give its length as a lower bound, `1h03m+`
+  and `at least 1h03m`, and the last lines say that such a formula may have
+  run past the last bar; a failed formula named before the last finish of its
+  batch can be in both: partly in the gaps, and perhaps after the last bar.
   A run that only skipped formulae has no time axis, and its last line says
   that nothing ran.
 - The bars are as wide as the terminal allows (it is taken to be at least 40
@@ -389,7 +395,9 @@ a formula brew never named before it failed, when its batch started),
 label of its batch: `main`, `last`, `dependents` or `linkage`), `verb`,
 `log`, the output of its batch, kept in `$HOMEBREW_LOGS/timed/` and named
 `<YYYYmmdd-HHMMSS>-<pid>-batch<n>.log` after when its run started (in local
-time), the run's process and the batch's number, and `run`, that name up to
+time), the run's process and the batch's number, `batch_ended`, when the
+brew calls of its batch ended (a timestamp like `started`; not with a
+skipped formula, which brew wasn't given), and `run`, that name up to
 `-batch`, the same for every build of the run, skipped formulae too. Builds
 with the same `run` are of the same run, each in the batch its log names.
 

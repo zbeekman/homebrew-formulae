@@ -197,6 +197,14 @@ RSpec.describe Timed::Runner do
         .to eq(%w[lib tool app].to_h { |name| [name, [run_id]] })
     end
 
+    it "logs with each build brew worked on when the brew calls of its batch ended, but not with a skipped formula" do
+      %w[lib tool app].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      run([batch("lib", "tool"), batch("app")], deps: { "app" => %w[lib] })
+      expect(builds.transform_values { |entries| entries.map { |entry| entry["batch_ended"] } })
+        .to eq("lib" => ["2026-09-30T10:00:20-04:00"], "tool" => ["2026-09-30T10:00:20-04:00"], "app" => [nil])
+    end
+
     it "logs a run's builds, the skipped formulae too, so that `Timed::Runs` groups them into that run" do
       %w[lib tool app].each { |name| stub_formula(name) }
       fake_brew(failing: %w[lib])
@@ -218,6 +226,14 @@ RSpec.describe Timed::Runner do
                                 tool]])
         expect(builds.transform_values { |entries| entries.map { |entry| entry["log"] } })
           .to eq("dep" => [log(1)], "app" => [log(1)], "tool" => [log(1)])
+      end
+
+      it "logs with each formula of the batch when its last call ended, which no formula of it can outlast" do
+        %w[dep app].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("dep", "app")], flags: source, pours: %w[dep], pour_flags: [])
+        expect(builds.transform_values { |entries| entries.map { |entry| entry["batch_ended"] } })
+          .to eq("dep" => ["2026-09-30T10:00:20-04:00"], "app" => ["2026-09-30T10:00:20-04:00"])
       end
 
       it "keeps the batch's order, one call for each run of pours or source builds" do
@@ -631,7 +647,7 @@ RSpec.describe Timed::Runner do
       run([batch("lib"), batch("app", label: "last")])
       build = { "version" => "2.0", "status" => "built", "install_seconds" => 9.5, "build_seconds" => 9.0,
                 "started" => "2026-09-30T10:00:00-04:00", "wall_seconds" => 10.0, "verb" => "upgrade",
-                "run" => run_id }
+                "run" => run_id, "batch_ended" => "2026-09-30T10:00:10-04:00" }
       expect(builds).to eq("lib" => [build.merge("batch" => "main", "log" => log(1))],
                            "app" => [build.merge("batch" => "last", "log" => log(2))])
     end
@@ -680,7 +696,7 @@ RSpec.describe Timed::Runner do
       expect([builds["lib"], Homebrew.failed?])
         .to eq([[{ "version" => "2.0", "status" => "failed", "problems" => ["Error: lib: it failed"],
                    "started" => "2026-09-30T10:00:00-04:00", "verb" => "upgrade", "batch" => "main",
-                   "log" => log(1), "run" => run_id }], true])
+                   "log" => log(1), "run" => run_id, "batch_ended" => "2026-09-30T10:00:20-04:00" }], true])
     end
 
     it "fails the run when brew fails, even if every formula upgraded" do
@@ -726,8 +742,8 @@ RSpec.describe Timed::Runner do
       expect(builds["app"].map { |entry| entry.slice("status", "version", "started") })
         .to eq([{ "status" => "failed", "version" => "2.0", "started" => "2026-09-30T10:00:00-04:00" }])
       runs = Timed::Runs.all(Timed::BuildLog.load(database))
-      expect(runs.map { |run| run.builds.map { |build| [build.name, build.status, build.batch] } })
-        .to eq([[["app", "failed", 1], ["lib", "failed", 1], ["top", "skipped", nil]]])
+      expect(runs.map { |run| [run.builds.map { |build| [build.name, build.status, build.batch] }, run.length_text] })
+        .to eq([[[["app", "failed", 1], ["lib", "failed", 1], ["top", "skipped", nil]], "0m10s"]])
     end
 
     it "logs a failed formula brew named as started when brew first named it, not with its batch" do
