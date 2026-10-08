@@ -66,11 +66,12 @@ RSpec.describe Timed::Plot do
     # over 10 s to 1000 s, after a gutter of 3 for the counts and the axis.
     let(:three) do
       [
-        "2 ┤████████████   ┊",
-        *["  │████████████   ┊"] * 4,
-        *["  │████████████   ┊        ████████████"] * 5,
-        "0 └┬─────────────┬┊────────────────┬───",
+        "2 ┤████████████",
+        *["  │████████████"] * 4,
+        *["  │████████████            ████████████"] * 5,
+        "0 └┬─────────────┬┴────────────────┬───",
         "   10s           1m                10m",
+        "                  └ 75s batch split",
       ]
     end
 
@@ -83,34 +84,61 @@ RSpec.describe Timed::Plot do
     end
 
     it "widens the bins to fill a wide terminal" do
-      expect(described_class.histogram([10.0, 10.0, 1000.0], width: 80).fetch(-3))
-        .to eq("  │█████████████████████████       ┊                 █████████████████████████")
+      expect(described_class.histogram([10.0, 10.0, 1000.0], width: 80).fetch(9))
+        .to eq("  │█████████████████████████                         █████████████████████████")
     end
 
     # 10 values: 5 bins (2 per cube root of the number of values) of 7 columns.
     it "draws a bar's top in eighths of a row" do
       lines = described_class.histogram([*[10.0] * 9, 1000.0], width: 40)
-      expect(lines.values_at(-4, -3))
-        .to eq(["   │███████        ┊            ▁▁▁▁▁▁▁",
-                "   │███████        ┊            ███████"])
+      expect(lines.values_at(8, 9))
+        .to eq(["   │███████                     ▁▁▁▁▁▁▁",
+                "   │███████                     ███████"])
     end
 
     # 200 values: at least 12 bins, so 17 of 2 columns.
     it "draws more bins than that when they fill the width evenly, and a bar for any count" do
       lines = described_class.histogram([*[10.0] * 199, 1000.0], width: 40)
-      expect(lines.fetch(-3)).to eq("    │██            ┊                 ▁▁")
+      expect(lines.fetch(9)).to eq("    │██                              ▁▁")
     end
 
-    it "marks 75 s in the axis too, under a bar as high as the plot" do
-      expect(described_class.histogram([70.0, 75.0, 75.0, 80.0], width: 40).values_at(0, -1))
-        .to eq(["2 ┤                  █████████", "0 └──────────────────┊─────────────────"])
+    it "marks 75 s with `┴` in the axis only, under a bar as high as the plot, and labels it on a row of its own" do
+      expect(described_class.histogram([70.0, 75.0, 75.0, 80.0], width: 40).values_at(0, -2, -1))
+        .to eq(["2 ┤                  █████████",
+                "0 └──────────────────┴─────────────────",
+                "                     └ 75s batch split"])
     end
 
     # 75 s is in the same column as the 1m tick here.
-    it "labels every tick in the range, skipping a label that would touch the one before" do
-      expect(described_class.histogram([0.01, 600_000.0], width: 40).last(2))
-        .to eq(["0 └─────────┬───┬───┬────┬──┬────┬─────",
-                "            1s  10s 1m   10m     10h"])
+    it "labels every tick in the range, skipping a label that would touch the one before, and `┼` a tick at 75 s" do
+      expect(described_class.histogram([0.01, 600_000.0], width: 40).last(3))
+        .to eq(["0 └─────────┬───┬───┼────┬──┬────┬─────",
+                "            1s  10s 1m   10m     10h",
+                "                    └ 75s batch split"])
+    end
+
+    # 75 s is in the 35th of 36 columns, too far right for the label to go
+    # right of it.
+    it "ends the label of the mark at it when it does not fit to the right" do
+      expect(described_class.histogram([10.0, 80.0], width: 40).last(3))
+        .to eq(["0 └┬──────────────────────────────┬──┴─",
+                "   10s                            1m",
+                "                     75s batch split ┘"])
+    end
+
+    it "adds no row for the mark when 75 s is out of the range" do
+      rows = { "ticks" => [5.0, 20.0], "no ticks" => [1.5, 2.0] }.transform_values do |values|
+        described_class.histogram(values, width: 40).length - Timed::Plot::HEIGHT
+      end
+      expect(rows).to eq("ticks" => 2, "no ticks" => 1)
+    end
+
+    it "draws nothing but bars or the curve in the plot, not the mark" do
+      plots = [[false, false], [true, false], [false, true], [true, true]].to_h do |smooth, linear|
+        lines = described_class.histogram([10.0, 1000.0, 1000.0], width: 40, smooth:, linear:)
+        [{ smooth:, linear: }, lines.first(Timed::Plot::HEIGHT).join.scan(/[^ \d┤│▁▂▃▄▅▆▇█⠀-⣿]/).uniq]
+      end
+      expect(plots).to eq(plots.transform_values { [] })
     end
 
     it "widens the range of equal values to twice and half of them" do
@@ -143,8 +171,8 @@ RSpec.describe Timed::Plot do
     # The middle of the last bin, 316 s, is yellow; its value is red.
     it "paints each bar by the band of the median of its values, and nothing else" do
       paint = ->(text, style) { "<#{style}:#{text}>" }
-      expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, paint:).fetch(-3))
-        .to eq("  │<green:████████████>   ┊        <red:████████████>")
+      expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, paint:).fetch(9))
+        .to eq("  │<green:████████████>            <red:████████████>")
     end
 
     # How many rows up the curve reaches in `columns` of the plot, 0 if it is
@@ -156,62 +184,86 @@ RSpec.describe Timed::Plot do
     end
 
     describe "with `smooth`" do
-      # 5 in the first bin of 4, and 1 in the last: the curve is no higher
-      # than either bar, so it is all behind them.
-      it "draws a tight cluster no higher than its count, and a lone value no higher than 1" do
-        values = [100.0, 101.0, 102.0, 103.0, 104.0, 3600.0]
-        expect(described_class.histogram(values, width: 80, smooth: true))
-          .to eq(described_class.histogram(values, width: 80))
+      it "draws the curve alone, with no bars" do
+        blocks = { "log" => false, "linear" => true }.transform_values do |linear|
+          described_class.histogram([*[10.0] * 50, 299.0, 300.0], width: 40, smooth: true, linear:).join[/[▁▂▃▄▅▆▇█]/]
+        end
+        expect(blocks).to eq("log" => nil, "linear" => nil)
       end
 
-      # 50 of 10 s in the first bin of 4 columns, which the curve crosses.
-      it "draws the curve behind the full cells of a bar, so the bar keeps its height" do
-        lines = described_class.histogram([*[10.0] * 50, 299.0, 300.0], width: 40, smooth: true)
-        expect(lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[0, 4] })
-          .to eq(["████"] * Timed::Plot::HEIGHT)
+      # 5 in the first of 4 bins, 19 columns wide, and 1 in the last: the
+      # curve's peak is the cluster's count, and a lone value takes 2 rows of
+      # 10, a count of 1.
+      it "draws a tight cluster as high as its count, and a lone value no higher than 1" do
+        lines = described_class.histogram([100.0, 101.0, 102.0, 103.0, 104.0, 3600.0], width: 80, smooth: true)
+        expect("top" => lines.fetch(0)[0, 3], "cluster" => curve_height(lines, 0...19),
+               "lone" => curve_height(lines, 57..))
+          .to eq("top" => "5 ┤", "cluster" => 10, "lone" => 2)
       end
 
       # 20 values of 21.44 s to 21.63 s, either side of the edge of the 2nd
-      # and 3rd of 6 bins at 21.54 s, so each bar is about 10 high.
-      it "draws a cluster narrower than a braille dot" do
+      # and 3rd of 6 bins at 21.54 s.
+      it "draws a cluster narrower than a braille dot, as high as its count" do
         values = [1.0, *(-10..9).map { |hundredths| 21.54 + (hundredths / 100.0) }, 10_000.0]
-        expect(curve_height(described_class.histogram(values, width: 40, smooth: true), 6...18)).to eq(10)
+        lines = described_class.histogram(values, width: 40, smooth: true)
+        expect("top" => lines.fetch(0)[0, 4], "cluster" => curve_height(lines, 6...18))
+          .to eq("top" => "20 ┤", "cluster" => 10)
       end
 
-      it "draws the kernel density estimate in braille, behind the bars' full cells, scaled to the counts" do
+      # Each of 10 s and 1000 s is at an edge, so a bin's width centred there
+      # holds about half of each of them.
+      it "draws the kernel density estimate in braille, scaled to the counts, on the axes of the bars" do
         expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, smooth: true)).to eq(
           [
-            "2 ┤████████████   ┊",
-            *["  │████████████   ┊"] * 4,
-            *["  │████████████   ┊        ████████████"] * 2,
-            "  │████████████⢄⣀ ┊        ████████████",
-            "  │████████████  ⠉⠒⠒⠤⠤⠤⠤⠤⠤⠤████████████",
-            "  │████████████   ┊        ████████████",
-            "0 └┬─────────────┬┊────────────────┬───",
+            "1 ┤⣀⣀",
+            "  │  ⠉⠒⠤⡀",
+            "  │     ⠈⠢⡀",
+            "  │       ⠈⠢⢄",
+            "  │          ⠑⢄",
+            "  │            ⠑⢄                ⢀⣀⠤⠤⠔⠒",
+            "  │              ⠉⠢⢄⡀       ⣀⡠⠤⠒⠉⠁",
+            "  │                 ⠈⠉⠒⠒⠒⠒⠉⠉",
+            *["  │"] * 2,
+            "0 └┬─────────────┬┴────────────────┬───",
             "   10s           1m                10m",
+            "                  └ 75s batch split",
           ],
         )
       end
 
       it "leaves the curve unpainted" do
         paint = ->(text, style) { "<#{style}:#{text}>" }
-        expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, smooth: true, paint:).fetch(-4))
-          .to eq("  │<green:████████████>  ⠉⠒⠒⠤⠤⠤⠤⠤⠤⠤<red:████████████>")
+        expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, smooth: true, paint:))
+          .to eq(described_class.histogram([10.0, 10.0, 1000.0], width: 40, smooth: true))
       end
 
       it "smooths equal values over the width of a bin" do
-        expect(described_class.histogram([30.0, 30.0], width: 40, smooth: true).values_at(6, 7, 8)).to eq(
-          ["  │          ⣀⡠████████████⢄⣀",
-           "  │    ⢀⣀⠤⠒⠊⠉  ████████████  ⠉⠑⠒⠤⣀⡀",
-           "  │⠤⠔⠒⠉⠁       ████████████       ⠈⠉⠒⠢⠤"],
+        expect(described_class.histogram([30.0, 30.0], width: 40, smooth: true)).to eq(
+          [
+            "1 ┤",
+            "  │",
+            "  │             ⣀⡠⠤⠤⠒⠒⠤⠤⢄⣀",
+            "  │         ⢀⡠⠔⠉          ⠉⠢⢄⡀",
+            "  │       ⡠⠒⠁                ⠈⠒⢄",
+            "  │    ⣀⠔⠉                      ⠉⠢⣀",
+            "  │ ⢀⠔⠊                            ⠑⠢⡀",
+            "  │⠊⠁                                ⠈⠑",
+            *["  │"] * 2,
+            "0 └───────────────────────────────────┬",
+            "                                     1m",
+          ],
         )
       end
 
-      # 9 s and 11 s are either side of the edge of two bins, at 10 s.
-      it "raises the top of the y axis to the curve's peak, which can be above every bar" do
-        values = [1.0, 9.0, 11.0, 100.0]
-        tops = [false, true].map { |smooth| described_class.histogram(values, width: 40, smooth:).fetch(0)[0, 3] }
-        expect(tops).to eq(["1 ┤", "2 ┤"])
+      # 9 s and 11 s are either side of the edge of two bins, at 10 s; the
+      # two of 10 s are at the edge of the plot, so a bin's width centred on
+      # them holds about half of each.
+      it "tops the y axis at the curve's peak, rounded up, above or below the highest bar" do
+        tops = { "straddling" => [1.0, 9.0, 11.0, 100.0], "at the edge" => [10.0, 10.0, 1000.0] }
+               .transform_values do |values|
+          [false, true].map { |smooth| described_class.histogram(values, width: 40, smooth:).fetch(0)[0, 3] }
+        end
+        expect(tops).to eq("straddling" => ["1 ┤", "2 ┤"], "at the edge" => ["2 ┤", "1 ┤"])
       end
     end
 
@@ -226,27 +278,31 @@ RSpec.describe Timed::Plot do
             "2 ┤█████████",
             *["  │█████████"] * 4,
             *["  │█████████                  █████████"] * 5,
-            "0 └┬─┊──────┬────────┬────────┬───────┬",
+            "0 └┬─┴──────┬────────┬────────┬───────┬",
             "   0        5m       10m      15m   20m",
+            "     └ 75s batch split",
           ],
         )
       end
 
       # Freedman–Diaconis: 1m39s, rounded to 2m; 3000 s is in the 26th bin.
+      # 75 s is in the first column, with the 0 tick.
       it "rounds the Freedman–Diaconis width to 1, 2 or 5 seconds, minutes or hours, or 10 or 20" do
-        expect(linear([60.0, 60.0, 120.0, 120.0, 180.0, 3000.0]).last(3))
+        expect(linear([60.0, 60.0, 120.0, 120.0, 180.0, 3000.0]).last(4))
           .to eq(["  │██                       █",
-                  "0 └┬────┬────┬────┬────┬────┬",
-                  "   0    10m  20m  30m  40m"])
+                  "0 └┼────┬────┬────┬────┬────┬",
+                  "   0    10m  20m  30m  40m",
+                  "   └ 75s batch split"])
       end
 
       # Freedman–Diaconis: 2 s, but 1801 bins of 2 s do not fit in 37
       # columns; 31 of 2m do.
       it "widens the bins to fit the width" do
-        expect(linear([10.0, 11.0, 12.0, 13.0, 3600.0]).last(3))
+        expect(linear([10.0, 11.0, 12.0, 13.0, 3600.0]).last(4))
           .to eq(["  │█                             █",
-                  "0 └┬────┬────┬────┬────┬────┬────┬",
-                  "   0    10m  20m  30m  40m  50m 1h"])
+                  "0 └┼────┬────┬────┬────┬────┬────┬",
+                  "   0    10m  20m  30m  40m  50m 1h",
+                  "   └ 75s batch split"])
       end
 
       it "gives values with no interquartile range the Rice rule's number of bins" do
@@ -265,7 +321,7 @@ RSpec.describe Timed::Plot do
           "seconds" => [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 100.0],
           "minutes" => [600.0, 1500.0, 2400.0, 3000.0, 4000.0, 5400.0, 9000.0],
           "hours"   => [3600.0, 7200.0, 36_000.0, 72_000.0],
-        }.transform_values { |values| linear(values, width: 80).last }
+        }.transform_values { |values| linear(values, width: 80).fetch(-2) }
         expect(labels).to eq(
           "seconds" => "   0        15s      30s      45s      1m       1m15s    1m30s",
           "minutes" => "   0        20m      40m      1h       1h20m    1h40m    2h       2h20m",
@@ -276,7 +332,7 @@ RSpec.describe Timed::Plot do
       # The first bin, of 0 to 5m, holds two of 10 s.
       it "paints each bar by the band of the median of its values" do
         paint = ->(text, style) { "<#{style}:#{text}>" }
-        expect(linear([10.0, 10.0, 1000.0], paint:).fetch(-3))
+        expect(linear([10.0, 10.0, 1000.0], paint:).fetch(9))
           .to eq("  │<green:█████████>                  <red:█████████>")
       end
 
@@ -287,16 +343,17 @@ RSpec.describe Timed::Plot do
         it "fits the estimate on log seconds, so nothing is below 0 s, and shows each bin's expected count" do
           expect(linear([10.0, 10.0, 1000.0], smooth: true)).to eq(
             [
-              "3 ┤  ┊",
-              "  │  ┊",
-              "  │  ┊⢀⡀",
-              "  │⠒⠉⠉⠁⢸▅▅▅▅",
-              *["  │█████████"] * 2,
-              "  │█████████                  ▃▃▃▃▃▃▃▃▃",
-              *["  │█████████                  █████████"] * 2,
-              "  │█████████⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀█████████",
-              "0 └┬─┊──────┬────────┬────────┬───────┬",
+              "3 ┤",
+              "  │",
+              "  │   ⢀⡀",
+              "  │⠒⠉⠉⠁⢸",
+              *["  │    ⢸"] * 2,
+              *["  │     ⡇"] * 2,
+              "  │     ⠱⡀",
+              "  │      ⠈⠑⠒⠒⠒⠒⠢⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⢄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀",
+              "0 └┬─┴──────┬────────┬────────┬───────┬",
               "   0        5m       10m      15m   20m",
+              "     └ 75s batch split",
             ],
           )
         end
@@ -311,20 +368,22 @@ RSpec.describe Timed::Plot do
             .to eq("top" => "5 ┤", "cluster" => 10, "lone" => 1)
         end
 
-        # 50 of 10 s in the first of 16 bins of 20 s, 2 columns wide, which
-        # the curve crosses.
-        it "draws the curve behind the full cells of a narrow bar, so it keeps its height" do
-          lines = linear([*[10.0] * 50, 299.0, 300.0], smooth: true)
-          expect(lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[0, 2] })
-            .to eq(["██"] * Timed::Plot::HEIGHT)
-        end
-
         it "smooths equal values over about the width of a bin at them" do
-          expect(linear([30.0, 30.0], smooth: true).values_at(6, 7, 8, 9)).to eq(
-            ["  │                   ⣀⠤⠒⠊⠉⠉⠉⠉█████████",
-             "  │                ⢀⠔⠊        █████████",
-             "  │             ⢀⡠⠊⠁          █████████",
-             "  │        ⢀⣀⡠⠔⠊⠁             █████████"],
+          expect(linear([30.0, 30.0], smooth: true)).to eq(
+            [
+              "1 ┤",
+              "  │",
+              "  │                    ⢀⡠⠒⠉⠉⠉⠒⠢⣀",
+              "  │                   ⡠⠃        ⠑⠢⡀",
+              "  │                 ⢀⠎            ⠈⠢⣀",
+              "  │                ⡠⠃                ⠑⢄",
+              "  │               ⡔⠁",
+              "  │             ⢠⠊",
+              "  │           ⢀⠔⠁",
+              "  │       ⣀⣀⠤⠒⠁",
+              "0 └┬────────┬────────┬────────┬───────┬",
+              "   0        10s      20s      30s   40s",
+            ],
           )
         end
       end
