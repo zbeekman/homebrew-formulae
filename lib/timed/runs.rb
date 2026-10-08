@@ -29,6 +29,10 @@ module Timed
     # The statuses counted in the list of runs.
     COUNTED = %w[built poured failed skipped].freeze
 
+    # What `total` says of a run whose end isn't logged.
+    OPEN_END = ["The run's end isn't logged: a build with no time, such as a failed one,",
+                "may have run past the last bar."].freeze
+
     # A build of a run.
     class Build < T::Struct
       const :name, String
@@ -73,15 +77,22 @@ module Timed
       sig { returns(Float) }
       def length = finished - started
 
-      # Whether the run's end isn't logged, as a build with no time, such as a
-      # failed one, starts at or after the last finish of a build with a time,
-      # or none has a time, so it ran at least `length`.
+      # Whether the run's end isn't logged, so it ran at least `length`: none
+      # of its builds has a time, or one with no time, such as a failed one,
+      # starts at or after the last finish of a build with a time, or is in
+      # that build's batch or a later one. Brew can name a formula before its
+      # dependencies, which then finish before it fails, so one in the same
+      # batch may have ended last however early it started.
       sig { returns(T::Boolean) }
       def open_end?
         return false if skipped_only?
 
-        known = ran.filter_map { |build| build.finished if build.seconds }.max
-        ran.any? { |build| build.seconds.nil? && (known.nil? || build.started >= known) }
+        last = ran.select(&:seconds).max_by(&:finished)
+        return true if last.nil?
+
+        ran.any? do |build|
+          build.seconds.nil? && (build.started >= last.finished || build.batch.to_i >= last.batch.to_i)
+        end
       end
 
       # Whether a build with no time starts before the run's end, so the gaps
@@ -237,7 +248,7 @@ module Timed
        "#{BuildLog.format_duration(run.between)} of it between the bars.",
        "The gaps between the bars are brew's own work, such as downloads and checks.",
        *("The gaps also include builds with no logged end, such as failed builds." if run.unfinished_within?),
-       *("The run's end isn't logged: its last build has no time, such as a failed one." if open_end)]
+       *(OPEN_END if open_end)]
     end
 
     # What a call after the batches does, as the plan heads it; `Batch <n>`,

@@ -299,9 +299,15 @@ line each, under a header:
   formulae, so a formula built in a batch and reinstalled after the batches
   counts twice;
 - `length`: from when its first formula started to when its last one
-  finished. When the run ends with a formula with no time, such as a failed
-  one, its end isn't logged, so the length runs to that formula's start and
-  ends in `+`, e.g. `1h03m+`: the run took at least that long.
+  finished. When a formula with no time, such as a failed one, starts after
+  the last logged finish, or is in the batch (or call after the batches) of
+  the formula that finished last, or a later one, the run's end isn't logged:
+  the length runs to the last logged finish or start and ends in `+`, e.g.
+  `1h03m+`: the run took at least that long. The log doesn't say when a
+  failed formula ended, and brew can name a formula before its dependencies,
+  then build them and fail it, so a failure in that batch may have ended last
+  however early it started. A failure in an earlier batch or call doesn't
+  make the length a lower bound, as later ones start after it ends.
 
 With colour, the column names are bold and underlined, as in `stats`, and a
 number of failed builds other than 0 is red. With no runs in the log, it
@@ -336,9 +342,12 @@ mark, as the axis is the run's clock, not a build's length.
 - The gaps between the bars are brew's own work, such as downloads and
   checks. The last lines give the run's length and how much of it is between
   the bars, and, if a formula with no time, such as a failed one, started
-  before the run's end, say that the gaps include it. If the run ends with
-  such a formula, its end isn't logged: the axis and the total give its length
-  as a lower bound, `1h03m+` and `at least 1h03m`, and the last line says so.
+  before the run's end, say that the gaps include it. If the run's end isn't
+  logged, as `runs` decides for `length`, the axis and the total give its
+  length as a lower bound, `1h03m+` and `at least 1h03m`, and the last lines
+  say that such a formula may have run past the last bar; a failed formula
+  named before the last finish of its batch can be in both: partly in the
+  gaps, and perhaps after the last bar.
   A run that only skipped formulae has no time axis, and its last line says
   that nothing ran.
 - The bars are as wide as the terminal allows (it is taken to be at least 40

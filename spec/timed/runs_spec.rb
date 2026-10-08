@@ -154,6 +154,12 @@ RSpec.describe Timed::Runs do
       expect(described_class.lines([after, single, skipped], paint: plain).drop(1).map { |line| line[/ +\S+\z/] })
         .to eq(["   0m15s+", "   0m00s+", "    0m00s"])
     end
+
+    it "marks the length of a run as a lower bound when a build with no time is in the batch of the last finish, " \
+       "even if named before it, as when brew names a formula before its dependencies and then it fails" do
+      parent = run_of(build(status: "failed", seconds: nil), build(name: "dep", started: 2.0))
+      expect(described_class.lines([parent], paint: plain).fetch(1)[/ +\S+\z/]).to eq("   0m12s+")
+    end
   end
 
   describe ".timeline" do
@@ -249,10 +255,12 @@ RSpec.describe Timed::Runs do
       expect(described_class.total(run)).to eq(["Nothing ran: every formula was skipped."])
     end
 
-    # A run of a build for each `[status, seconds, started]`, started at 0
-    # by default.
+    # A run of a build for each `[status, seconds, started, batch]`, started
+    # at 0 in batch 1 by default.
     def run_from(*builds)
-      run_of(*builds.map { |status, seconds, started| build(status:, seconds:, started: started || 0.0) })
+      run_of(*builds.map do |status, seconds, started, batch|
+        build(status:, seconds:, started: started || 0.0, batch: batch || 1)
+      end)
     end
 
     def total_of(*builds) = described_class.total(run_from(*builds))
@@ -261,11 +269,12 @@ RSpec.describe Timed::Runs do
       expect(total_of(["failed", nil]))
         .to eq(["Total at least 0m00s, 0m00s of it between the bars.",
                 "The gaps between the bars are brew's own work, such as downloads and checks.",
-                "The run's end isn't logged: its last build has no time, such as a failed one."])
+                "The run's end isn't logged: a build with no time, such as a failed one,",
+                "may have run past the last bar."])
     end
 
-    it "gives a run with a failed build between others its length, the failure in the gaps" do
-      run = run_from(["built", 10.0], ["failed", nil, 12.0], ["built", 10.0, 20.0])
+    it "gives a run with a failed build in a batch before the last finish its length, the failure in the gaps" do
+      run = run_from(["built", 10.0], ["failed", nil, 12.0], ["built", 10.0, 20.0, 2])
       expect([described_class.lines([run], paint: plain).fetch(1)[/\S+\z/], *described_class.total(run)])
         .to eq(["0m30s", "Total 0m30s, 0m10s of it between the bars.",
                 "The gaps between the bars are brew's own work, such as downloads and checks.",
@@ -276,7 +285,18 @@ RSpec.describe Timed::Runs do
       expect(total_of(["built", 10.0], ["failed", nil, 15.0]))
         .to eq(["Total at least 0m15s, 0m05s of it between the bars.",
                 "The gaps between the bars are brew's own work, such as downloads and checks.",
-                "The run's end isn't logged: its last build has no time, such as a failed one."])
+                "The run's end isn't logged: a build with no time, such as a failed one,",
+                "may have run past the last bar."])
+    end
+
+    it "gives a run with a failed build named before the last finish in its batch as at least its length, the " \
+       "failure in the gaps and maybe after them" do
+      expect(total_of(["failed", nil], ["built", 10.0, 2.0]))
+        .to eq(["Total at least 0m12s, 0m02s of it between the bars.",
+                "The gaps between the bars are brew's own work, such as downloads and checks.",
+                "The gaps also include builds with no logged end, such as failed builds.",
+                "The run's end isn't logged: a build with no time, such as a failed one,",
+                "may have run past the last bar."])
     end
 
     it "puts a build with no time before the run's end in the gaps, even after the last known finish, or " \
@@ -285,7 +305,8 @@ RSpec.describe Timed::Runs do
                 [["failed", nil], ["failed", nil, 10.0]]].map { |builds| total_of(*builds) }
       footer = ["The gaps between the bars are brew's own work, such as downloads and checks.",
                 "The gaps also include builds with no logged end, such as failed builds.",
-                "The run's end isn't logged: its last build has no time, such as a failed one."]
+                "The run's end isn't logged: a build with no time, such as a failed one,",
+                "may have run past the last bar."]
       expect(totals).to eq([["Total at least 1m40s, 1m30s of it between the bars.", *footer],
                             ["Total at least 0m10s, 0m10s of it between the bars.", *footer]])
     end
