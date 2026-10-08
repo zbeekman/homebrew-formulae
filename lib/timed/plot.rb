@@ -81,8 +81,8 @@ module Timed
       (LINEAR_WIDTHS + [15.0, 30.0, 900.0, 1800.0, 10_800.0, 21_600.0, 43_200.0]).sort.freeze,
       T::Array[Float],
     )
-    # Drawn at `GREEN_UP_TO` in the cells nothing else is drawn in.
-    MARK = "┊"
+    # The label of the mark at `GREEN_UP_TO` in the x axis.
+    MARK_LABEL = "75s batch split"
     # The bit of each dot of a braille character, by row from the top, then
     # by column.
     BRAILLE_BITS = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]].freeze
@@ -132,11 +132,12 @@ module Timed
     # the longest. There are at least 2 bins per cube root of the number of
     # values, sometimes a few more so the bins fill the width evenly, so a bar
     # is one or more columns wide. The y axis is labelled with the highest
-    # count, the x axis with `TICKS` in the range (or at its edges), and
-    # `MARK` marks `GREEN_UP_TO`. With `smooth`, a Gaussian kernel density
-    # estimate of the log values, on the scale of the bars, is drawn in
-    # braille, behind their full cells. With `paint`, each bar is painted in
-    # the band of the median of its values.
+    # count, the x axis with `TICKS` in the range (or at its edges) and a
+    # labelled mark at `GREEN_UP_TO`, in the axis only. With `smooth`, a
+    # Gaussian kernel density estimate of the log values, on the scale of the
+    # bars, is drawn in braille instead of them, on the same axes, with the y
+    # axis up to its peak. With `paint`, each bar is painted in the band of the
+    # median of its values; the curve never is.
     #
     # With `linear`, the x axis is linear from 0 instead, in bins of a width
     # from `LINEAR_WIDTHS`: the nearest to the Freedman–Diaconis width (the
@@ -155,23 +156,23 @@ module Timed
       label_width = values.length.to_s.length
       columns = [width, MIN_WIDTH].max - label_width - 2
       axis = linear ? linear_axis(values, longest, columns) : log_axis(shortest, longest, values.length, columns)
-      binned = Array.new(axis.bins) { [] }
-      values.each { |seconds| binned.fetch(axis.column(seconds) / axis.per_bin) << seconds }
-      curve = smooth ? curve(values.map { |seconds| Math.log(seconds) }, axis) : []
-      # Rounded first, so a peak of 1 plus rounding error is not 2.
-      top = [*binned.map(&:length), curve.max&.round(6)&.ceil || 0].max.to_i.clamp(1, values.length)
-
-      mark_column = axis.column(GREEN_UP_TO) if axis.cover?(GREEN_UP_TO)
-      grid = bars(binned, axis.per_bin, top)
-      if mark_column
-        grid.each { |cells| cells[mark_column] = [MARK, nil] if cells.fetch(mark_column).first == " " }
+      if smooth
+        curve = curve(values.map { |seconds| Math.log(seconds) }, axis)
+        # Rounded first, so a peak of 1 plus rounding error is not 2.
+        top = (curve.max&.round(6)&.ceil || 0).clamp(1, values.length)
+        grid = curve_cells(curve, top)
+      else
+        binned = Array.new(axis.bins) { [] }
+        values.each { |seconds| binned.fetch(axis.column(seconds) / axis.per_bin) << seconds }
+        top = binned.map(&:length).max || 1
+        grid = bars(binned, axis.per_bin, top)
       end
-      draw_curve(grid, curve, top)
+
       rows = grid.each_with_index.map do |cells, row|
         gutter = row.zero? ? "#{top.to_s.rjust(label_width)} ┤" : "#{" " * label_width} │"
         "#{gutter}#{paint_cells(cells, paint)}".rstrip
       end
-      rows + x_axis(axis, label_width, mark_column)
+      rows + x_axis(axis, label_width, columns)
     end
 
     # At least 2 bins per cube root of `count` values, as the Rice rule gives.
@@ -283,11 +284,12 @@ module Timed
     end
     private_class_method :bars
 
-    # Draws `curve` (counts at each dot) in braille over `grid`, each dot
-    # column joined to the one before by a vertical run of dots, behind the
-    # full cells of the bars, so they keep their height.
-    sig { params(grid: T::Array[T::Array[Cell]], curve: T::Array[Float], top: Integer).void }
-    def self.draw_curve(grid, curve, top)
+    # `curve` (counts at each dot, two per column) over `top` of the height as
+    # rows of braille cells, from the top, each dot column joined to the one
+    # before by a vertical run of dots.
+    sig { params(curve: T::Array[Float], top: Integer).returns(T::Array[T::Array[Cell]]) }
+    def self.curve_cells(curve, top)
+      grid = Array.new(HEIGHT) { Array.new(curve.length / 2) { [" ", nil] } }
       levels = curve.map { |count| (count * HEIGHT * 4 / top).round.clamp(0, HEIGHT * 4) }
       bits = Hash.new(0)
       levels.each_with_index do |level, dot|
@@ -300,23 +302,20 @@ module Timed
           bits[[HEIGHT - 1 - row, dot / 2]] |= BRAILLE_BITS.fetch(3 - from_bottom).fetch(dot % 2)
         end
       end
-      bits.each do |(row, column), value|
-        cells = grid.fetch(row)
-        next if cells.fetch(column).first == BLOCKS.last
-
-        cells[column] = [(BRAILLE_BLANK + value).chr(Encoding::UTF_8), nil]
-      end
+      bits.each { |(row, column), value| grid.fetch(row)[column] = [(BRAILLE_BLANK + value).chr(Encoding::UTF_8), nil] }
+      grid
     end
-    private_class_method :draw_curve
+    private_class_method :curve_cells
 
     # The axis line, with a tick at each of `TICKS` (or `linear_ticks`) in the
-    # range and `MARK` in `mark_column` unless a tick is there, and the line of
-    # their labels, if any: each at its tick or as far right as fits, left out
-    # if it would touch the label before.
-    sig { params(axis: Axis, label_width: Integer, mark_column: T.nilable(Integer)).returns(T::Array[String]) }
-    def self.x_axis(axis, label_width, mark_column)
+    # range, the line of their labels, if any: each at its tick or as far
+    # right as fits, left out if it would touch the label before, and, if
+    # `GREEN_UP_TO` is in the range, a `┴` there (`┼` on a tick) and a line
+    # with `MARK_LABEL` from it to the right, or ending at it if that would
+    # not fit in `room` columns.
+    sig { params(axis: Axis, label_width: Integer, room: Integer).returns(T::Array[String]) }
+    def self.x_axis(axis, label_width, room)
       line = Array.new(axis.columns, "─")
-      line[mark_column] = MARK if mark_column
       labels = " " * axis.columns
       label_end = -2
       (axis.linear ? linear_ticks(axis) : TICKS).each do |label, seconds|
@@ -330,8 +329,18 @@ module Timed
         labels[start, label.length] = label
         label_end = start + label.length - 1
       end
-      axis_line = "#{"0".rjust(label_width)} └#{line.join}"
-      labels.strip.empty? ? [axis_line] : [axis_line, "#{" " * (label_width + 2)}#{labels.rstrip}"]
+      if axis.cover?(GREEN_UP_TO)
+        mark = axis.column(GREEN_UP_TO)
+        line[mark] = (line.fetch(mark) == "┬") ? "┼" : "┴"
+        rightwards = "└ #{MARK_LABEL}"
+        mark_label = if mark + rightwards.length <= room
+          (" " * mark) + rightwards
+        else
+          "#{MARK_LABEL} ┘".rjust(mark + 1)
+        end
+      end
+      texts = [labels.rstrip, mark_label].compact.reject(&:empty?)
+      ["#{"0".rjust(label_width)} └#{line.join}", *texts.map { |text| "#{" " * (label_width + 2)}#{text}" }]
     end
     private_class_method :x_axis
 

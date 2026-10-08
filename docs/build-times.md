@@ -163,8 +163,11 @@ times, so a formula built many times does not outweigh the others.
   ticks at `1s`, `10s`, `1m`, `10m`, `1h` and `10h` where they are in that
   range, edges included, so a narrow range may have none. A label that would
   touch the one before it is left out.
-- `┊` marks 75 seconds, where the `-timed` commands start to split batches:
-  in the axis, unless a tick is there, and above the bars.
+- 75 seconds, where the `-timed` commands start to split batches, is marked
+  in the x axis only, with `┴`, or `┼` where a tick is there too. A row under
+  the tick labels names it: `└ 75s batch split` from the mark to the right, or
+  `75s batch split ┘` ending at the mark if that does not fit in the width.
+  With 75 seconds outside the range, there is no mark and no row for it.
 - The plot is as wide as the terminal (at least 40 columns) and 10 rows high.
   The bins are of equal width on the log scale: at least 2 per cube root of the
   number of times (5 for 10 formulae, 10 for 100), sometimes a few more so the
@@ -183,18 +186,18 @@ There is no `--json`; `stats --json` gives every time plotted.
 - `--poured`: plot the times of pours instead of source builds. The two are
   never mixed.
 - `--builds`: count every build, not one mean for each formula.
-- `--smooth`: draw a smoothed curve with the bars, in braille: a Gaussian
-  kernel density estimate of the log times, with Silverman's rule-of-thumb
-  bandwidth (0.9 times the smaller of the standard deviation and the
-  interquartile range divided by 1.34, or the one that is not zero, times the
-  number of times to the power -1/5; one bin's width if the times are all
-  equal). At each point it shows how many times the estimate puts within one
-  bin's width centred there, so it is on the scale of the bars: a lone time
-  is never higher than 1, and a cluster of times narrower than the plot can
-  show is still drawn. It is drawn behind the bars' full cells (`█`), so a
-  bar always keeps its height, and over the top cell of a bar and empty
-  cells; it is never coloured. If its peak is higher than the highest bar, as
-  when a cluster straddles the edge of two bins, the y axis goes up to it.
+- `--smooth`: draw a smoothed curve instead of the bars, in braille, on the
+  same axes: a Gaussian kernel density estimate of the log times, with
+  Silverman's rule-of-thumb bandwidth (0.9 times the smaller of the standard
+  deviation and the interquartile range divided by 1.34, or the one that is
+  not zero, times the number of times to the power -1/5; one bin's width if
+  the times are all equal). It is just the line, with no bars or fill under
+  it, and it is never coloured. At each point it shows how many times the
+  estimate puts within one bin's width centred there, so the y axis counts
+  what it does for the bars: a lone time is never higher than 1, and a
+  cluster of times narrower than the plot can show is still drawn. The y axis
+  goes up to the curve's peak, rounded up, which can be higher than the
+  highest bar, as when a cluster straddles the edge of two bins, or lower.
 - `--linear`: put time on a linear scale instead, from 0 to the end of the bin
   of the longest time. The bins are of equal width, a round time, so their
   edges fall on whole minutes and hours and on the ticks: the
@@ -212,9 +215,10 @@ There is no `--json`; `stats --json` gives every time plotted.
   50 or more hours that is a multiple of the bin width and puts them at least
   an eighth of the axis apart, with room for their labels: the time as in
   `stats` without the parts that are 0 (`0`, `30s`, `1m15s`, `10m`, `1h`,
-  `1h30m`). `┊` still marks 75 seconds, and each bar is coloured by the median
-  of its times, so a first bin of quick builds is green even when it runs past
-  75 seconds. With `--smooth`, the estimate is still of the log times, so none
+  `1h30m`). 75 seconds is still marked, as `┼` on the `0` tick when it is in
+  the first column, and each bar is coloured by the median of its times, so a
+  first bin of quick builds is green even when it runs past 75 seconds. With
+  `--smooth`, the estimate is still of the log times, so none
   of it is below 0 seconds, and at each point the curve shows how many times it
   puts in one bin's width centred there, so where it crosses the middle of a
   bin it is the bin's expected count. Equal times are smoothed over about one
@@ -233,8 +237,27 @@ $ brew build-times histogram
    │████████████████████████████████████████████████████████
    │████████████████████████████████████████████████████████        ▄▄▄▄▄▄▄▄
    │████████████████████████████████████████████████████████████████████████
- 0 └──────┬────────────────┬─┊──────────────────┬────────────────┬──────────
+ 0 └──────┬────────────────┬─┴──────────────────┬────────────────┬──────────
           10s              1m                   10m              1h
+                             └ 75s batch split
+```
+
+```console
+$ brew build-times histogram --smooth
+==> Mean source build time of 91 formulae, from 0m05s to 3h08m
+18 ┤                         ⣀⣀⠤⠤⠤⠤⣀⣀
+   │                    ⢀⡠⠔⠒⠉        ⠉⠑⠢⠤⣀
+   │                 ⣀⠔⠊⠁                 ⠉⠒⠤⡀
+   │             ⣀⠤⠒⠉                        ⠈⠑⠢⢄⡀
+   │         ⢀⡠⠔⠊                                ⠈⠑⠢⣀
+   │      ⢀⡠⠒⠁                                       ⠉⠢⢄⡀
+   │   ⢀⠤⠒⠁                                             ⠈⠒⠤⣀
+   │⢀⠤⠊⠁                                                    ⠑⠢⢄⣀
+   │⠁                                                           ⠉⠒⠢⠤⢄⣀⣀
+   │                                                                   ⠉⠉⠉⠒⠒
+ 0 └──────┬────────────────┬─┴──────────────────┬────────────────┬──────────
+          10s              1m                   10m              1h
+                             └ 75s batch split
 ```
 
 ```console
@@ -250,8 +273,9 @@ $ brew build-times histogram --linear
    │██
    │██▃▃
    │████▆▆▅▅▁▁▄▄    ▁▁▁▁              ▁▁          ▁▁                          ▁▁
- 0 └┬───────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───
+ 0 └┼───────────┬───────────┬───────────┬───────────┬───────────┬───────────┬───
     0           30m         1h          1h30m       2h          2h30m       3h
+    └ 75s batch split
 ```
 
 ### `note` *`formula`* *`text`*
