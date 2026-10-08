@@ -167,7 +167,10 @@ module Timed
           else
             step.names
           end
+          # The same moment on both clocks, so times from `start` add to
+          # `started`.
           started = now.call
+          start = clock.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
           # With `dependencies_only`, the formulae whose dependencies brew
           # finished, which aren't logged for themselves.
@@ -191,7 +194,6 @@ module Timed
             oh1 "#{heading}: #{names.join(" ")}"
             log = logs/"#{prefix}-batch#{index}.log"
             lines = T.let([], T::Array[Line])
-            start = clock.call
             # In the batch's order, dependencies first, so brew never pours
             # a formula as a dependency before its call to build it.
             runs = if call&.reinstall?

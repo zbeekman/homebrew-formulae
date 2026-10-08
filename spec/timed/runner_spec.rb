@@ -205,6 +205,17 @@ RSpec.describe Timed::Runner do
         .to eq("lib" => ["2026-09-30T10:00:20-04:00"], "tool" => ["2026-09-30T10:00:20-04:00"], "app" => [nil])
     end
 
+    it "times builds and the batch's end from when the batch started, the time before its brew calls included" do
+      stub_formula("lib")
+      fake_brew
+      # Its heading takes 5 seconds, on both clocks.
+      allow(described_class).to receive(:oh1) { clock[0] += 5 }
+      run([batch("lib")], now: -> { Time.new(2026, 9, 30, 10, 0, 0, "-04:00") + (clock.fetch(0) - 100) })
+      expect(builds.fetch("lib").map { |entry| entry.slice("started", "wall_seconds", "batch_ended") })
+        .to eq([{ "started" => "2026-09-30T10:00:05-04:00", "wall_seconds" => 10.0,
+                  "batch_ended" => "2026-09-30T10:00:15-04:00" }])
+    end
+
     it "logs a run's builds, the skipped formulae too, so that `Timed::Runs` groups them into that run" do
       %w[lib tool app].each { |name| stub_formula(name) }
       fake_brew(failing: %w[lib])
