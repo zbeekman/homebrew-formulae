@@ -1,0 +1,234 @@
+# typed: true
+# frozen_string_literal: true
+
+# Homebrew's own specs turn this cop off ("RSpec helper methods typecheck better
+# as regular methods"); the tap's style config does not inherit that override.
+# rubocop:disable Sorbet/BlockMethodDefinition
+
+require_relative "../../lib/timed/runs"
+require_relative "../../lib/timed/stats_table"
+
+RSpec.describe Timed::Runs do
+  # Two runs: an `upgrade` of `fmt`, then an `upgrade` with every kind of
+  # batch and a `reinstall` of a broken dependent. The rest is logged before
+  # the runner, or without a log.
+  let(:log) { Timed::BuildLog.load(Pathname(__FILE__).dirname.parent/"fixtures/runs-build-log.json") }
+  let(:runs) { described_class.all(log) }
+  let(:latest) { runs.fetch(0) }
+  let(:plain) { ->(text, _style) { text } }
+  let(:paint) { ->(text, style) { "<#{style}:#{text}>" } }
+
+  # A log with a formula `f<n>` for each of `builds`.
+  def log_of(*builds)
+    packages = builds.each_with_index.to_h { |build, index| ["f#{index}", { "builds" => [build] }] }
+    Timed::BuildLog.new("schema_version" => 1, "packages" => packages)
+  end
+
+  def names(runs) = runs.map { |run| [run.id, run.builds.map(&:name)] }
+
+  describe ".all" do
+    it "groups the builds by run, newest first, in batch order, a call's skipped formulae after its builds, then " \
+       "the other skipped formulae" do
+      grouped = runs.map { |run| [run.id, run.builds.map { |build| [build.name, build.status, build.batch] }] }
+      expect(grouped).to eq(
+        [["20261001-100000-222", [["ninja", "poured", 1], ["fmt", "built", 1], ["llvm", "built", 2],
+                                  ["qux", "failed", 3], ["quux", "skipped", nil], ["libpng", "built", 4],
+                                  ["zlib", "skipped", nil]]],
+         ["20260930-090000-111", [["fmt", "built", 1], ["cmake", "skipped", nil]]]],
+      )
+    end
+
+    it "groups by the run logged with a build, ahead of its log's name, so a run that only skipped is a run" do
+      ran = { "status" => "built", "started" => "2026-10-01T10:00:00Z", "run" => "20261001-100000-1",
+              "log"    => "/logs/20261001-100000-1-batch1.log" }
+      renamed = ran.merge("log" => "/logs/20261001-095959-9-batch2.log", "started" => "2026-10-01T10:00:01Z")
+      skipped = { "status" => "skipped", "started" => "2026-10-01T11:00:00Z", "run" => "20261001-110000-2" }
+      unmarked = skipped.merge("started" => "2026-10-01T11:30:00Z").except("run")
+      expect(names(described_class.all(log_of(ran, renamed, skipped, unmarked))))
+        .to eq([["20261001-110000-2", %w[f2 f3]], ["20261001-100000-1", %w[f0 f1]]])
+    end
+
+    it "numbers runs that started at the same time by their ids, the later id first" do
+      builds = %w[2 1].map do |pid|
+        { "status" => "built", "started" => "2026-10-01T10:00:00Z",
+          "log"    => "/logs/20261001-100000-#{pid}-batch1.log" }
+      end
+      expect(described_class.all(log_of(*builds)).map(&:id)).to eq(%w[20261001-100000-2 20261001-100000-1])
+    end
+
+    it "puts a skipped formula logged with no run in the latest run that started at or before it, as logged" do
+      skipped = { "status" => "skipped", "started" => "2026-10-01T10:00:00+05:00" }
+      ran = { "status" => "built", "started" => "2026-10-01T10:00:00+05:00",
+              "log"    => "/logs/20261001-100000-1-batch1.log" }
+      later = ran.merge("log" => "/logs/20261001-100001-2-batch1.log", "started" => "2026-10-01T10:00:01+05:00")
+      expect(names(described_class.all(log_of(skipped, ran, later))))
+        .to eq([["20261001-100001-2", ["f2"]], ["20261001-100000-1", %w[f1 f0]]])
+    end
+
+    it "leaves out builds with no log of a run, or with a date alone, and skipped ones before every run" do
+      grouped = runs.flat_map { |run| run.builds.map { |build| [build.name, build.started.iso8601] } }
+      logged = log.package_names.flat_map { |name| log.builds(name).map { |build| [name, build["started"]] } }
+      expect(logged - grouped).to eq([%w[asciidoc 2026-09-24], %w[cmake 2026-10-01], %w[llvm 2026-09-25],
+                                      %w[wget 2026-09-01T08:00:00-04:00], %w[wget 2026-09-30T09:30:00-04:00]])
+    end
+
+    it "orders runs by when they started, not by their logs' names" do
+      builds = [["10:00:00", "20261001-235959-1"], ["11:00:00", "20261001-000000-2"]].map do |time, run|
+        { "status" => "built", "started" => "2026-10-01T#{time}Z", "log" => "/logs/#{run}-batch1.log" }
+      end
+      expect(names(described_class.all(log_of(*builds))))
+        .to eq([["20261001-000000-2", ["f1"]], ["20261001-235959-1", ["f0"]]])
+    end
+
+    it "reads a status, verb or batch label that isn't a string, as nothing checks them, as text" do
+      build = { "status" => nil, "verb" => 1, "batch" => 2, "started" => "2026-10-01T10:00:00Z",
+                "log"    => "/logs/20261001-100000-1-batch1.log" }
+      read = described_class.all(log_of(build)).fetch(0).builds.fetch(0)
+      expect([read.status, read.verb, read.label]).to eq(["", "1", "2"])
+    end
+
+    it "is empty with no runs logged" do
+      expect(described_class.all(Timed::BuildLog.new)).to eq([])
+    end
+  end
+
+  describe "a run" do
+    it "runs from the first start to the last finish, skipped formulae aside, the bars covering some of it" do
+      expect([latest.started.iso8601, latest.finished.iso8601, latest.length, latest.between])
+        .to eq(["2026-10-01T10:00:05-04:00", "2026-10-01T11:04:00-04:00", 3835.0, 80.0])
+    end
+
+    it "has the verbs of its calls and the number of builds with each status" do
+      counts = %w[built poured failed skipped].to_h { |status| [status, latest.count(status)] }
+      expect([latest.verbs, counts])
+        .to eq([%w[upgrade reinstall], { "built" => 3, "poured" => 1, "failed" => 1, "skipped" => 2 }])
+    end
+
+    it "counts overlapping bars once in the time they cover" do
+      builds = [["10:00:00", 60.0], ["10:00:30", 60.0], ["10:00:40", 10.0], ["10:02:00", 30.0]].map do |time, wall|
+        { "status" => "built", "started" => "2026-10-01T#{time}Z", "wall_seconds" => wall,
+          "log"    => "/logs/20261001-100000-1-batch1.log" }
+      end
+      run = described_class.all(log_of(*builds)).fetch(0)
+      expect([run.length, run.between]).to eq([150.0, 30.0])
+    end
+  end
+
+  describe ".lines" do
+    it "has a header and a line for each run, numbered from the latest" do
+      expect(described_class.lines(runs, paint: plain)).to eq(
+        ["run  started           verbs              built  poured  failed  skipped   length",
+         "  1  2026-10-01 10:00  upgrade,reinstall      3       1       1        2    1h03m",
+         "  2  2026-09-30 09:00  upgrade                1       0       0        1    1m00s"],
+      )
+    end
+
+    it "makes the column names bold and underlined, and paints a number of failed builds other than 0 red" do
+      lines = described_class.lines(runs, paint:)
+      ends = lines.drop(1).map { |line| line[/ +\S+ +\S+ +\S+\z/] }
+      expect([lines.fetch(0)[/\A.*?started>> */], *ends])
+        .to eq(["<underline:<bold:run>>  <underline:<bold:started>>           ", "       <red:1>        2    1h03m",
+                "       0        1    1m00s"])
+    end
+  end
+
+  describe ".timeline" do
+    # 80 columns: the name, status and time take 27, so the bars have 53.
+    it "has a heading for the run and its header, then one for each batch, with a bar for each formula" do
+      expect(described_class.timeline(latest, 1, width: 80, paint: plain)).to eq(
+        [["Run 1, started 2026-10-01 10:00: upgrade, reinstall", ["formula  status      time  0#{" " * 47}1h03m"]],
+         ["Batch 1", ["ninja    poured     0m05s  █", "fmt      built      1m30s  ██"]],
+         ["Batch 2 (--last)", ["llvm     built      1h00m   #{"█" * 51}"]],
+         ["Then upgrade outdated dependents",
+          ["qux      failed         -  #{" " * 51}×", "quux     skipped        -"]],
+         ["Then check dependents for broken linkage, and reinstall broken ones from source",
+          ["libpng   built      1m00s  #{" " * 52}█"]],
+         ["Skipped", ["zlib     skipped        -"]]],
+      )
+    end
+
+    it "paints the header bold and underlined, and each status and bar in its colour" do
+      sections = described_class.timeline(latest, 1, width: 80, paint:)
+      expect(sections.values_at(0, 1, 3, 5).map { |_, lines| lines.fetch(0) }).to eq(
+        ["<underline:<bold:formula>>  <underline:<bold:status>>      <underline:<bold:time>>  0#{" " * 47}1h03m",
+         "ninja    <magenta:poured>     0m05s  <magenta:█>",
+         "qux      <red:failed>         -  #{" " * 51}<red:×>",
+         "zlib     skipped        -"],
+      )
+    end
+
+    def run_of(*builds) = Timed::Runs::Run.new(id: "20261001-100000-1", builds:)
+
+    def build(name: "a", status: "built", label: "main", batch: 1, started: 0.0, seconds: 10.0)
+      Timed::Runs::Build.new(name:, status:, verb: "install", label:, batch:, started: Time.at(started).utc, seconds:)
+    end
+
+    it "keeps the bars at least 10 columns wide, however narrow the terminal or long the names" do
+      lines = described_class.timeline(run_of(build(name: "a" * 40)), 1, width: 0, paint: plain).flat_map(&:last)
+      expect(lines).to eq(["formula#{" " * 35}status      time  0    0m10s",
+                           "#{"a" * 40}  built      0m10s  #{"█" * 10}"])
+    end
+
+    it "draws a failed build with a time as a bar of ×, and labels a batch of no known kind by its number" do
+      run = run_of(build, build(name: "b", status: "failed", label: "other", batch: 2, started: 10.0),
+                   build(name: "c", label: nil, batch: 3, started: 20.0))
+      sections = described_class.timeline(run, 1, width: 57, paint: plain).drop(1)
+      expect(sections).to eq([["Batch 1", ["a        built      0m10s  #{"█" * 10}"]],
+                              ["Batch 2 (other)", ["b        failed     0m10s  #{" " * 10}#{"×" * 10}"]],
+                              ["Batch 3", ["c        built      0m10s  #{" " * 20}#{"█" * 10}"]]])
+    end
+
+    it "has no time axis for a run that only skipped formulae, as nothing ran" do
+      run = run_of(build(status: "skipped", batch: nil, seconds: nil))
+      expect(described_class.timeline(run, 1, width: 80, paint: plain))
+        .to eq([["Run 1, started 1970-01-01 00:00: install", ["formula  status      time"]],
+                ["Skipped", ["a        skipped        -"]]])
+    end
+
+    it "heads a call after the batches that only skipped formulae as that call" do
+      run = run_of(build, build(name: "b", status: "skipped", label: "linkage", batch: nil, seconds: nil))
+      expect(described_class.timeline(run, 1, width: 57, paint: plain).drop(1))
+        .to eq([["Batch 1", ["a        built      0m10s  #{"█" * 30}"]],
+                ["Then check dependents for broken linkage, and reinstall broken ones from source",
+                 ["b        skipped        -"]]])
+    end
+  end
+
+  it "keeps the column helpers it shares with `Timed::StatsTable` private" do
+    helpers = [:heading, :pad]
+    public_helpers = [described_class, Timed::StatsTable].to_h do |table|
+      [table, helpers.select { |helper| table.respond_to?(helper) }]
+    end
+    expect(public_helpers).to eq(described_class => [], Timed::StatsTable => [])
+  end
+
+  describe ".total" do
+    it "gives the run's length and how much of it is between the bars, which, with a failed build with no " \
+       "time, includes that build" do
+      expect(described_class.total(latest))
+        .to eq(["Total 1h03m, 1m20s of it between the bars.",
+                "The gaps between the bars are brew's own work, such as downloads and checks.",
+                "The gaps also include failed builds, whose end isn't logged."])
+    end
+
+    it "says that nothing ran, rather than give a length and gaps, for a run that only skipped formulae" do
+      run = Timed::Runs::Run.new(id: "20261001-100000-1", builds: [
+        Timed::Runs::Build.new(name: "a", status: "skipped", verb: "install", label: "main", batch: nil,
+                               started: Time.at(0).utc, seconds: nil),
+      ])
+      expect(described_class.total(run)).to eq(["Nothing ran: every formula was skipped."])
+    end
+
+    it "says nothing of failed builds when every failed build has a time" do
+      run = Timed::Runs::Run.new(id: "20261001-100000-1", builds: [
+        Timed::Runs::Build.new(name: "a", status: "failed", verb: "install", label: "main", batch: 1,
+                               started: Time.at(0).utc, seconds: 10.0),
+      ])
+      expect(described_class.total(run))
+        .to eq(["Total 0m10s, 0m00s of it between the bars.",
+                "The gaps between the bars are brew's own work, such as downloads and checks."])
+    end
+  end
+end
+
+# rubocop:enable Sorbet/BlockMethodDefinition

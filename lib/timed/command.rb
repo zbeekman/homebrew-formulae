@@ -284,7 +284,8 @@ module Timed
         []
       end
       Runner::After.new(
-        label: "dependents", verb: "upgrade", flags: dependent_flags(flags), noun: "outdated dependent",
+        label: Runner::After::DEPENDENTS, verb: "upgrade", flags: dependent_flags(flags),
+        noun: "outdated dependent",
         candidates: installers.map(&:formula), deps: ->(formula) { dependency_names(formula) },
         choose: lambda do |_installed, _blocked|
           # Brew installed the batches in other processes.
@@ -308,7 +309,7 @@ module Timed
     sig { params(flags: T::Array[String], excluded: T::Array[String], own: T::Array[String]).returns(Runner::After) }
     def self.linkage_call(flags:, excluded:, own:)
       Runner::After.new(
-        label: "linkage", verb: "reinstall", noun: "broken dependent", candidates: nil,
+        label: Runner::After::LINKAGE, verb: "reinstall", noun: "broken dependent", candidates: nil,
         deps: ->(formula) { dependency_names(formula) },
         flags: ["--build-from-source", *flags.select { |option| LINKAGE_FLAGS.include?(option_name(option)) }],
         choose: lambda do |installed, blocked|
@@ -762,10 +763,10 @@ module Timed
         end
       end
       if dependents.any?
-        ohai "Then upgrade outdated dependents"
+        ohai Runner::After::HEADINGS.fetch(Runner::After::DEPENDENTS)
         puts dependents.join(" ")
       end
-      ohai "Then check dependents for broken linkage, and reinstall broken ones from source" if linkage
+      ohai Runner::After::HEADINGS.fetch(Runner::After::LINKAGE) if linkage
       return if excluded.empty?
 
       ohai "Excluded"

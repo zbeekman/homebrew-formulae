@@ -3,19 +3,17 @@
 
 require "date"
 require "time"
-require "utils/tty"
 require_relative "build_log"
+require_relative "columns"
 require_relative "plot"
 
 module Timed
   # The tables of `brew build-times stats`: one row per kind of build of each
   # formula, with a trend of its latest builds, optionally sorted and painted.
-  #
-  # Columns are padded by their visible text, so painting does not shift them.
   module StatsTable
-    SORT_KEYS = %w[name estimate median mean n last].freeze
+    extend Columns
 
-    KIND_STYLES = T.let({ "built" => :cyan, "poured" => :magenta }.freeze, T::Hash[String, Symbol])
+    SORT_KEYS = %w[name estimate median mean n last].freeze
 
     NAME_WIDTH = 28
 
@@ -40,18 +38,6 @@ module Timed
       # Seconds of the latest builds of this kind, nil for a failed build.
       const :trend, T::Array[T.nilable(Float)]
     end
-
-    # Paints `text` in `style`, one of the bands of `Plot.band`, the kinds'
-    # colours, `:italic`, `:bold` or `:underline`, through Homebrew's `Tty`, so
-    # colour is on only when Homebrew's own output would be coloured.
-    PAINT = T.let(
-      lambda do |text, style|
-        next text unless Tty.color?
-
-        "#{Tty.public_send(style)}#{text}#{Tty.reset}"
-      end.freeze,
-      Plot::Paint,
-    )
 
     # One row per kind of build the formula has (source builds, then pours),
     # each with statistics from that kind only. `last` is always the formula's
@@ -168,7 +154,7 @@ module Timed
 
     # The header and a line for each row. `paint` is how the colour is added.
     sig { params(rows: T::Array[Row], paint: Plot::Paint).returns(T::Array[String]) }
-    def self.lines(rows, paint: PAINT)
+    def self.lines(rows, paint: Columns::PAINT)
       last_width = rows.map { |row| row.last.length }.push(4).max.to_i
       columns = [
         heading("formula", NAME_WIDTH, paint),
@@ -187,7 +173,7 @@ module Timed
       kind = row.kind
       columns = [
         row.name.ljust(NAME_WIDTH),
-        pad(kind || "-", 6, paint, style: kind && KIND_STYLES[kind]),
+        pad(kind || "-", 6, paint, style: kind && Columns::STATUS_STYLES[kind]),
         row.n.to_s.rjust(3),
         *row.statistics.map { |text| text.rjust(8) },
         pad(estimate, 9, paint, style: Plot.band(row.estimate), right: true, italic: row.guess),
@@ -203,7 +189,7 @@ module Timed
       params(log: BuildLog, estimates: T::Hash[String, T::Hash[String, T.untyped]], paint: Plot::Paint)
         .returns(T::Array[String])
     }
-    def self.estimate_lines(log, estimates, paint: PAINT)
+    def self.estimate_lines(log, estimates, paint: Columns::PAINT)
       header = "#{heading("formula", NAME_WIDTH, paint)} #{heading("version", 12, paint)} " \
                "#{heading("estimate", 9, paint, right: true)} #{heading("actual", 9, paint, right: true)}  " \
                "#{heading("model", 5, paint)} #{heading("date", 4, paint)}"
@@ -223,29 +209,5 @@ module Timed
       pad(BuildLog.format_duration(seconds), 9, paint, style: Plot.band(seconds), right: true)
     end
     private_class_method :seconds_cell
-
-    # A column name, bold and underlined, padded to `width` visible characters;
-    # the padding is not underlined, so the columns stand apart.
-    sig { params(text: String, width: Integer, paint: Plot::Paint, right: T::Boolean).returns(String) }
-    def self.heading(text, width, paint, right: false)
-      gap = " " * [width - text.length, 0].max
-      painted = paint.call(paint.call(text, :bold), :underline)
-      right ? "#{gap}#{painted}" : "#{painted}#{gap}"
-    end
-    private_class_method :heading
-
-    # `text` padded to `width` visible characters; only the text is painted,
-    # in `style` and also in italics if `italic`.
-    sig {
-      params(text: String, width: Integer, paint: Plot::Paint, style: T.nilable(Symbol), right: T::Boolean,
-             italic: T::Boolean).returns(String)
-    }
-    def self.pad(text, width, paint, style: nil, right: false, italic: false)
-      gap = " " * [width - text.length, 0].max
-      painted = style ? paint.call(text, style) : text
-      painted = paint.call(painted, :italic) if italic
-      right ? "#{gap}#{painted}" : "#{painted}#{gap}"
-    end
-    private_class_method :pad
   end
 end

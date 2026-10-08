@@ -6,6 +6,10 @@
 
 `brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[*`formula`* ...\]
 
+`brew build-times runs`
+
+`brew build-times run` \[*`number`*\]
+
 `brew build-times note` *`formula`* *`text`*
 
 `brew build-times restamp` \[*`formula`* ...\]
@@ -277,6 +281,110 @@ $ brew build-times histogram --linear
     0           30m         1h          1h30m       2h          2h30m       3h
     └ 75s batch split
 ```
+
+### `runs`
+
+List the runs of [`brew install-timed`](install-timed.md),
+[`brew upgrade-timed`](upgrade-timed.md) and
+[`brew reinstall-timed`](reinstall-timed.md) in the log, newest first, one
+line each, under a header:
+
+- `run`: the run's number, 1 for the latest, as `run` takes it;
+- `started`: when its first formula started, as logged (in the local time of
+  the run);
+- `verbs`: the verbs of its calls, in order, e.g. `upgrade,reinstall` for an
+  upgrade that reinstalled dependents with broken linkage;
+- `built`, `poured`, `failed` and `skipped`: how many builds it logged as
+  built from source, poured, failed and skipped; these count builds, not
+  formulae, so a formula built in a batch and reinstalled after the batches
+  counts twice;
+- `length`: from when its first formula started to when its last one
+  finished.
+
+With colour, the column names are bold and underlined, as in `stats`, and a
+number of failed builds other than 0 is red. With no runs in the log, it
+says so instead.
+
+### `run` \[*`number`*\]
+
+Draw a timeline of run *`number`*, as `runs` numbers them, or of the latest
+run: a heading naming the run, when it started and its verbs, with a header
+whose time axis goes from 0 to the run's length; then a heading for each batch
+(`Batch` and its number, with `(--last)` for the batch of `--last` formulae)
+and for each call after the batches, headed as the plan of
+[`brew upgrade-timed --dry-run`](upgrade-timed.md) heads it (`Then upgrade
+outdated dependents`, `Then check dependents for broken linkage, and reinstall
+broken ones from source`), each with a row for each formula: its name, its
+status (`built`, `poured`, `failed` or `skipped`), its time and a bar on the
+time axis, from when brew first named the formula to when it finished. The
+axis is shared by the whole run and is linear, so the bars show when each
+formula ran and how long it took next to the others; there is no 75 second
+mark, as the axis is the run's clock, not a build's length.
+
+- A bar is at least one column wide, so a quick pour still shows. A failed
+  formula's bar is drawn with `×`; brew's output for a failed formula has no
+  end, so with no time it is a single `×` where it started.
+- The skipped formulae of a call after the batches follow its bars, with no
+  bar. Those of the batches follow under `Skipped`, as the log doesn't say
+  which batch skipped them.
+- The gaps between the bars are brew's own work, such as downloads and
+  checks. The last lines give the run's length and how much of it is between
+  the bars, and, if the run has a failed formula with no time, say that the
+  gaps include it. A run that only skipped formulae has no time axis, and its
+  last line says that nothing ran.
+- The bars are as wide as the terminal allows (it is taken to be at least 40
+  columns) after the name, status and time, and never narrower than 10
+  columns.
+- With colour, each status and its bar are painted: `built` cyan, `poured`
+  magenta and `failed` red, as in `stats`.
+
+A *`number`* that isn't a whole number from 1 is a usage error, and one past
+the oldest run is an error naming how many runs there are. With no runs in the
+log, it says so instead.
+
+```console
+$ brew build-times run
+==> Run 1, started 2026-10-01 10:00: upgrade, reinstall
+formula  status      time  0                                               1h03m
+==> Batch 1
+ninja    poured     0m05s  █
+fmt      built      1m30s  ██
+==> Batch 2 (--last)
+llvm     built      1h00m   ███████████████████████████████████████████████████
+==> Then upgrade outdated dependents
+qux      failed         -                                                     ×
+quux     skipped        -
+==> Then check dependents for broken linkage, and reinstall broken ones from source
+libpng   built      1m00s                                                      █
+==> Skipped
+zlib     skipped        -
+Total 1h03m, 1m20s of it between the bars.
+The gaps between the bars are brew's own work, such as downloads and checks.
+The gaps also include failed builds, whose end isn't logged.
+```
+
+#### How builds are grouped into runs
+
+Each logged build has `started` (when brew first named the formula),
+`wall_seconds` (from then until brew's summary line for it), `batch` (the
+label of its batch: `main`, `last`, `dependents` or `linkage`), `verb`,
+`log`, the output of its batch, kept in `$HOMEBREW_LOGS/timed/` and named
+`<YYYYmmdd-HHMMSS>-<pid>-batch<n>.log` after when its run started (in local
+time), the run's process and the batch's number, and `run`, that name up to
+`-batch`, the same for every build of the run, skipped formulae too. Builds
+with the same `run` are of the same run, each in the batch its log names.
+
+- Builds logged before `run` was added have none, so a build with a log is of
+  the run its log's name gives. A skipped formula has no log, so one with no
+  `run` is put in the latest run that started at or before the time it was
+  logged, by the local time of both. That can put it in the wrong run when
+  runs overlap, and can't make a run of a run that only skipped formulae;
+  builds logged with `run` have neither problem.
+- Builds other than skipped formulae with no such log, and those whose
+  `started` is only a date (logged before the runs were kept), belong to no
+  run and are left out.
+- Casks aren't in the build log, so the cask calls of a run don't appear.
+- There is no `--json`; the build log itself is JSON.
 
 ### `note` *`formula`* *`text`*
 

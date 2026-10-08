@@ -409,6 +409,34 @@ RSpec.describe Timed::Plot do
                            "three, all of them" => 3.0)
     end
   end
+
+  describe ".timeline_bar" do
+    def bar(from, to, span: 100.0, columns: 10, **options)
+      described_class.timeline_bar(from, to, span:, columns:, **options)
+    end
+
+    it "scales a bar from its start to its end on a linear axis, the columns it touches filled" do
+      bars = { "whole span" => bar(0.0, 100.0), "a quarter in" => bar(25.0, 50.0),
+               "on column edges" => bar(20.0, 50.0), "wider axis" => bar(25.0, 50.0, columns: 40) }
+      expect(bars).to eq("whole span" => "██████████", "a quarter in" => "  ███", "on column edges" => "  ███",
+                         "wider axis" => "#{" " * 10}#{"█" * 10}")
+    end
+
+    it "draws a bar shorter than a column, or of no length, as one column, the last one at the end" do
+      bars = { "short" => bar(50.0, 50.1), "none" => bar(30.0, 30.0), "at the end" => bar(100.0, 100.0),
+               "no span" => bar(0.0, 0.0, span: 0.0) }
+      expect(bars).to eq("short" => "     █", "none" => "   █", "at the end" => "         █", "no span" => "█")
+    end
+
+    it "draws with another character, and paints only the bar, not the space before it" do
+      paint = ->(text, style) { "<#{style}:#{text}>" }
+      expect(bar(40.0, 40.0, char: "×", style: :red, paint:)).to eq("    <red:×>")
+    end
+
+    it "fits a single column" do
+      expect([bar(0.0, 10.0, columns: 1), bar(90.0, 100.0, columns: 1)]).to eq(["█", "█"])
+    end
+  end
 end
 
 # rubocop:enable Sorbet/BlockMethodDefinition

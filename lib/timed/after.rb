@@ -25,6 +25,17 @@ module Timed
     # failed build, and leaves the old version installed, a reinstall gives
     # brew one formula per call and takes only a new receipt as reinstalled.
     class After < T::Struct
+      # The labels of the calls after the batches, as logged.
+      DEPENDENTS = "dependents"
+      LINKAGE = "linkage"
+
+      # What each call after the batches does, by label, in the order the
+      # calls run, as the plan and the timeline of a run head it.
+      HEADINGS = T.let({
+        DEPENDENTS => "Then upgrade outdated dependents",
+        LINKAGE    => "Then check dependents for broken linkage, and reinstall broken ones from source",
+      }.freeze, T::Hash[String, String])
+
       const :label, String
       const :verb, String
       const :flags, T::Array[String]

@@ -176,9 +176,9 @@ runs started in the same second keep their own logs. After each batch, it:
   not, the formula failed, and so does the command, as with `brew install`;
 - logs each formula Homebrew worked on, including the dependencies it installed
   alongside the batch, in the log shown by [`brew build-times`](build-times.md),
-  with `install`, the batch (`main`, or `last` for `--last`) and the batch's
-  log; the outdated dependents upgraded after the batches are logged with
-  `upgrade` and `dependents`, and the dependents with broken linkage with
+  with `install`, the batch (`main`, or `last` for `--last`), the run and the
+  batch's log; the outdated dependents upgraded after the batches are logged
+  with `upgrade` and `dependents`, and the dependents with broken linkage with
   `reinstall` and `linkage`. A failed formula is logged with the version it
   was to install. With `--only-dependencies`, a named formula
   is never logged for itself, failed or skipped, only what Homebrew installed

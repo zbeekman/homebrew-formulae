@@ -371,6 +371,23 @@ module Timed
     end
     private_class_method :tick_label
 
+    # A bar of a timeline from `from` to `to` seconds on a linear axis of
+    # `span` seconds across `columns`: the spaces before it, then `char` in
+    # every column it touches, at least one, so a bar too short to see, or a
+    # mark with no length, is still drawn. With `paint`, the bar is painted
+    # in `style`.
+    sig {
+      params(from: Float, to: Float, span: Float, columns: Integer, char: String, style: T.nilable(Symbol),
+             paint: T.nilable(Paint)).returns(String)
+    }
+    def self.timeline_bar(from, to, span:, columns:, char: "█", style: nil, paint: nil)
+      scale = span.positive? ? columns / span : 0.0
+      first = (from * scale).floor.clamp(0, columns - 1)
+      last = (to * scale).ceil.clamp(first + 1, columns)
+      bar = char * (last - first)
+      "#{" " * first}#{(style && paint) ? paint.call(bar, style) : bar}"
+    end
+
     sig { params(cells: T::Array[Cell], paint: T.nilable(Paint)).returns(String) }
     def self.paint_cells(cells, paint)
       cells.chunk_while { |before, after| before.last == after.last }.map do |run|
