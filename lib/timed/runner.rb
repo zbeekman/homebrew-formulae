@@ -549,10 +549,12 @@ module Timed
     # (`Reinstall.reinstall_formula`), each install of a tap formula
     # (`Formula#print_tap_action`), and an install once its dependencies are
     # installed (`FormulaInstaller#install`); and where it starts on a
-    # dependency (`FormulaInstaller#install_dependency`). An install of a core
-    # formula with no dependencies to install has no heading.
+    # dependency (`FormulaInstaller#install_dependency`), which newer brews
+    # follow with its version, e.g. `(4.5.1)` or `(1.7.5 -> 1.7.6)`. An
+    # install of a core formula with no dependencies to install has no
+    # heading.
     HEADING = /\A==> (?:Upgrading|Installing|Reinstalling) (?<name>[^\s:]+)(?: from \S+| --\S.*| *)\z/
-    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)\z/
+    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)(?: \([^)]*\))?\z/
 
     # Where brew pours a bottle, named `<name>--<version>…`
     # (`FormulaInstaller#pour`, `Bottle::Filename`).

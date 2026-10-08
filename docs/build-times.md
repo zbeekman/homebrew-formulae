@@ -323,15 +323,19 @@ mark, as the axis is the run's clock, not a build's length.
 
 - A bar is at least one column wide, so a quick pour still shows. A failed
   formula's bar is drawn with `×`; brew's output for a failed formula has no
-  end, so with no time it is a single `×` where it started.
+  end, so with no time it is a single `×` where it started. Any other
+  formula with no time is a single column where it started, with `-` as its
+  time; that includes a dependency logged with a time of 0 but a longer
+  install time, as older versions of these commands logged dependencies when
+  brew named them with their version.
 - The skipped formulae of a call after the batches follow its bars, with no
   bar. Those of the batches follow under `Skipped`, as the log doesn't say
   which batch skipped them.
 - The gaps between the bars are brew's own work, such as downloads and
   checks. The last lines give the run's length and how much of it is between
-  the bars, and, if the run has a failed formula with no time, say that the
-  gaps include it. A run that only skipped formulae has no time axis, and its
-  last line says that nothing ran.
+  the bars, and, if the run has a formula with no time, such as a failed one,
+  say that the gaps include it. A run that only skipped formulae has no time
+  axis, and its last line says that nothing ran.
 - The bars are as wide as the terminal allows (it is taken to be at least 40
   columns) after the name, status and time, and never narrower than 10
   columns.
@@ -360,7 +364,7 @@ libpng   built      1m00s                                                      �
 zlib     skipped        -
 Total 1h03m, 1m20s of it between the bars.
 The gaps between the bars are brew's own work, such as downloads and checks.
-The gaps also include failed builds, whose end isn't logged.
+The gaps also include builds with no logged end, such as failed builds.
 ```
 
 #### How builds are grouped into runs

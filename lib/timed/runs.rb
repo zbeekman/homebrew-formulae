@@ -117,9 +117,12 @@ module Timed
           next if started.nil?
 
           match = LOG_NAME.match(File.basename(entry["log"].to_s))
+          seconds = entry["wall_seconds"]&.to_f
+          # The runner once missed brew's dependency heading with a version,
+          # and so logged a dependency's wall time as 0.
+          seconds = nil if seconds&.zero? && entry["install_seconds"].to_f.positive?
           build = Build.new(name:, status: entry["status"].to_s, verb: entry["verb"]&.to_s,
-                            label: entry["batch"]&.to_s, batch: match && match[:batch].to_i, started:,
-                            seconds: entry["wall_seconds"]&.to_f)
+                            label: entry["batch"]&.to_s, batch: match && match[:batch].to_i, started:, seconds:)
           id = text(entry["run"])
           if match
             (runs[id || match[:run].to_s] ||= []) << build
@@ -199,17 +202,17 @@ module Timed
     end
 
     # The run's length, the time between its bars and what that is: brew's
-    # own work, and failed builds with no time, whose end isn't logged; or,
-    # if it only skipped formulae, that nothing ran.
+    # own work, and builds with no time, such as failed ones, whose end isn't
+    # logged; or, if it only skipped formulae, that nothing ran.
     sig { params(run: Run).returns(T::Array[String]) }
     def self.total(run)
       return ["Nothing ran: every formula was skipped."] if run.skipped_only?
 
-      unfinished = run.ran.any? { |build| build.status == "failed" && build.seconds.nil? }
+      unfinished = run.ran.any? { |build| build.seconds.nil? }
       ["Total #{BuildLog.format_duration(run.length)}, #{BuildLog.format_duration(run.between)} of it between the " \
        "bars.",
        "The gaps between the bars are brew's own work, such as downloads and checks.",
-       *("The gaps also include failed builds, whose end isn't logged." if unfinished)]
+       *("The gaps also include builds with no logged end, such as failed builds." if unfinished)]
     end
 
     # What a call after the batches does, as the plan heads it; `Batch <n>`,

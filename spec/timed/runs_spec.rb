@@ -87,6 +87,15 @@ RSpec.describe Timed::Runs do
       expect([read.status, read.verb, read.label]).to eq(["", "1", "2"])
     end
 
+    it "takes a wall time of 0 with a longer install time as unknown, as logged when brew's dependency heading " \
+       "went unread" do
+      builds = [[0.0, 92.3], [0.0, nil], [0.0, 0.0], [5.0, 92.3]].map do |wall, install|
+        { "status" => "built", "started" => "2026-10-01T10:00:00Z", "wall_seconds" => wall,
+          "install_seconds" => install, "log" => "/logs/20261001-100000-1-batch1.log" }.compact
+      end
+      expect(described_class.all(log_of(*builds)).fetch(0).builds.map(&:seconds)).to eq([nil, 0.0, 0.0, 5.0])
+    end
+
     it "is empty with no runs logged" do
       expect(described_class.all(Timed::BuildLog.new)).to eq([])
     end
@@ -178,6 +187,12 @@ RSpec.describe Timed::Runs do
                               ["Batch 3", ["c        built      0m10s  #{" " * 20}#{"█" * 10}"]]])
     end
 
+    it "draws a build with no time as a single column where it started" do
+      run = run_of(build, build(name: "b", started: 15.0, seconds: nil))
+      expect(described_class.timeline(run, 1, width: 57, paint: plain).fetch(1))
+        .to eq(["Batch 1", ["a        built      0m10s  #{"█" * 20}", "b        built          -  #{" " * 29}█"]])
+    end
+
     it "has no time axis for a run that only skipped formulae, as nothing ran" do
       run = run_of(build(status: "skipped", batch: nil, seconds: nil))
       expect(described_class.timeline(run, 1, width: 80, paint: plain))
@@ -208,7 +223,7 @@ RSpec.describe Timed::Runs do
       expect(described_class.total(latest))
         .to eq(["Total 1h03m, 1m20s of it between the bars.",
                 "The gaps between the bars are brew's own work, such as downloads and checks.",
-                "The gaps also include failed builds, whose end isn't logged."])
+                "The gaps also include builds with no logged end, such as failed builds."])
     end
 
     it "says that nothing ran, rather than give a length and gaps, for a run that only skipped formulae" do
@@ -219,14 +234,22 @@ RSpec.describe Timed::Runs do
       expect(described_class.total(run)).to eq(["Nothing ran: every formula was skipped."])
     end
 
-    it "says nothing of failed builds when every failed build has a time" do
-      run = Timed::Runs::Run.new(id: "20261001-100000-1", builds: [
-        Timed::Runs::Build.new(name: "a", status: "failed", verb: "install", label: "main", batch: 1,
-                               started: Time.at(0).utc, seconds: 10.0),
-      ])
-      expect(described_class.total(run))
+    def total_of(*builds)
+      described_class.total(Timed::Runs::Run.new(id: "20261001-100000-1", builds: builds.map do |status, seconds|
+        Timed::Runs::Build.new(name: "a", status:, verb: "install", label: "main", batch: 1,
+                               started: Time.at(0).utc, seconds:)
+      end))
+    end
+
+    it "says nothing of builds with no logged end when every build has a time" do
+      expect(total_of(["failed", 10.0]))
         .to eq(["Total 0m10s, 0m00s of it between the bars.",
                 "The gaps between the bars are brew's own work, such as downloads and checks."])
+    end
+
+    it "says that the gaps include a build that didn't fail but has no time" do
+      expect(total_of(["built", 10.0], ["built", nil]).fetch(2))
+        .to eq("The gaps also include builds with no logged end, such as failed builds.")
     end
   end
 end

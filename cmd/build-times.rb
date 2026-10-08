@@ -60,11 +60,11 @@ module Homebrew
             Draw a timeline of run <number>, as `brew build-times runs` numbers them, or of the latest run.
             A heading for each batch, `Batch` and its number, with `(--last)` for the last, and for each call after
             the batches, then a row for each formula with its status, its time and a bar from when brew first named
-            it to when it finished, on a linear time axis shared by the whole run. A failed formula with no time is
-            drawn as `×` where it started. A call's skipped formulae follow its bars, and those of the batches come
-            last, under `Skipped`, with no bar. The gaps between the bars are brew's own work, such as downloads and
-            checks, and failed builds with no time; the last lines give the total. With colour, each status and its
-            bar are painted: built cyan, poured magenta and failed red.
+            it to when it finished, on a linear time axis shared by the whole run. A formula with no time is drawn as
+            one column where it started, `×` if it failed. A call's skipped formulae follow its bars, and those of the
+            batches come last, under `Skipped`, with no bar. The gaps between the bars are brew's own work, such as
+            downloads and checks, and builds with no time; the last lines give the total. With colour, each status
+            and its bar are painted: built cyan, poured magenta and failed red.
           EOS
           named_args :number, max: 1
         end

@@ -1189,6 +1189,18 @@ RSpec.describe Timed::Runner do
       )
     end
 
+    it "times a dependency from its heading when brew names it with its version, or the version it upgrades" do
+      lines = [
+        ["==> Upgrading subversion\n", 0.5],
+        ["==> Installing subversion dependency: swig (4.5.1)\n", 1.0],
+        ["🍺  /usr/local/Cellar/swig/4.5.1: 851 files, 6.3MB, built in 1 minute 34 seconds\n", 95.0],
+        ["==> Upgrading subversion dependency: apr (1.7.5 -> 1.7.6)\n", 96.0],
+        ["🍺  /usr/local/Cellar/apr/1.7.6: 60 files, 1.4MB\n", 100.0],
+      ]
+      expect(described_class.parse(lines).transform_values { |build| build["wall_seconds"] })
+        .to eq("subversion" => nil, "swig" => 94.0, "apr" => 4.0)
+    end
+
     it "reads coloured output, tap formulae, options and summaries without the install badge" do
       lines = [
         "==> Upgrading zbeekman/tap/cgns@3.4",
