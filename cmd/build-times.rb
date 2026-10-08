@@ -80,7 +80,8 @@ module Homebrew
           return ohai "No runs logged" if runs.empty?
 
           number = named.to_i
-          chosen = runs[number - 1]
+          # Before indexing, which raises for a number past a native integer.
+          chosen = runs[number - 1] if number <= runs.length
           odie "no run #{number}: #{Utils.pluralize("run", runs.length, include_count: true)} logged" if chosen.nil?
           Timed::Runs.timeline(chosen, number, width: Tty.width).each { |heading, lines| ohai heading, *lines }
           puts Timed::Runs.total(chosen)

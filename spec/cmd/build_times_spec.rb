@@ -505,6 +505,12 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         .to raise_error(SystemExit).and output("Error: no run 3: 2 runs logged\n").to_stderr
     end
 
+    it "fails the same way for a number too large to index an array" do
+      huge = "999999999999999999999"
+      expect { described_class.new(["run", huge]).run }
+        .to raise_error(SystemExit).and output("Error: no run #{huge}: 2 runs logged\n").to_stderr
+    end
+
     it "takes a number with leading zeros" do
       expect(build_times("run", "02")).to eq(timeline(2))
     end
@@ -523,6 +529,10 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         [number, "Invalid usage: `run` takes the number of a run, as `brew build-times runs` lists them, " \
                  "not #{number}."]
       end)
+    end
+
+    it "takes a negative number for an option brew doesn't know" do
+      expect { described_class.new(%w[run -1]) }.to raise_error(OptionParser::InvalidOption, "invalid option: -1")
     end
 
     it "takes one number at most" do
