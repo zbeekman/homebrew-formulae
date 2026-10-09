@@ -266,7 +266,7 @@ RSpec.describe Timed::LLM do
 
     it "treats empty values as unset" do
       ENV["HOMEBREW_TIMED_LLM_MODEL"] = ""
-      expect(described_class.settings(key_file: key_file.to_s, model: "").model).to eq("claude-haiku-4-5")
+      expect(described_class.settings(key_file: key_file.to_s, model: "").model).to eq("claude-sonnet-5-5")
     end
 
     it "needs a key file without a custom URL" do
@@ -275,7 +275,7 @@ RSpec.describe Timed::LLM do
 
     it "uses Anthropic's API and pinned model for an `sk-ant-` key" do
       expect([anthropic.provider, anthropic.url.to_s, anthropic.model])
-        .to eq(["anthropic", "https://api.anthropic.com/v1/messages", "claude-haiku-4-5"])
+        .to eq(["anthropic", "https://api.anthropic.com/v1/messages", "claude-sonnet-5-5"])
     end
 
     it "uses OpenAI's API and pinned model for any other key" do
@@ -360,6 +360,31 @@ RSpec.describe Timed::LLM do
       expected = values.to_h { |timeout| [timeout, invalid] }
                        .merge("0.5" => "no UsageError", "86400" => "no UsageError")
       outcomes = expected.keys.to_h { |timeout| [timeout, usage_error(key_file: key_file.to_s, timeout:)] }
+      expect(outcomes).to eq(expected)
+    end
+
+    it "has no effort of its own by default, as when its variable is empty" do
+      ENV["HOMEBREW_TIMED_LLM_EFFORT"] = ""
+      expect(anthropic.effort).to be_nil
+    end
+
+    it "reads the effort from `HOMEBREW_TIMED_LLM_EFFORT`" do
+      ENV["HOMEBREW_TIMED_LLM_EFFORT"] = "high"
+      expect(described_class.settings(key_file: key_file.to_s).effort).to eq("high")
+    end
+
+    it "prefers `--llm-effort` to its environment variable" do
+      ENV["HOMEBREW_TIMED_LLM_EFFORT"] = "high"
+      expect(described_class.settings(key_file: key_file.to_s, effort: "max").effort).to eq("max")
+    end
+
+    it "takes any effort of lowercase letters, as providers change their levels, and rejects any other before " \
+       "any request, without echoing it" do
+      invalid = "Invalid usage: `--llm-effort` must be lowercase letters, e.g. `low`."
+      expected = ["Low", "LOW", "x-high", "low ", " low", "low\n", "1", "lów", "low_er", "sk-ant-FAKE"]
+                 .to_h { |effort| [effort, invalid] }
+                 .merge("low" => "no UsageError", "xhigh" => "no UsageError", "none" => "no UsageError")
+      outcomes = expected.keys.to_h { |effort| [effort, usage_error(key_file: key_file.to_s, effort:)] }
       expect(outcomes).to eq(expected)
     end
 
@@ -478,7 +503,7 @@ RSpec.describe Timed::LLM do
     it "asks Anthropic for the estimates through a strict tool it isn't forced to call" do
       estimates(anthropic, anthropic_response([]))
       expect([sent["model"], sent["tool_choice"], sent.dig("tools", 0, "strict")])
-        .to eq(["claude-haiku-4-5", { "type" => "auto" }, true])
+        .to eq(["claude-sonnet-5-5", { "type" => "auto" }, true])
     end
 
     it "asks every provider for a list of names, as plain strings that can be any name, with seconds" do
@@ -499,6 +524,11 @@ RSpec.describe Timed::LLM do
       expect([requests.fetch(0).headers["anthropic-version"], sent.key?("thinking")]).to eq(["2023-06-01", false])
     end
 
+    it "gives Anthropic's models 16000 output tokens, the most without streaming, to leave room for thinking" do
+      estimates(anthropic, anthropic_response([]))
+      expect(sent["max_tokens"]).to eq(16_000)
+    end
+
     it "asks OpenAI for the estimates as strict structured output" do
       estimates(openai, openai_response([]))
       format = sent["response_format"]
@@ -506,14 +536,39 @@ RSpec.describe Timed::LLM do
         .to eq(["gpt-5-mini", "json_schema", true, "user"])
     end
 
-    it "asks OpenAI's pinned model for the lowest reasoning effort" do
-      estimates(openai, openai_response([]))
-      expect(sent["reasoning_effort"]).to eq("minimal")
-    end
-
-    it "sends no reasoning effort to other OpenAI models" do
-      estimates(local, openai_response([]))
-      expect(sent.key?("reasoning_effort")).to be(false)
+    it "sends an effort, and never `thinking`: `--llm-effort` as given to any model on any URL; else, on a " \
+       "provider's own API, its default effort to the models it lists; else none" do
+      anthropic_key = key_file.to_s
+      openai_key_file = write_key_file(openai_key).to_s
+      gateway = "https://gateway.example/v1/messages"
+      claude = ->(effort) { { "output_config" => { "effort" => effort } } }
+      gpt = ->(effort) { { "reasoning_effort" => effort } }
+      cases = {
+        "Anthropic, default"     => [{ key_file: anthropic_key }, claude.call("low")],
+        "Anthropic, Haiku 5.5"   => [{ key_file: anthropic_key, model: "claude-haiku-5-5" }, claude.call("low")],
+        "Anthropic, Opus 5.5"    => [{ key_file: anthropic_key, model: "claude-opus-5-5" }, claude.call("low")],
+        "Anthropic, Haiku 4.5"   => [{ key_file: anthropic_key, model: "claude-haiku-4-5" }, {}],
+        "Anthropic, unknown"     => [{ key_file: anthropic_key, model: "claude-opus-6" }, {}],
+        "Anthropic URL, listed"  => [{ key_file: anthropic_key, url: gateway, model: "claude-sonnet-5-5" }, {}],
+        "OpenAI, default"        => [{ key_file: openai_key_file }, gpt.call("minimal")],
+        "OpenAI, unknown"        => [{ key_file: openai_key_file, model: "gpt-5" }, {}],
+        "local"                  => [{ url: local_url, model: "qwen2.5:7b" }, {}],
+        "local, listed"          => [{ url: local_url, model: "gpt-5-mini" }, {}],
+        "set, Anthropic default" => [{ key_file: anthropic_key, effort: "max" }, claude.call("max")],
+        "set, Haiku 4.5"         => [{ key_file: anthropic_key, model: "claude-haiku-4-5", effort: "high" },
+                                     claude.call("high")],
+        "set, Anthropic URL"     => [{ key_file: anthropic_key, url: gateway, model: "m", effort: "medium" },
+                                     claude.call("medium")],
+        "set, OpenAI"            => [{ key_file: openai_key_file, effort: "high" }, gpt.call("high")],
+        "set, local"             => [{ url: local_url, model: "qwen2.5:7b", effort: "none" }, gpt.call("none")],
+      }
+      efforts = cases.to_h do |label, (options, _)|
+        requests.clear
+        settings = described_class.settings(**options, resolver: resolving("127.0.0.1"))
+        estimates(settings, response("", code: 500), response("", code: 500))
+        [label, sent.slice("output_config", "reasoning_effort", "thinking")]
+      end
+      expect(efforts).to eq(cases.transform_values(&:last))
     end
 
     it "sends `temperature: 0` only to models known to take it: on a provider's own API, those it lists (none " \
@@ -522,7 +577,8 @@ RSpec.describe Timed::LLM do
       openai_key_file = write_key_file(openai_key).to_s
       gateway = "https://gateway.example/v1/messages"
       cases = {
-        "Anthropic, listed"        => [{ key_file: anthropic_key }, 0],
+        "Anthropic, default"       => [{ key_file: anthropic_key }, nil],
+        "Anthropic, listed"        => [{ key_file: anthropic_key, model: "claude-haiku-4-5" }, 0],
         "Anthropic, rejecting"     => [{ key_file: anthropic_key, model: "claude-sonnet-5-5" }, nil],
         "Anthropic, unknown"       => [{ key_file: anthropic_key, model: "claude-opus-4-1" }, nil],
         "Anthropic URL, listed"    => [{ key_file: anthropic_key, url: gateway, model: "claude-haiku-4-5" }, 0],
@@ -574,6 +630,13 @@ RSpec.describe Timed::LLM do
       expect(estimates(anthropic, answer)).to eq("llvm" => 3000.0, "lld" => 600.0)
     end
 
+    it "reads Anthropic's estimates after a thinking block" do
+      thinking = { type: "thinking", thinking: "llvm is large", signature: "c2ln" }
+      tool = { type: "tool_use", name: "build_estimates", input: { estimates: [{ name: "llvm", seconds: 3000 }] } }
+      body = { content: [thinking, tool], stop_reason: "tool_use" }
+      expect(estimates(anthropic, response(body.to_json))).to eq("llvm" => 3000.0)
+    end
+
     it "reads OpenAI's estimates" do
       expect(estimates(openai, openai_response([{ name: "llvm", seconds: 3000.5 }]))).to eq("llvm" => 3000.5)
     end
@@ -616,6 +679,30 @@ RSpec.describe Timed::LLM do
       expect(warned_by_reply).to eq(replies.to_h { |settings, body| [[settings.provider, body.to_json], true] })
     end
 
+    it "names `refusal` or `max_tokens` as the reason Anthropic's reply has no estimates, and no other reason, " \
+       "as it never shows the server's text" do
+      thinking = { type: "thinking", thinking: "llvm is #{key}", signature: "c2ln" }
+      replies = {
+        "refusal"    => { content: [], stop_reason: "refusal" },
+        "max_tokens" => { content: [thinking], stop_reason: "max_tokens" },
+        "end_turn"   => { content: [{ type: "text", text: "llvm: 1h" }], stop_reason: "end_turn" },
+        "unknown"    => { content: [thinking], stop_reason: "stopped by #{key}" },
+        "malformed"  => { content: [], stop_reason: ["refusal"] },
+      }
+      failed = "Warning: LLM build time estimates failed (anthropic claude-sonnet-5-5), using median build times: " \
+               "the response has no estimates"
+      warning_by_reply = replies.transform_values do |body|
+        stderr_of { estimates(anthropic, response(body.to_json)) }
+      end
+      expect(warning_by_reply).to eq(
+        "refusal"    => "#{failed}: it stopped with `refusal`\n",
+        "max_tokens" => "#{failed}: it stopped with `max_tokens`\n",
+        "end_turn"   => "#{failed}\n",
+        "unknown"    => "#{failed}\n",
+        "malformed"  => "#{failed}\n",
+      )
+    end
+
     it "warns, returning none, for an answer with no valid estimate of a formula asked about" do
       answers = {
         "empty"       => [],
@@ -628,7 +715,7 @@ RSpec.describe Timed::LLM do
         [label, [result, warning]]
       end
       expect(outcome_by_answer).to eq(answers.to_h do |label, _|
-        [label, [{}, "Warning: LLM build time estimates failed (anthropic claude-haiku-4-5), using median build " \
+        [label, [{}, "Warning: LLM build time estimates failed (anthropic claude-sonnet-5-5), using median build " \
                      "times: the response has no valid estimates\n"]]
       end)
     end
@@ -674,12 +761,18 @@ RSpec.describe Timed::LLM do
     it "warns with just the status on an error" do
       body = { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }.to_json
       expect { estimates(anthropic, response(body, code: 529), response(body, code: 529)) }
-        .to output(/failed \(anthropic claude-haiku-4-5\), using median build times: HTTP 529$/).to_stderr
+        .to output(/failed \(anthropic claude-sonnet-5-5\), using median build times: HTTP 529$/).to_stderr
     end
 
     it "names `--llm-model` on HTTP 400" do
       body = { error: { message: "model 'qwen9' not found", code: "model_not_found" } }.to_json
       expect { estimates(openai, response(body, code: 400)) }.to output(/: HTTP 400; check `--llm-model`$/).to_stderr
+    end
+
+    it "names `--llm-effort` first on HTTP 400 when it is set, whatever the model" do
+      settings = described_class.settings(key_file: key_file.to_s, model: "claude-haiku-4-5", effort: "low")
+      expect { estimates(settings, response("", code: 400)) }
+        .to output(/: HTTP 400; check `--llm-effort` and `--llm-model`$/).to_stderr
     end
 
     it "names `--llm-api-key-file` on HTTP 401 and 403" do

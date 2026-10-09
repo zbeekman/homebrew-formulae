@@ -350,10 +350,11 @@ can't be used with `--cask`, and each name must be a formula.
   architecture, cores and threads (and performance and efficiency cores on
   Apple Silicon), any container CPU limit, model, form (laptop, desktop or
   server), whether it is virtualised, memory and OS; Homebrew's make jobs;
-  and what the estimate is for, at temperature 0 for models known to take
-  it. Nothing else: no host name, user name, serial number or path. Off by
-  default; enabled by default if `$HOMEBREW_TIMED_LLM_ESTIMATES` is set, to
-  any value. See [LLM estimates](../README.md#llm-estimates).
+  and what the estimate is for, at temperature 0 and a low effort for the
+  models known to take them. Nothing else: no host name, user name, serial
+  number or path. Off by default; enabled by default if
+  `$HOMEBREW_TIMED_LLM_ESTIMATES` is set, to any value. See
+  [LLM estimates](../README.md#llm-estimates).
 
 `--llm-api-key-file`
 
@@ -374,8 +375,8 @@ can't be used with `--cask`, and each name must be a formula.
 `--llm-model`
 
 : The model to ask, needed with `--llm-url`. Defaults to
-  `$HOMEBREW_TIMED_LLM_MODEL`, else the provider's small model
-  (`claude-haiku-4-5` or `gpt-5-mini`).
+  `$HOMEBREW_TIMED_LLM_MODEL`, else the provider's default model
+  (`claude-sonnet-5-5` or `gpt-5-mini`).
 
 `--llm-timeout`
 
@@ -385,6 +386,18 @@ can't be used with `--cask`, and each name must be a formula.
   minutes for a long list, and more for its first request, while it loads
   the model.
 
-`--llm-api-key-file`, `--llm-provider`, `--llm-url`, `--llm-model` and
-`--llm-timeout` need `--llm-estimates` (or `$HOMEBREW_TIMED_LLM_ESTIMATES`),
-and none of the LLM options can be used with `--cask`.
+`--llm-effort`
+
+: How hard the model works on its answer, e.g. `low` or `high`: lowercase
+  letters only, sent as given to any model on any URL, as
+  `output_config.effort` in Anthropic's API format and `reasoning_effort` in
+  OpenAI's. Defaults to `$HOMEBREW_TIMED_LLM_EFFORT`, else, on the provider's
+  API only, `low` for `claude-haiku-5-5`, `claude-sonnet-5-5` and
+  `claude-opus-5-5` and `minimal` for `gpt-5-mini`; other models get their
+  own default. A model that doesn't take it fails the request with HTTP 400,
+  and those formulae keep the fallback.
+
+`--llm-api-key-file`, `--llm-provider`, `--llm-url`, `--llm-model`,
+`--llm-timeout` and `--llm-effort` need `--llm-estimates` (or
+`$HOMEBREW_TIMED_LLM_ESTIMATES`), and none of the LLM options can be used
+with `--cask`.

@@ -27,6 +27,9 @@ module Homebrew
         sig { returns(T.nilable(String)) }
         def llm_api_key_file; end
 
+        sig { returns(T.nilable(String)) }
+        def llm_effort; end
+
         sig { returns(T.nilable(T::Boolean)) }
         def llm_estimates?; end
 
