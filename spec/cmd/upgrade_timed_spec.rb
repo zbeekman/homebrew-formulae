@@ -874,8 +874,11 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
     it "upgrades a last cask that needs a formula that failed to upgrade, which brew leaves installed and alone",
        :aggregate_failures do
-      stub_formula("cmake")
+      cmake = stub_formula("cmake")
       FileUtils.cp receipt, HOMEBREW_CELLAR/"cmake/1.0/INSTALL_RECEIPT.json"
+      # Brew loads an installed formula from its rack by the tap in its receipt,
+      # else the real `cmake`, which has a bottle on some platforms.
+      stub_formula_loader(cmake, "homebrew/core/cmake")
       stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
       allow(Timed::Runner).to receive(:run)
         .and_return(Timed::Runner::Outcome.new(unfinished: %w[cmake], stopped_early: false))
