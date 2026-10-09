@@ -59,8 +59,9 @@ brew build-times stats                        # the times estimates come from
 - Each formula's times go in `build-log.json` in `$HOMEBREW_USER_CONFIG_HOME`,
   shown by `brew build-times`, and in its install receipt under
   `build_times`, unless `--no-stamp-receipts` is given or
-  `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set. Each batch's output is kept in
-  `$HOMEBREW_LOGS/timed/`.
+  `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set. A formula's install time leaves
+  out the dependencies Homebrew installed for it, which are logged on their
+  own. Each batch's output is kept in `$HOMEBREW_LOGS/timed/`.
 - Casks aren't timed: they go in one call before the batches, and one after
   them for those that may ask for a password, show a dialog or need a formula
   or cask in the run. Without a terminal (`/dev/tty` can't be opened) and with

@@ -183,7 +183,9 @@ runs started in the same second keep their own logs. After each batch, it:
   was to install. With `--only-dependencies`, a named formula
   is never logged for itself, failed or skipped, only what Homebrew installed
   for it; it is logged, and stamped, when Homebrew installs it as another
-  named formula's dependency;
+  named formula's dependency. A formula's logged install time leaves out the
+  dependencies Homebrew installed for it, which are logged with
+  `dependency_of` (see [`brew build-times`](build-times.md));
 - adds the times to the install receipt (`INSTALL_RECEIPT.json`) of each keg
   Homebrew installed, under `build_times`, unless `--no-stamp-receipts` is
   given;
