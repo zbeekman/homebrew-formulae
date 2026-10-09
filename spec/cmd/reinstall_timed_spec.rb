@@ -19,13 +19,15 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
   let(:receipt) { Pathname(__FILE__).dirname.parent/"fixtures/receipts/built.json" }
   let(:brew_calls) { [] }
+  let(:brew_envs) { [] }
   # Names brew fails to reinstall, leaving their kegs as they were.
   let(:failing) { [] }
 
-  # A formula at version 2.0, in `tap` if given, installed at 2.0 (unless not
-  # `installed`) and linked into `opt`, with a receipt from long ago, loadable
-  # by name and full name. A bottled one's manifest is never downloaded.
-  def stub_formula(name, installed: true, deps: [], bottled: false, tap: nil)
+  # A formula at version 2.0, in `tap` if given, installed at `version`
+  # (unless not `installed`) and linked into `opt`, with a receipt from long
+  # ago, loadable by name and full name. A bottled one's manifest is never
+  # downloaded.
+  def stub_formula(name, installed: true, version: "2.0", deps: [], bottled: false, tap: nil)
     formula = formula(name, tap:) do
       T.bind(self, T.class_of(Formula))
       url "https://brew.sh/#{name}-2.0.tgz"
@@ -38,7 +40,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
     stub_formula_loader(formula, "homebrew/core/#{name}")
     stub_formula_loader(formula, name) if tap
     if installed
-      keg = HOMEBREW_CELLAR/name/"2.0"
+      keg = HOMEBREW_CELLAR/name/version
       keg.mkpath
       FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
       (HOMEBREW_PREFIX/"opt").mkpath
@@ -59,9 +61,10 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
     nil
   end
 
-  # Brew: a call reinstalls each formula it is given, by name or file,
-  # writing a new receipt and printing its summary line, except `failing`
-  # ones, where it stops; a cask call succeeds. There is a terminal for sudo.
+  # Brew: a call reinstalls (or upgrades) each formula it is given, by name or
+  # file, at 2.0, writing a new receipt and printing its summary line, except
+  # `failing` ones, where it stops; a cask call succeeds. There is a terminal
+  # for sudo, and no dependent has broken linkage.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
     allow(Cask::CaskLoader).to receive(:for).and_call_original
@@ -70,8 +73,10 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       true
     end
     allow(Timed::Casks).to receive(:terminal?).and_return(true)
-    allow(Timed::Runner).to receive(:stream) do |argv, &block|
+    allow(Timed::Command).to receive(:broken_dependents).and_return([])
+    allow(Timed::Runner).to receive(:stream) do |argv, env: {}, &block|
       brew_calls << argv
+      brew_envs << env
       success = argv.drop(1).reject { |arg| arg.start_with?("-") }.all? do |arg|
         name = File.basename(arg, ".rb")
         block.call("==> Reinstalling #{name} \n")
@@ -115,13 +120,11 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       expect { described_class.new(%w[--last=llvm llvm]) }.to raise_error(OptionParser::InvalidOption, /--last/)
     end
 
-    it "shows the usage, its own description and what `--exclude` leaves to brew's check for dependents",
-       :aggregate_failures do
+    it "shows the usage, its own description and what `--exclude` leaves to brew", :aggregate_failures do
       help = described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ")
       expect(help).to start_with("Usage: brew reinstall-timed [options] formula|cask [...] Reinstall formulae " \
                                  "like brew reinstall, in one call ordered by their estimates:")
-      expect(help).to include("Homebrew may still install or upgrade them as dependencies or dependents of the " \
-                              "others.")
+      expect(help).to include("Homebrew may still install or upgrade them as dependencies of the others.")
     end
 
     it "refuses `--interactive`, which needs a terminal" do
@@ -168,6 +171,62 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         ==> Batch 1 of 1: 1h40m
         lib                          build   50m00s?
         app                          build   50m00s?
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+      EOS
+    end
+
+    it "lists the outdated dependents brew's check finds for the named formulae it reinstalls, and pinned ones " \
+       "not excluded, as `brew reinstall` checks those too, other than named or excluded ones" do
+      lib = stub_formula("lib")
+      app = stub_formula("app", deps: %w[lib])
+      held = stub_formula("held")
+      allow(held).to receive(:pinned?).and_return(true)
+      allow(stub_formula("kept")).to receive(:pinned?).and_return(true)
+      stub_formula("gcc")
+      user = stub_formula("user", deps: %w[app])
+      other = stub_formula("other", deps: %w[app])
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [lib, user, other], pinned: [], skipped: [])
+      expect(Homebrew::Upgrade).to receive(:dependants).with([app, lib, held], anything).and_return(dependents)
+      expect { run_command("--dry-run", "--exclude=gcc,other,kept", "app", "lib", "held", "kept", "gcc") }
+        .to output(a_string_ending_with(<<~EOS)).to_stdout
+          app                          build   50m00s?
+          ==> Then upgrade outdated dependents
+          user
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
+          ==> Excluded
+          gcc
+        EOS
+    end
+
+    it "checks no dependents of a formula given to `--exclude`" do
+      stub_formula("cmake")
+      expect(Homebrew::Upgrade).to receive(:dependants).with([], anything).and_call_original
+      expect { run_command("--dry-run", "--exclude=cmake", "cmake") }
+        .to output("==> No formulae to reinstall\n==> Excluded\ncmake\n").to_stdout
+    end
+
+    it "lists the outdated dependents of a pinned formula when it reinstalls no formula, as `brew reinstall` " \
+       "still upgrades them" do
+      held = stub_formula("held")
+      allow(held).to receive(:pinned?).and_return(true)
+      user = stub_formula("user", deps: %w[held])
+      dependents = Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: [])
+      expect(Homebrew::Upgrade).to receive(:dependants).with([held], anything).and_return(dependents)
+      expect { run_command("--dry-run", "held") }.to output(<<~EOS).to_stdout
+        ==> No formulae to reinstall
+        ==> Then upgrade outdated dependents
+        user
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+      EOS
+    end
+
+    it "doesn't say it checks dependents for broken linkage when the user has turned brew's check off" do
+      ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
+      stub_formula("cmake")
+      expect { run_command("--dry-run", "cmake") }.to output(<<~EOS).to_stdout
+        ==> Would reinstall 1 formula in 1 batch, estimated 3m20s
+        ==> Batch 1 of 1: 3m20s
+        cmake                        build     3m20s
       EOS
     end
 
@@ -184,6 +243,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
           lib                          build    1h00m*
           app                          build   50m00s?
           llvm                         build     1h23m
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
         EOS
     end
 
@@ -279,6 +339,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
           ==> Batch 1 of 1: 8m20s
           cmake                        build     3m20s
           new                          build    5m00s*
+          ==> Then check dependents for broken linkage, and reinstall broken ones from source
         EOS
     end
 
@@ -375,6 +436,107 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         .to eq("cmake" => "built", "gcc" => "failed", "llvm" => "skipped")
     end
 
+    it "runs the call without brew's installed-dependents check, then upgrades the outdated dependents brew " \
+       "would, with their options only, then reinstalls from source the dependents with broken linkage of what " \
+       "the run installed", :aggregate_failures do
+      lib = stub_formula("lib")
+      user = stub_formula("user", version: "1.0", deps: %w[lib], bottled: true)
+      other = stub_formula("other", version: "1.0", deps: %w[lib], bottled: true)
+      broken = stub_formula("broken", deps: %w[lib])
+      expect(Timed::Command).to receive(:dependents_to_check) do |checked, poured:|
+        expect([checked.map(&:full_name), poured]).to match([contain_exactly("lib", "user"), []])
+        [broken]
+      end
+      expect(Timed::Command).to receive(:broken_dependents).with([broken]).and_return([broken])
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user, other], pinned: [], skipped: []))
+      installers = [user, other].map { |formula| instance_double(FormulaInstaller, formula:) }
+      # Brew's check of the bottles' dependencies, as it makes it before
+      # reinstalling anything, then again after the formulae, before the call.
+      expect(Homebrew::Upgrade).to receive(:dependent_formula_installers)
+        .with(having_attributes(upgradeable: [user, other]), [lib], hash_including(keep_tmp: true))
+        .and_return(installers)
+      expect(Homebrew::Upgrade).to receive(:filter_dependent_formula_installers).with(installers) do
+        expect(brew_calls.length).to eq(1)
+        installers.take(1)
+      end
+      run_command("--yes", "--build-from-source", "--keep-tmp", "lib")
+      expect(brew_calls).to eq([%w[reinstall --formula --yes --display-times --build-from-source --keep-tmp lib],
+                                %w[upgrade --formula --yes --display-times --keep-tmp user],
+                                %w[reinstall --formula --yes --display-times --build-from-source --keep-tmp broken]])
+      no_check = { "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK" => "1", "HOMEBREW_NO_ENV_HINTS" => "1" }
+      expect(brew_envs).to eq([no_check] * 3)
+      expect([builds.fetch("user").last, builds.fetch("broken").last])
+        .to match([include("verb" => "upgrade", "batch" => "dependents"),
+                   include("status" => "built", "verb" => "reinstall", "batch" => "linkage")])
+    end
+
+    it "gives the calls after the formulae the named formulae it reinstalls and its `--exclude`, for the " \
+       "commands they give to finish what they leave" do
+      lib = stub_formula("lib")
+      stub_formula("gcc")
+      expect(Timed::Command).to receive(:after)
+        .with([], [lib], hash_including(excluded: %w[gcc], own: %w[--exclude=gcc]))
+        .and_call_original
+      run_command("--yes", "--exclude=gcc", "lib", "gcc")
+    end
+
+    it "makes no calls after the formulae when the user has turned off brew's installed-dependents check, " \
+       "which then stays off in the call" do
+      ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
+      stub_formula("cmake")
+      expect(Timed::Command).not_to receive(:broken_dependents)
+      run_command("--yes", "cmake")
+      expect([brew_calls.length, brew_envs]).to eq([1, [{}]])
+    end
+
+    it "still checks the dependents of what it reinstalled for broken linkage when a failed build stops " \
+       "`brew reinstall`, unlike brew, so none is left broken" do
+      %w[cmake gcc llvm].each { |name| stub_formula(name) }
+      failing << "gcc"
+      expect(Timed::Command).to receive(:dependents_to_check).with([having_attributes(full_name: "cmake")],
+                                                                   poured: []).and_return([])
+      expect { run_command("--yes", "llvm", "gcc", "cmake") }.to output(/^==> No broken dependents found!$/).to_stdout
+    end
+
+    describe "with only pinned formulae, which it reinstalls none of" do
+      let(:held) do
+        formula = stub_formula("held")
+        allow(formula).to receive(:pinned?).and_return(true)
+        formula
+      end
+
+      def outdated(*dependents)
+        allow(Homebrew::Upgrade).to receive(:dependants)
+          .with([held], anything)
+          .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: dependents, pinned: [], skipped: []))
+        installers = dependents.map { |formula| instance_double(FormulaInstaller, formula:) }
+        allow(Homebrew::Upgrade).to receive_messages(dependent_formula_installers:        installers,
+                                                     filter_dependent_formula_installers: installers)
+      end
+
+      it "still upgrades their outdated dependents and checks those for broken linkage, as `brew reinstall` " \
+         "does, before the last casks, asking first, which `brew reinstall` doesn't when it reinstalls nothing",
+         :aggregate_failures do
+        outdated(stub_formula("user", version: "1.0", deps: %w[held], bottled: true))
+        broken = stub_formula("broken")
+        allow(Timed::Command).to receive(:broken_dependents).and_return([broken])
+        stub_cask("iterm2", "2.0", installed_stanzas: 'zap quit: "com.iterm2"')
+        expect(Homebrew::Ask).to receive(:confirm?).with(action: "reinstallation").once.and_return(true)
+        expect { run_command("--zap", "held", "iterm2") }
+          .to output("Error: held is pinned. You must unpin it to reinstall.\n").to_stderr
+        expect(brew_calls).to eq([%w[upgrade --formula --yes --display-times user],
+                                  %w[reinstall --formula --yes --display-times --build-from-source broken],
+                                  %w[reinstall --cask --yes --zap iterm2]])
+      end
+
+      it "runs nothing when they have no outdated dependents" do
+        outdated
+        expect(Timed::Runner).not_to receive(:run)
+        run_command("--yes", "held")
+      end
+    end
+
     it "doesn't skip the dependents of a formula that failed, whose old keg is still there" do
       stub_formula("lib")
       stub_formula("app", deps: %w[lib])
@@ -416,6 +578,26 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
       expect(brew_calls).to eq([%w[reinstall --cask --yes --zap --no-binaries firefox],
                                 %w[reinstall --formula --yes --display-times --keep-tmp cmake],
                                 %w[reinstall --cask --yes --zap --no-binaries iterm2]])
+    end
+
+    it "reinstalls the last casks after the outdated dependents and the broken ones, which they may need" do
+      stub_formula("cmake")
+      user = stub_formula("user", version: "1.0", deps: %w[cmake], bottled: true)
+      broken = stub_formula("broken")
+      stub_cask("firefox", "2.0")
+      stub_cask("iterm2", "2.0", installed_stanzas: 'zap quit: "com.iterm2"')
+      allow(Homebrew::Upgrade).to receive(:dependants)
+        .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: []))
+      installers = [instance_double(FormulaInstaller, formula: user)]
+      allow(Homebrew::Upgrade).to receive_messages(dependent_formula_installers:        installers,
+                                                   filter_dependent_formula_installers: installers)
+      allow(Timed::Command).to receive(:broken_dependents).and_return([broken])
+      run_command("--yes", "--zap", "cmake", "firefox", "iterm2")
+      expect(brew_calls).to eq([%w[reinstall --cask --yes --zap firefox],
+                                %w[reinstall --formula --yes --display-times cmake],
+                                %w[upgrade --formula --yes --display-times user],
+                                %w[reinstall --formula --yes --display-times --build-from-source broken],
+                                %w[reinstall --cask --yes --zap iterm2]])
     end
 
     describe "after the formulae failed" do

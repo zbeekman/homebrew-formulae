@@ -59,13 +59,11 @@ module Timed
         parser.comma_array "--last",
                            description: "Comma-separated formulae to run in a final batch, with their dependents."
       end
-      # Without `--last`, the run is one call, whose own installed-dependents
-      # check may upgrade them; otherwise the run does that check itself and
-      # leaves them alone.
+      # The run does brew's installed-dependents check itself (see `after`),
+      # which leaves them alone.
       parser.comma_array "--exclude",
                          description: "Comma-separated formulae to leave out of the run. Homebrew may still " \
-                                      "install or upgrade them as dependencies #{"or dependents " unless last}" \
-                                      "of the others."
+                                      "install or upgrade them as dependencies of the others."
       parser.switch "--no-stamp-receipts",
                     description: "Don't add the build times to the install receipts of the formulae it installs; " \
                                  "they are still logged.",
