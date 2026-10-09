@@ -267,16 +267,25 @@ RSpec.describe Timed::Runs do
     # Brew names a core formula it installs, rather than upgrades or
     # reinstalls, after its dependencies, so a dependency can start first.
     it "nests a dependency under its parent even if it started first, in order of start, and leaves flat those " \
-       "with no parent in their batch, as older entries have none, and one that names itself" do
+       "with no parent in their batch, naming any parent, as older entries have none, and one that names itself" do
       run = run_of(build(name: "x"), build(name: "c", started: 1.0, dependency_of: "a"), build(started: 5.0),
                    build(name: "y", started: 6.0, dependency_of: "gone"),
                    build(name: "b", started: 7.0, dependency_of: "a"),
                    build(name: "s", started: 8.0, dependency_of: "s"),
                    build(name: "z", batch: 2, started: 20.0, dependency_of: "a"))
       names = described_class.timeline(run, 1, width: 57, paint: plain).drop(1).map do |heading, lines|
-        [heading, lines.map { |line| line[0, 7].to_s.rstrip }]
+        [heading, lines.map { |line| line.split("  ").fetch(0) }]
       end
-      expect(names).to eq([["Batch 1", ["x", "a", "└ c", "└ b", "y", "s"]], ["Batch 2", ["z"]]])
+      expect(names).to eq([["Batch 1", ["x", "a", "└ c", "└ b", "y (for gone)", "s"]], ["Batch 2", ["z (for a)"]]])
+    end
+
+    it "names the parent of a dependency whose parent isn't in its batch, as it ran in another one" do
+      run = run_of(build(name: "geos", dependency_of: "libspatialite"),
+                   build(name: "libspatialite", batch: 2, started: 20.0))
+      names = described_class.timeline(run, 1, width: 80, paint: plain).drop(1).map do |heading, lines|
+        [heading, lines.map { |line| line.split("  ").fetch(0) }]
+      end
+      expect(names).to eq([["Batch 1", ["geos (for libspatialite)"]], ["Batch 2", ["libspatialite"]]])
     end
 
     it "keeps a build that names itself as its parent flat, in order of start" do

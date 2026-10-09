@@ -18,11 +18,13 @@ RSpec.describe Timed::Planner do
       verb:      Symbol,
       last:      T::Array[String],
       exclude:   T::Array[String],
+      verbs:     T::Hash[String, Symbol],
+      pours:     T::Array[String],
     ).returns(Timed::Planner::Result)
   }
-  def result(names, estimates, deps: {}, keg_only: [], verb: :upgrade, last: [], exclude: [])
+  def result(names, estimates, deps: {}, keg_only: [], verb: :upgrade, last: [], exclude: [], verbs: {}, pours: [])
     described_class.plan(
-      verb:, names:, deps:, estimates:, keg_only:, last:, exclude:,
+      verb:, names:, deps:, estimates:, keg_only:, last:, exclude:, verbs:, pours:,
     )
   end
 
@@ -35,10 +37,13 @@ RSpec.describe Timed::Planner do
       verb:      Symbol,
       last:      T::Array[String],
       exclude:   T::Array[String],
+      verbs:     T::Hash[String, Symbol],
+      pours:     T::Array[String],
     ).returns(T::Array[T::Array[String]])
   }
-  def batches(names, estimates, deps: {}, keg_only: [], verb: :upgrade, last: [], exclude: [])
-    result(names, estimates, deps:, keg_only:, verb:, last:, exclude:).batches.map(&:names)
+  def batches(names, estimates, deps: {}, keg_only: [], verb: :upgrade, last: [], exclude: [], verbs: {},
+              pours: [])
+    result(names, estimates, deps:, keg_only:, verb:, last:, exclude:, verbs:, pours:).batches.map(&:names)
   end
 
   describe ".plan order" do
@@ -115,14 +120,6 @@ RSpec.describe Timed::Planner do
         .to eq(["dependency cycle among a, b; also held back: c; planned last, quickest first"])
     end
 
-    it "splits a slow dependent from the slow cycle it needs" do
-      deps = { "a" => %w[b], "b" => %w[a], "c" => %w[a] }
-      planned = result(%w[a b c], { "a" => 500, "b" => 600, "c" => 100 }, deps:).batches
-      expect(planned.map { |b| [b.reason, b.names] }).to eq(
-        [[nil, %w[a]], ["b needs a", %w[b]], ["c needs b", %w[c]]],
-      )
-    end
-
     it "orders held-back formulae by their own dependencies, then estimate" do
       deps = { "a" => %w[b], "b" => %w[a], "c" => %w[a], "d" => %w[c] }
       estimates = { "a" => 5, "b" => 6, "c" => 9, "d" => 1, "e" => 3 }
@@ -151,12 +148,6 @@ RSpec.describe Timed::Planner do
     it "names a self-edge in the warning" do
       warnings = result(%w[a b], { "a" => 1, "b" => 9 }, deps: { "a" => %w[a] }).warnings
       expect(warnings).to eq(["dependency cycle among a; planned last, quickest first"])
-    end
-
-    it "applies the slow-dependent split to a cycle" do
-      deps = { "a" => %w[b], "b" => %w[a] }
-      planned = result(%w[a b], { "a" => 100, "b" => 200 }, deps:).batches
-      expect(planned.map(&:reason)).to eq([nil, "b needs a"])
     end
 
     it "moves a whole cycle to the last batch when one member is --last" do
@@ -244,73 +235,22 @@ RSpec.describe Timed::Planner do
       expect(result).to eq([%w[quick llvm]])
     end
 
-    it "reproduces the three-call llvm upgrade" do
+    it "splits the llvm upgrade only before keg-only llvm" do
       deps = { "lld" => %w[llvm], "flang" => %w[llvm] }
       result = batches(estimates.keys, estimates, deps:, keg_only: %w[llvm])
-      expect(result).to eq([%w[quick jupyterlab], %w[llvm], %w[lld flang]])
+      expect(result).to eq([%w[quick jupyterlab], %w[llvm lld flang]])
     end
   end
 
-  describe ".plan splits: slow dependents" do
-    sig { returns(T::Hash[String, Numeric]) }
-    def estimates
-      { "quick" => 10, "llvm" => 3000, "flang" => 900, "lld" => 400 }
-    end
-
-    sig { returns(T::Hash[String, T::Array[String]]) }
-    def deps
-      { "flang" => %w[llvm], "lld" => %w[llvm] }
-    end
-
-    it "starts a batch where a slow formula needs a slow one in the current batch" do
-      expect(batches(%w[quick llvm flang], estimates, deps:)).to eq([%w[quick llvm], %w[flang]])
-    end
-
-    it "labels the split with its reason" do
-      planned = result(%w[llvm flang], estimates, deps:).batches
-      expect(planned.map(&:reason)).to eq([nil, "flang needs llvm"])
-    end
-
-    it "keeps a fast dependent in the same batch" do
-      estimates = { "llvm" => 3000, "tiny" => 20 }
-      expect(batches(%w[llvm tiny], estimates, deps: { "tiny" => %w[llvm] })).to eq([%w[llvm tiny]])
-    end
-
-    it "does not split when the dependency is fast" do
-      estimates = { "lib" => 30, "app" => 900 }
-      expect(batches(%w[lib app], estimates, deps: { "app" => %w[lib] })).to eq([%w[lib app]])
-    end
-
-    it "does not split when the dependency is exactly 75s" do
-      estimates = { "lib" => 75, "app" => 900 }
-      expect(batches(%w[lib app], estimates, deps: { "app" => %w[lib] })).to eq([%w[lib app]])
-    end
-
-    it "keeps independent slow formulae together" do
-      expect(batches(%w[llvm lld], estimates)).to eq([%w[lld llvm]])
-    end
-
-    it "does not split when the slow dependency is in an earlier batch" do
-      expect(batches(%w[llvm flang lld], estimates, deps:)).to eq([%w[llvm], %w[lld flang]])
-    end
-
-    it "follows a chain through a fast formula" do
-      estimates = { "a" => 500, "b" => 5, "c" => 500 }
-      deps = { "b" => %w[a], "c" => %w[b] }
-      expect(batches(%w[a b c], estimates, deps:)).to eq([%w[a b], %w[c]])
-    end
-
-    it "follows a chain through a formula outside the set" do
-      deps = { "flang" => %w[mid], "mid" => %w[llvm] }
-      expect(batches(%w[flang llvm], estimates, deps:)).to eq([%w[llvm], %w[flang]])
-    end
-
-    it "applies to install" do
-      expect(batches(%w[llvm flang], estimates, deps:, verb: :install)).to eq([%w[llvm], %w[flang]])
-    end
-
-    it "does not apply to reinstall" do
-      expect(batches(%w[llvm flang], estimates, deps:, verb: :reinstall)).to eq([%w[llvm flang]])
+  describe ".plan slow dependents" do
+    it "keeps a slow formula in the batch of a slow one it needs, whatever the verb, as the runner gives it a " \
+       "later call" do
+      estimates = { "quick" => 10, "llvm" => 3000, "flang" => 900 }
+      deps = { "flang" => %w[llvm] }
+      planned = [:upgrade, :install, :reinstall].to_h do |verb|
+        [verb, batches(estimates.keys, estimates, deps:, verb:)]
+      end
+      expect(planned).to eq([:upgrade, :install, :reinstall].to_h { |verb| [verb, [%w[quick llvm flang]]] })
     end
   end
 
@@ -320,6 +260,60 @@ RSpec.describe Timed::Planner do
       deps = { "flang" => %w[llvm], "lld" => %w[llvm] }
       planned = batches(estimates.keys, estimates, deps:, keg_only: %w[llvm gcc], verb: :reinstall)
       expect(planned).to eq([%w[quick gcc llvm lld flang]])
+    end
+  end
+
+  describe ".plan for install, with dependencies of their own verbs" do
+    it "puts the pours before the source builds, keeping pours of the last one's verb together, then quickest " \
+       "first, whatever their verbs, and gives each batch its names' verb" do
+      estimates = { "named_pour" => 1, "missing_pour" => 2, "outdated_pour" => 3, "other_pour" => 4, "build" => 5 }
+      verbs = { "missing_pour" => :dependency, "outdated_pour" => :upgrade, "other_pour" => :dependency }
+      planned = result(estimates.keys, estimates, verbs:, verb: :install, pours: estimates.keys - %w[build]).batches
+      expect(planned.map { |b| [b.verb, b.reason, b.names] }).to eq(
+        [[nil, nil, %w[named_pour]], [:dependency, nil, %w[missing_pour other_pour]],
+         [:upgrade, nil, %w[outdated_pour]], [nil, nil, %w[build]]],
+      )
+    end
+
+    it "builds the quickest first, whatever the verb, and, among builds estimated alike, a named formula first, " \
+       "then those of the last one's verb, so a named formula never waits behind dependencies of another that " \
+       "are no quicker" do
+      deps = { "librttopo" => %w[geos], "gdal" => %w[ant zlib geos librttopo llvm proj grpc] }
+      verbs = { "ant" => :dependency, "zlib" => :dependency, "geos" => :dependency, "librttopo" => :dependency,
+                "llvm" => :dependency, "proj" => :dependency, "grpc" => :upgrade }
+      estimates = { "ant" => 1, "librttopo" => 1, "zlib" => 30 }
+      estimates = %w[gdal aria2 grpc proj llvm geos].to_h { |name| [name, 97] }.merge(estimates)
+      planned = result(estimates.keys, estimates, deps:, verbs:, verb: :install, pours: %w[ant librttopo]).batches
+      expect(planned.map { |b| [b.verb, b.names] }).to eq(
+        [[:dependency, %w[ant zlib]], [nil, %w[aria2]], [:dependency, %w[geos librttopo llvm proj]],
+         [:upgrade, %w[grpc]], [nil, %w[gdal]]],
+      )
+    end
+
+    it "starts a batch wherever the verb changes along the order, as brew takes one verb per call, even where " \
+       "that splits a verb, as an outdated dependency needs a missing one or the reverse" do
+      estimates = { "missing" => 10, "outdated" => 20, "other" => 5 }
+      deps = { "outdated" => %w[missing], "other" => %w[outdated] }
+      verbs = { "missing" => :dependency, "outdated" => :upgrade, "other" => :dependency }
+      planned = result(estimates.keys, estimates, deps:, verbs:, verb: :install).batches
+      expect(planned.map { |b| [b.verb, b.names] }).to eq(
+        [[:dependency, %w[missing]], [:upgrade, %w[outdated]], [:dependency, %w[other]]],
+      )
+    end
+
+    it "splits before a slow keg-only formula only in batches upgraded, as only `brew upgrade` moves them first" do
+      estimates = { "quick" => 10, "llvm" => 3000 }
+      keg_only = %w[llvm]
+      planned = [:upgrade, :dependency].to_h do |dependency_verb|
+        verbs = estimates.keys.to_h { |name| [name, dependency_verb] }
+        [dependency_verb, batches(estimates.keys, estimates, keg_only:, verbs:, verb: :install)]
+      end
+      expect(planned).to eq(upgrade: [%w[quick], %w[llvm]], dependency: [%w[quick llvm]])
+    end
+
+    it "rejects an unknown verb of a formula's own" do
+      expect { result(%w[a], { "a" => 1 }, verbs: { "a" => :install }, verb: :install) }
+        .to raise_error(ArgumentError, /install for a/)
     end
   end
 
@@ -368,6 +362,20 @@ RSpec.describe Timed::Planner do
       expect(batches(%w[a b c], estimates, deps:, last: %w[a])).to eq([%w[b], %w[a c]])
     end
 
+    it "moves dependencies of their own verbs needed only by the final batch with it, but no named formula, " \
+       "nor a dependency the main batches need" do
+      estimates = { "zlib" => 5, "sqlite" => 10, "geos" => 97, "proj" => 97, "aria2" => 97, "gdal" => 97,
+                    "named" => 20 }
+      deps = { "aria2" => %w[zlib], "proj" => %w[sqlite], "gdal" => %w[zlib geos proj named] }
+      verbs = { "zlib" => :dependency, "sqlite" => :dependency, "geos" => :dependency, "proj" => :upgrade }
+      planned = result(estimates.keys, estimates, deps:, verbs:, verb: :install, last: %w[gdal]).batches
+      expect(planned.map { |b| [b.label, b.reason, b.verb, b.names] }).to eq(
+        [["main", nil, :dependency, %w[zlib]], ["main", nil, nil, %w[named aria2]],
+         ["last", "--last", :dependency, %w[sqlite geos]], ["last", nil, :upgrade, %w[proj]],
+         ["last", nil, nil, %w[gdal]]],
+      )
+    end
+
     it "applies to every verb" do
       aggregate_failures do
         [:upgrade, :install, :reinstall].each do |verb|
@@ -381,15 +389,6 @@ RSpec.describe Timed::Planner do
       planned = result(%w[a llvm], estimates, keg_only: %w[llvm], last: %w[a llvm]).batches
       expect(planned.map { |b| [b.label, b.reason, b.names] }).to eq(
         [["last", "--last", %w[a]], ["last", "keg-only llvm", %w[llvm]]],
-      )
-    end
-
-    it "applies the split rules inside the last batch too" do
-      estimates = { "llvm" => 3000, "flang" => 900, "quick" => 10 }
-      deps = { "flang" => %w[llvm] }
-      planned = result(%w[llvm flang quick], estimates, deps:, last: %w[llvm]).batches
-      expect(planned.map { |b| [b.label, b.reason, b.names] }).to eq(
-        [["main", nil, %w[quick]], ["last", "--last", %w[llvm]], ["last", "flang needs llvm", %w[flang]]],
       )
     end
   end

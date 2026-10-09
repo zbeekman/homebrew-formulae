@@ -833,6 +833,118 @@ RSpec.describe "brew internals", type: :system do
         "@ran_prelude = true"
       ])
     end
+
+    it "works out the dependencies, in `compute_dependencies`, from the bottle manifest when pouring, then " \
+       "the requirements, then `expand_dependencies`, which `install` does again, uncached, before installing" do
+      install = installer_statements("install")
+      expect([installer_statements("compute_dependencies"), install.include?("unless ignore_deps?"),
+              install.include?("deps = compute_dependencies(use_cache: false)"),
+              install.include?("install_dependencies(deps)")])
+        .to eq([["@compute_dependencies = T.let(nil, T.nilable(T::Array[Dependency])) unless use_cache",
+                 "@compute_dependencies ||= begin", "fetch_bottle_tab if pour_bottle?",
+                 "check_requirements(expand_requirements)", "expand_dependencies", "end"], true, true, true])
+    end
+
+    it "check, before installing any dependency, that each has a bottle, with `--build-bottle` or a pour " \
+       "without the developer tools, so `brew install-timed` batches none then" do
+      expect(installer_statements("install"))
+        .to include("if ((pour_bottle? && !DevelopmentTools.installed?) || build_bottle?) &&",
+                    "(unbottled = unbottled_dependencies(deps)).presence")
+    end
+  end
+
+  describe "`FormulaInstaller#install_dependency`" do
+    let(:body) { brew_source("formula_installer.rb")[/^  def install_dependency\(.*?^  end$/m].to_s }
+
+    it "upgrades an outdated dependency, keeping whether it was installed on request, and installs a missing one " \
+       "as a dependency, even with `HOMEBREW_NO_INSTALL_UPGRADE`, which only brew's check of the named formulae " \
+       "heeds and `brew upgrade` never reads" do
+      on_request = "installed_on_request = dep_formula.any_version_installed? && tab.present? && " \
+                   "tab.installed_on_request"
+      readers = %w[formula_installer.rb install/check.rb upgrade.rb cmd/upgrade.rb].to_h do |path|
+        [path, brew_source(path).scan("Homebrew::EnvConfig.no_install_upgrade?").length]
+      end
+      named_skip = Regexp.new(["if formula.outdated? && !head",
+                               "if !Homebrew::EnvConfig.no_install_upgrade? && !formula.pinned?",
+                               "puts \"\#{message} but outdated (so it will be upgraded).\""]
+                                .map { |line| Regexp.escape(line) }.join('\n\s+'))
+      expect([body.include?("upgrading = dep_formula.outdated?"), body.include?(on_request), readers,
+              brew_source("install/check.rb").match?(named_skip)])
+        .to eq([true, true, { "formula_installer.rb" => 0, "install/check.rb" => 2, "upgrade.rb" => 0,
+                              "cmd/upgrade.rb" => 0 }, true])
+    end
+
+    it "stops at an outdated dependency installed from another tap, which `brew upgrade` would upgrade from " \
+       "that tap, as it resolves a name through the installed keg, so `brew install-timed` leaves those to brew" do
+      resolve = brew_source("formulary.rb")[/^  def self\.resolve\(.*?^  end$/m].to_s
+      expect([body.include?("dep_formula.tap.to_s != tab_tap.to_s\n      odie"),
+              resolve.include?("rack = to_rack(name)") &&
+                resolve.include?("f = from_rack(rack, spec, alias_path:, force_bottle:, flags:)"),
+              brew_source("cmd/upgrade.rb")
+                .include?("args.named.to_formulae_and_casks_and_unavailable(method: :resolve)")])
+        .to eq([true, true, true])
+    end
+
+    it "is cleaned up by neither `brew install` nor `brew upgrade`, which clean only the formulae they are " \
+       "given, unless `HOMEBREW_NO_INSTALL_CLEANUP` is set, as for `brew install-timed`'s dependency batches" do
+      cleanup = brew_source("cleanup.rb")
+      first_lines = %w[install_cleanup_formulae install_formula_clean! install_clean! periodic_clean!].to_h do |name|
+        [name, cleanup[/^    def self\.#{Regexp.escape(name)}[(\n].*?\n\s*(.*?)\n/, 1]]
+      end
+      expect([brew_source("formula_installer.rb").include?("Cleanup"), first_lines,
+              brew_source("upgrade.rb").include?("Cleanup.install_formula_clean!(fi.formula) if upgraded && " \
+                                                 "!dry_run && cleanup")])
+        .to eq([false, { "install_cleanup_formulae" => "return [] if Homebrew::EnvConfig.no_install_cleanup?",
+                         "install_formula_clean!"   => "return if install_cleanup_formulae([formula]).blank?",
+                         "install_clean!"           => "return if Homebrew::EnvConfig.no_install_cleanup?",
+                         "periodic_clean!"          => "return if Homebrew::EnvConfig.no_install_cleanup?" },
+                true])
+    end
+
+    it "gives the dependency's installer its receipt's options and the dependency's, and of the command's " \
+       "options only these, which `brew install-timed` gives its dependency batches, or with `debug_symbols`, " \
+       "batches none" do
+      options = [
+        "options = Options.new", "options |= tab.used_options if tab.present?",
+        "options |= Tab.remap_deprecated_options(dep_formula.deprecated_options, dep.options)",
+        "options &= dep_formula.options"
+      ]
+      call = body[/fi = FormulaInstaller\.new\(\n\s+dep_formula,\n(.*?)\n\s+\)\n/m, 1].to_s
+      keywords = call.lines.map { |line| line.strip.delete_suffix(",").squeeze(" ") }
+      expect([options.all? { |line| body.include?(line) }, keywords])
+        .to eq([true, ["options:", "link_keg: keg_had_linked_keg && keg_was_linked", "installed_on_request:",
+                       "force_bottle: false", "include_test_formulae: @include_test_formulae",
+                       "build_from_source_formulae: @build_from_source_formulae", "keep_tmp: keep_tmp?",
+                       "debug_symbols: debug_symbols?", "force: force?", "debug: debug?", "quiet: quiet?",
+                       "verbose: verbose?"]])
+    end
+
+    it "carries on, within one call, past a dependency it already tried for another formula, even if that " \
+       "failed, so `brew install-timed` and `brew upgrade-timed` never give one call two formulae that need it" do
+      source = brew_source("formula_installer.rb")
+      expect([source.include?("raise FormulaInstallationAlreadyAttemptedError, formula if " \
+                              "self.class.attempted.include?(formula)"),
+              source.include?("self.class.attempted << formula"),
+              body.include?("raise unless e.is_a? FormulaInstallationAlreadyAttemptedError")])
+        .to eq([true, true, true])
+    end
+
+    it "can't be given `--debug-symbols` on its own by `brew install`, which needs `--build-from-source` for it" do
+      expect { Timed::Command.builtin("install").parser.parse(%w[--debug-symbols foo]) }
+        .to raise_error(Homebrew::CLI::OptionConstraintError,
+                        /`--debug-symbols` cannot be passed without `--build-from-source`/)
+    end
+  end
+
+  describe "`brew upgrade`'s installer for a formula" do
+    it "keeps whether the keg linked into `opt` was installed on request, and builds a bottle again if it was " \
+       "built as one, but takes one without such a keg as installed on request" do
+      body = brew_source("upgrade.rb")[/^      def create_formula_installer\(.*?^      end$/m].to_s
+      lines = ["keg = if formula.optlinked?", "if keg", "tab = keg.tab",
+               "installed_on_request = tab.installed_on_request == true", "build_bottle = tab.built_bottle?",
+               "else", "link_keg = nil", "installed_on_request = true"]
+      expect(lines.reject { |line| body.include?(line) }).to eq([])
+    end
   end
 
   describe "the order `brew install` works in" do

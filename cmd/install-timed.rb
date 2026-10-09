@@ -24,14 +24,16 @@ module Homebrew
       cmd_args do
         instance_exec(&Timed::Command.parser_block(Timed::Command.builtin("install")))
         description <<~EOS
-          Install formulae like `brew install`, in timed batches: dependencies first, then the quickest,
-          so quick installs finish early and slow builds never hold them up.
+          Install formulae like `brew install`, in timed batches: dependencies first, then pours, then the
+          quickest builds, so quick installs finish early and slow builds never hold them up.
           Estimates come from the log shown by `brew build-times`.
 
           Takes every `brew install` option. Prints what `brew install` would install, as `brew install --dry-run`
           does, and the batches with their estimates, then asks for confirmation once for the whole run, as
           `brew install` does. With `--dry-run`, stops after printing the plan. Otherwise runs
-          `brew install` once per batch and logs how long each formula took. Installs casks with
+          `brew install` for each batch and logs how long each formula took. The dependencies it would install
+          or upgrade get batches of their own, run with `brew install --as-dependency` or `brew upgrade`.
+          Installs casks with
           `brew install --cask` before the batches, or after them if they may prompt or need the run.
         EOS
         Timed::Command.define_flags(self)
@@ -178,7 +180,22 @@ module Homebrew
           installer.forbidden_formula_check
           installer.check_install_sanity
         end).to_h { |installer| [installer.formula.full_name, installer] }
-        formulae = installers.transform_values(&:formula)
+        # The dependencies brew would install or upgrade in the calls of the
+        # named formulae get batches of their own. None with
+        # `--ignore-dependencies` or `--only-dependencies`, nor with
+        # `--build-bottle` or without the developer tools, where brew checks
+        # that every dependency has a bottle before it installs any, nor with
+        # `--debug-symbols`, which brew gives those it builds from source.
+        dependencies = if args.ignore_dependencies? || args.only_dependencies? || args.build_bottle? ||
+                          args.debug_symbols? || !DevelopmentTools.installed?
+          {}
+        else
+          leave = named.map(&:full_name) + exclude
+          installers.except(*exclude).transform_values { |installer| dependency_verbs(installer, leave:) }
+        end
+        scheduled = dependencies.values.flatten(1).to_h { |formula, own| [formula.full_name, [formula, own]] }
+        verbs = scheduled.transform_values(&:last)
+        formulae = installers.transform_values(&:formula).merge(scheduled.transform_values(&:first))
         set = formulae.keys
         # A formula whose latest version is installed now (e.g. with `--HEAD`
         # and that stable version unlinked, or `--overwrite`) will count as
@@ -186,21 +203,41 @@ module Homebrew
         # batch (as a dependency) isn't, so its own call may do nothing.
         current = formulae.select { |_, formula| formula.latest_version_installed? }
                           .transform_values { |formula| Timed::Receipts.receipt_stat(formula) }
-        deps = formulae.transform_values { |formula| Timed::Command.dependency_names(formula) }
+        # A dependency's installer has the options brew would give it.
+        all_installers = installers.merge(scheduled.transform_values do |formula, _|
+          FormulaInstaller.new(formula, options: Tab.for_formula(formula).used_options & formula.options)
+        end)
+        # What brew would install for each (build dependencies only where it
+        # builds), as it works it out, or where it can't, every dependency
+        # that loads.
+        deps = all_installers.transform_values do |installer|
+          installer.expand_dependencies.map(&:name)
+        rescue
+          Timed::Command.dependency_names(installer.formula)
+        end
         estimates = if args.only_dependencies?
           # What a formula needs has no estimate yet, so isn't slow.
           set.to_h { |name| [name, Timed::Command::Estimate.new(seconds: 0.0, pour: false, fallback: true)] }
         else
-          Timed::Command.estimates(formulae, pour: ->(formula) { installers.fetch(formula.full_name).pour_bottle? },
-                                             estimator:, guesses:, llm:, exclude:)
+          pour = ->(formula) { all_installers.fetch(formula.full_name).pour_bottle? }
+          Timed::Command.estimates(formulae, pour:, estimator:, guesses:, llm:, exclude:)
         end
         result = Timed::Planner.plan(verb: :install, names: set, deps:,
-                                     estimates: estimates.transform_values(&:seconds), last:, exclude:)
+                                     estimates: estimates.transform_values(&:seconds),
+                                     keg_only: formulae.select { |_, formula| formula.keg_only? }.keys,
+                                     last:, exclude:, verbs:,
+                                     pours: estimates.select { |_, estimate| estimate.pour }.keys)
         planned = result.batches.flat_map(&:names)
+        # Each dependency is logged as one of the first named formula in the
+        # batches that needs it, whose call brew would have installed it in.
+        dependency_of = T.let({}, T::Hash[String, String])
+        planned.each do |name|
+          dependencies.fetch(name, []).map(&:first).each { |formula| dependency_of[formula.full_name] ||= name }
+        end
 
         # What `brew install --dry-run` prints, and `brew install` before
         # asking, then the batches.
-        planned_installers = installers.values_at(*planned)
+        planned_installers = planned.filter_map { |name| installers[name] }
         dependants = Upgrade.dependants(planned_installers.map(&:formula),
                                         flags:                args.flags_only,
                                         ask:                  !args.no_ask? && !args.dry_run?,
@@ -217,9 +254,7 @@ module Homebrew
         Timed::Command.show_plan("install", result, estimates, excluded:          set & exclude,
                                                                dependencies_only: args.only_dependencies?,
                                                                casks:             args.cask? || casks.any?,
-                                                               dependents:        dependents.map(&:full_name),
-                                                               linkage:           planned.any? &&
-                                                                 !Homebrew::EnvConfig.no_installed_dependents_check?)
+                                                               dependents:        dependents.map(&:full_name))
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
         run_dependencies = Timed::Command.run_dependencies(planned_installers)
@@ -261,7 +296,10 @@ module Homebrew
                                 flags: forwarded.cask, label: "first")
         arguments = Timed::Command.path_arguments(args.named, formulae)
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
-                                      roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
+                                      roots:   planned_installers.to_h do |installer|
+                                        name = installer.formula.full_name
+                                        [name, arguments.fetch(name, name)]
+                                      end,
                                       needs:   run_dependencies)
         outcome = if result.batches.any?
           # The outdated dependents and broken linkage are seen to before the
@@ -270,16 +308,35 @@ module Homebrew
             Timed::Command.after(dependents, selected, args:, excluded: exclude, flags: forwarded.formula,
                                                        own: forwarded.own)
           end
+          # The options brew gives the installers of the dependencies it
+          # installs or upgrades for a formula, without the cleanup it gives
+          # only the formulae it is given, which would remove their old
+          # versions.
+          dependency_flags = Timed::Command.dependent_flags(forwarded.formula) - ["--force-bottle"]
+          no_cleanup = { "HOMEBREW_NO_INSTALL_CLEANUP" => "1" }
+          dependency_calls = { dependency: ["install", ["--as-dependency", *dependency_flags], no_cleanup],
+                               upgrade:    ["upgrade", dependency_flags, no_cleanup] }
+          # One command finishes what the batches left, then the last casks
+          # that need it; once the run gives it on Ctrl-C, the warning about
+          # the last casks points to it.
+          finish_given = T.let(false, T::Boolean)
+          finish = lambda do |names|
+            command = Timed::Command.finish_command("install", run, names, casks: last_casks, named: args.named,
+                                                                           flags: forwarded.cask, run_dependencies:)
+            finish_given ||= !command.nil?
+            command
+          end
           Timed::Command.before_last_casks("install", last_casks, named: args.named, flags: forwarded.cask, run:,
-                                                                  after:) do |calls|
+                                                                  after:, merged: -> { finish_given }) do |calls|
             Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
                                               stamp: !args.no_stamp_receipts?, succeeded:,
-                                              dependencies_only: args.only_dependencies?, arguments:, after: calls)
+                                              dependencies_only: args.only_dependencies?, apart: true, arguments:,
+                                              verbs: dependency_calls, dependency_of:, finish:, after: calls)
           end
         end
         last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
                                                                 unfinished: outcome&.unfinished || [], run:,
-                                                                run_dependencies:)
+                                                                run_dependencies:, merged: true)
         Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
       end
 
@@ -287,6 +344,38 @@ module Homebrew
 
       sig { returns(T::Hash[Symbol, T.any(T::Boolean, T::Array[String])]) }
       def installer_options = Timed::Command.installer_options(args)
+
+      # The dependencies brew would install or upgrade in `installer`'s call,
+      # as it works them out again before installing, once the bottle
+      # manifests are read (`FormulaInstaller#compute_dependencies`), each
+      # with the verb of the call that does the same apart (see
+      # `Planner.plan`'s `verbs`): a missing one, which brew installs as a
+      # dependency, and an outdated one, which brew upgrades keeping how it
+      # was installed (on request or not). Those in
+      # `leave` (full names), and any other brew installs differently on its
+      # own, are left for brew to install in `installer`'s call: one with
+      # options, one whose installed version isn't linked into `opt` or is
+      # the latest, one built as a bottle, which `brew upgrade` would
+      # build again, one installed from another tap and one installed through
+      # an alias whose target has changed, which `brew upgrade` would replace
+      # with that target. Brew upgrades an outdated one even with
+      # `$HOMEBREW_NO_INSTALL_UPGRADE` set, as does `brew upgrade`.
+      sig { params(installer: FormulaInstaller, leave: T::Array[String]).returns(T::Array[[Formula, Symbol]]) }
+      def dependency_verbs(installer, leave:)
+        installer.expand_dependencies.filter_map do |dependency|
+          formula = dependency.to_formula
+          next if leave.include?(formula.full_name) || !dependency.options.empty?
+          next [formula, :dependency] unless formula.any_version_installed?
+          next if !formula.optlinked? || formula.latest_version_installed?
+
+          tab = Tab.for_formula(formula)
+          next if tab.built_bottle? || (formula.tap && tab.tap && tab.tap != formula.tap)
+          # Loaded through its keg, as `brew upgrade` loads it.
+          next if Formulary.resolve(formula.full_name).installed_alias_target_changed?
+
+          [formula, :upgrade]
+        end
+      end
     end
   end
 end

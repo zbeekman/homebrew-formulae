@@ -719,9 +719,14 @@ module Timed
       end)
     end
 
+    # How `show_plan` marks a batch of dependencies (`Planner::Batch#verb`).
+    BATCH_VERB_TAGS = T.let({ dependency: "--as-dependency", upgrade: "upgrade" }.freeze, T::Hash[Symbol, String])
+
     # Prints the batches with their estimates, why each starts where it does,
-    # the outdated `dependents` upgraded after them, whether dependents are
-    # then checked for broken `linkage`, and the planner's warnings.
+    # the outdated `dependents` upgraded after them, the check for broken
+    # linkage that follows if there are either (as brew checks after
+    # installing or upgrading anything), unless the user has turned off
+    # brew's installed-dependents check, and the planner's warnings.
     # Estimates ending in `?` are fallbacks, as in `brew build-times stats`.
     # With `dependencies_only` (`brew install --only-dependencies`), each row
     # is the dependencies of a formula, which have no estimates yet. Without
@@ -729,11 +734,9 @@ module Timed
     # `--cask`), whose lists say what it does.
     sig {
       params(verb: String, result: Planner::Result, estimates: T::Hash[String, Estimate], excluded: T::Array[String],
-             dependencies_only: T::Boolean, casks: T::Boolean, dependents: T::Array[String],
-             linkage: T::Boolean).void
+             dependencies_only: T::Boolean, casks: T::Boolean, dependents: T::Array[String]).void
     }
-    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false, dependents: [],
-                       linkage: false)
+    def self.show_plan(verb, result, estimates, excluded:, dependencies_only: false, casks: false, dependents: [])
       result.warnings.each { |warning| opoo warning }
       batches = result.batches
       if batches.empty?
@@ -750,7 +753,9 @@ module Timed
         batches.each.with_index(1) do |batch, index|
           reason = batch.reason if batch.reason != "--last"
           time = duration.call(batch.names)
-          ohai "Batch #{index} of #{batches.length}#{" (--last)" if batch.label == "last"}" \
+          own_verb = batch.verb
+          tags = [("--last" if batch.label == "last"), (BATCH_VERB_TAGS[own_verb] if own_verb)].compact
+          ohai "Batch #{index} of #{batches.length}#{" (#{tags.join(", ")})" if tags.any?}" \
                "#{": #{time}" if time}#{", #{reason}" if reason}"
           batch.names.each do |name|
             next puts "dependencies of #{name}" if dependencies_only
@@ -770,7 +775,9 @@ module Timed
         ohai Runner::After::HEADINGS.fetch(Runner::After::DEPENDENTS)
         puts dependents.join(" ")
       end
-      ohai Runner::After::HEADINGS.fetch(Runner::After::LINKAGE) if linkage
+      if (batches.any? || dependents.any?) && !Homebrew::EnvConfig.no_installed_dependents_check?
+        ohai Runner::After::HEADINGS.fetch(Runner::After::LINKAGE)
+      end
       return if excluded.empty?
 
       ohai "Excluded"
@@ -1058,16 +1065,18 @@ module Timed
     # `after` returns: the calls after the batches, worked out first. If
     # Ctrl-C stops either, the `casks` to run after the formulae don't run
     # either: says so (see `casks_not_run`) and stops too, saying first that
-    # the batches didn't run if it stopped `after`.
+    # the batches didn't run if it stopped `after`. `merged` says whether the
+    # commands that finish the formulae, then the casks, were given already.
     sig {
       type_parameters(:U).params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
                                  flags: T::Array[String], run: Run,
                                  after: T.proc.returns(T.nilable(T::Array[Runner::After])),
+                                 merged: T.proc.returns(T::Boolean),
                                  _block: T.proc.params(after: T.nilable(T::Array[Runner::After]))
                                           .returns(T.type_parameter(:U)))
                          .returns(T.type_parameter(:U))
     }
-    def self.before_last_casks(verb, casks, named:, flags:, run:, after: -> {}, &_block)
+    def self.before_last_casks(verb, casks, named:, flags:, run:, after: -> {}, merged: -> { false }, &_block)
       calls = begin
         after.call
       rescue Interrupt
@@ -1076,7 +1085,7 @@ module Timed
       end
       yield calls
     rescue Interrupt
-      casks_not_run("Interrupted", verb, casks, named:, flags:, run:) if casks.any?
+      casks_not_run("Interrupted", verb, casks, named:, flags:, run:, merged: merged.call) if casks.any?
       raise
     end
 
@@ -1084,12 +1093,12 @@ module Timed
     # (`reason`), naming them as `cask_arguments` does for the `named`
     # arguments, with how to run them later (see `later`), but those that
     # need a formula of the `run` that isn't installed (see `blocked_casks`)
-    # with how to finish that first (see `finish_first`).
+    # with how to finish that first (see `finish_first`, given `merged`).
     sig {
       params(reason: String, verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
-             flags: T::Array[String], run: Run).void
+             flags: T::Array[String], run: Run, merged: T::Boolean).void
     }
-    def self.casks_not_run(reason, verb, casks, named:, flags:, run:)
+    def self.casks_not_run(reason, verb, casks, named:, flags:, run:, merged: false)
       message = "#{reason}, so the #{Utils.pluralize("cask", casks.length)} to #{verb} after the formulae " \
                 "didn't run: #{cask_arguments(named, casks).join(" ")}"
       blocked = blocked_casks(casks, run.roots.keys | run.needs.values.flatten)
@@ -1105,7 +1114,7 @@ module Timed
         "#{Utils.pluralize("cask", blocked.length, include_count: true)} #{one ? "needs" : "need"} formulae of " \
         "this run that aren't installed, which brew would\n" \
         "install for #{one ? "it" : "them"}, but not as this run would:",
-        *finish_first(verb, blocked, named:, flags:, run:),
+        *finish_first(verb, blocked, named:, flags:, run:, merged:),
       ]
       if ready.any?
         lines << "#{verb.capitalize} the #{(ready.length == 1) ? "other" : "others"} later with " \
@@ -1143,26 +1152,54 @@ module Timed
     # then how to finish that first: the `run`'s command for the formulae
     # given to it that bring those in, then the casks' own command. With no
     # such formula (e.g. an outdated dependency of one given to `--exclude`),
-    # only the casks' command, for once those are installed.
+    # only the casks' command, for once those are installed. With `merged`,
+    # those commands were given already (see `finish_command`).
     sig {
       params(verb: String, blocked: T::Hash[Cask::Cask, T::Array[String]], named: T::Array[String],
-             flags: T::Array[String], run: Run).returns(T::Array[String])
+             flags: T::Array[String], run: Run, merged: T::Boolean).returns(T::Array[String])
     }
-    def self.finish_first(verb, blocked, named:, flags:, run:)
-      missing = blocked.values.flatten
-      roots = run.roots.select { |name, _| [name, *run.needs.fetch(name, [])].intersect?(missing) }.values
-      casks = "#{verb} #{(blocked.length == 1) ? "it" : "them"} with " \
-              "`#{cask_command(verb, blocked.keys, named:, flags:)}`."
-      [
-        *blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" },
-        if roots.any?
-          "Finish those first with `#{shell_command(["brew", *run.command, *roots])}`, then #{casks}"
-        else
-          "Once those are installed, #{casks}"
-        end,
-      ]
+    def self.finish_first(verb, blocked, named:, flags:, run:, merged: false)
+      command = finish_run(run, blocked.values.flatten)
+      them = (blocked.length == 1) ? "it" : "them"
+      casks = "#{verb} #{them} with `#{cask_command(verb, blocked.keys, named:, flags:)}`."
+      finish = if command.nil?
+        "Once those are installed, #{casks}"
+      elsif merged
+        "The commands above finish those, then #{verb} #{them}."
+      else
+        "Finish those first with `#{command}`, then #{casks}"
+      end
+      [*blocked.map { |cask, needed| "#{cask.full_name}: needs #{needed.join(", ")}" }, finish]
     end
     private_class_method :finish_first
+
+    # The `run`'s command for the formulae given to it that are among `left`
+    # (full names) or bring one in (see `finish_run`), followed, on its own
+    # line, by the command for those of `casks` to run after the formulae
+    # that need one of `left` or what brew installs for them
+    # (`run_dependencies`), as `last_casks` leaves those out; nil without
+    # such a formula. `last_casks` given `merged` then points to it.
+    sig {
+      params(verb: String, run: Run, left: T::Array[String], casks: T::Array[Cask::Cask], named: T::Array[String],
+             flags: T::Array[String], run_dependencies: T::Hash[String, T::Array[String]]).returns(T.nilable(String))
+    }
+    def self.finish_command(verb, run, left, casks:, named:, flags:, run_dependencies:)
+      command = finish_run(run, left)
+      return if command.nil?
+
+      blocked = blocked_casks(casks, left | left.flat_map { |name| run_dependencies.fetch(name, []) })
+      return command if blocked.empty?
+
+      "#{command}\n  #{cask_command(verb, blocked.keys, named:, flags:)}"
+    end
+
+    # The `run`'s command for the formulae given to it that are among
+    # `missing` (full names) or bring one in, or nil if none do.
+    sig { params(run: Run, missing: T::Array[String]).returns(T.nilable(String)) }
+    def self.finish_run(run, missing)
+      roots = run.roots.select { |name, _| [name, *run.needs.fetch(name, [])].intersect?(missing) }.values
+      shell_command(["brew", *run.command, *roots]) if roots.any?
+    end
 
     # The arguments for the `casks` to run after the formulae, as
     # `cask_arguments` names them for the `named` arguments, leaving out, with
@@ -1172,19 +1209,21 @@ module Timed
     # build failed, which brew's cask installer would pour. What brew
     # installs for an unfinished formula (`run_dependencies`, as for
     # `cask_plan`) counts as unfinished too, as its call may have failed at
-    # one of those.
+    # one of those. With `merged`, the run's error already gave the commands
+    # that finish those formulae, then the casks (see `finish_command`), so
+    # the warning points to them.
     sig {
       params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
-             unfinished: T::Array[String], run: Run, run_dependencies: T::Hash[String, T::Array[String]])
-        .returns(T::Array[String])
+             unfinished: T::Array[String], run: Run, run_dependencies: T::Hash[String, T::Array[String]],
+             merged: T::Boolean).returns(T::Array[String])
     }
-    def self.last_casks(verb, casks, named:, flags:, unfinished:, run:, run_dependencies: {})
+    def self.last_casks(verb, casks, named:, flags:, unfinished:, run:, run_dependencies: {}, merged: false)
       unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
       blocked = blocked_casks(casks, unfinished)
       if blocked.any?
         opoo <<~EOS
           Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
-          #{finish_first(verb, blocked, named:, flags:, run:).join("\n")}
+          #{finish_first(verb, blocked, named:, flags:, run:, merged:).join("\n")}
         EOS
       end
       cask_arguments(named, casks - blocked.keys)

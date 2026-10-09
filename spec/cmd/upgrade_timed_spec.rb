@@ -218,11 +218,10 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("current", "2.0")
       allow(stub_formula("pinned")).to receive(:pinned?).and_return(true)
       expect { run_command("--dry-run") }.to output(<<~EOS).to_stdout
-        ==> Would upgrade 3 formulae in 2 batches, estimated 53m35s
-        ==> Batch 1 of 2: 3m35s
+        ==> Would upgrade 3 formulae in 1 batch, estimated 53m35s
+        ==> Batch 1 of 1: 53m35s
         lib                          pour     0m15s?
         cmake                        build     3m20s
-        ==> Batch 2 of 2: 50m00s, app needs cmake
         app                          build   50m00s?
         ==> Then check dependents for broken linkage, and reinstall broken ones from source
       EOS
@@ -275,7 +274,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("other")
       stub_formula("app", deps: %w[lib])
       expect { run_command("--dry-run", "app") }
-        .to output(/\A==> Would upgrade 2 formulae in 2 batches.*^lib .*^app /m).to_stdout
+        .to output(/\A==> Would upgrade 2 formulae in 1 batch.*^lib .*^app/m).to_stdout
     end
 
     it "plans a source build's outdated dependencies through current ones, but not their build dependencies" do
@@ -284,7 +283,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("mid", "2.0", deps: %w[lib], build_deps: %w[tool])
       stub_formula("app", deps: %w[mid])
       expect { run_command("--dry-run", "app") }
-        .to output(/\A==> Would upgrade 2 formulae in 2 batches.*^lib .*^app /m).to_stdout
+        .to output(/\A==> Would upgrade 2 formulae in 1 batch.*^lib .*^app/m).to_stdout
     end
 
     it "doesn't plan a poured formula's outdated dependency that its bottle's manifest is satisfied with" do
@@ -686,9 +685,28 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
     it "upgrades pours and source builds together without `--build-from-source`" do
       stub_formula("lib", bottled: true)
+      stub_formula("app")
+      run_command("--yes", "--guess=app=1m", "lib", "app")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib app]])
+    end
+
+    it "upgrades a formula in a call after one of its batch it needs, so brew never links it against the old " \
+       "version of one that failed" do
+      stub_formula("lib", bottled: true)
       stub_formula("app", deps: %w[lib])
       run_command("--yes", "app")
-      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib app]])
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times lib],
+                                        %w[upgrade --formula --yes --display-times app]])
+    end
+
+    it "upgrades formulae that need the same outdated dependency it leaves to brew in calls of their own, as " \
+       "brew tries that dependency once a call" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_formula("tool", deps: %w[lib])
+      run_command("--yes", "--exclude=lib", "app", "tool")
+      expect(brew_calls.drop(1)).to eq([%w[upgrade --formula --yes --display-times app],
+                                        %w[upgrade --formula --yes --display-times tool]])
     end
 
     it "runs each call without brew's installed-dependents check, then upgrades the outdated dependents brew " \

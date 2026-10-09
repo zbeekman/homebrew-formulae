@@ -305,7 +305,8 @@ module Timed
     # The builds of a section, in order, each with the name its row shows:
     # a dependency's row follows its parent's, if the parent is in the
     # section, marked `└`, two more spaces in for each level. A build whose
-    # parent isn't there, or that is its own parent, as two formulae of the
+    # parent isn't there (e.g. ran in an earlier batch) has its name with
+    # `(for <parent>)`; one that is its own parent, as two formulae of the
     # same name in different taps would be, has its name alone.
     sig { params(builds: T::Array[Build]).returns(T::Array[[Build, String]]) }
     def self.nest(builds)
@@ -329,7 +330,15 @@ module Timed
     def self.add_row(build, depth, children, rows)
       return if rows.any? { |row, _| row.equal?(build) }
 
-      rows << [build, depth.zero? ? build.name : "#{"  " * (depth - 1)}└ #{build.name}"]
+      parent = build.dependency_of
+      name = if depth.positive?
+        "#{"  " * (depth - 1)}└ #{build.name}"
+      elsif parent && parent != build.name
+        "#{build.name} (for #{parent})"
+      else
+        build.name
+      end
+      rows << [build, name]
       children.fetch(build.name, []).each { |child| add_row(child, depth + 1, children, rows) }
     end
     private_class_method :add_row
