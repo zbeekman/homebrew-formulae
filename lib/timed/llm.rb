@@ -39,7 +39,8 @@ module Timed
     # URL may proxy, also as e.g. `openai/gpt-5` or
     # `us.anthropic.claude-opus-5-5-v1:0`: OpenAI's reasoning models (`gpt-5`
     # and later, every `o` series) take only the default, and Claude 5
-    # models (and, it is assumed, later ones) call it deprecated.
+    # models (and, it is assumed, later ones) reject it with HTTP 400
+    # unless it is 1.
     NO_TEMPERATURE = %r{
       (?:\A|[/.])
       (?:gpt-(?:[5-9]|\d{2})|o[1-9]\d*(?:[-:]|\z)|claude-[a-z]+-(?:[5-9]|\d{2})(?:[-.@:]|\z))
@@ -85,6 +86,8 @@ module Timed
       const :addresses, T::Array[String]
       # Seconds for the whole request, including its one retry.
       const :timeout, Float
+      # `--llm-effort`, sent as given to any model.
+      const :effort, T.nilable(String)
 
       # Who is asked, for messages: the provider for its own API, else the
       # host and port of the URL, never its credentials, path or query.
@@ -106,6 +109,16 @@ module Timed
         return PROVIDERS.fetch(provider).temperature_models.include?(model) if own_api?
 
         !model.match?(NO_TEMPERATURE)
+      end
+
+      # The effort to ask for: `effort` if set, else the adapter's default
+      # for the models it lists, on the provider's own API only; else none,
+      # leaving the model's own. Decided up front, as for `temperature?`, as
+      # a model that rejects it fails the whole request with HTTP 400.
+      sig { returns(T.nilable(String)) }
+      def effort_to_send
+        adapter = PROVIDERS.fetch(provider)
+        effort || (adapter.default_effort if own_api? && adapter.effort_models.include?(model))
       end
 
       private
@@ -166,7 +179,7 @@ module Timed
       sig { abstract.returns(String) }
       def url; end
 
-      # A cheap pinned model for the provider's own API.
+      # The pinned model for the provider's own API.
       sig { abstract.returns(String) }
       def model; end
 
@@ -175,18 +188,29 @@ module Timed
       sig { abstract.returns(T::Array[String]) }
       def temperature_models; end
 
+      # The models the provider's own API is checked to take `default_effort`
+      # from, each checked with a live request before it is listed.
+      sig { abstract.returns(T::Array[String]) }
+      def effort_models; end
+
+      # The effort `effort_models` are asked at: the lowest that answers well
+      # and quickly.
+      sig { abstract.returns(String) }
+      def default_effort; end
+
       sig { abstract.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def headers(key); end
 
       sig {
-        abstract.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything])
+        abstract.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything],
+                        effort: T.nilable(String))
                 .returns(T::Hash[Symbol, T.anything])
       }
-      def body(model, prompt, schema); end
+      def body(model, prompt, schema, effort); end
 
       # The estimates list from a parsed response; raises
       # `NoMatchingPatternError`, `JSON::ParserError` or `EncodingError`
-      # without one.
+      # without one, or `Error` saying why.
       sig { abstract.params(response: T.anything).returns(T.anything) }
       def estimates(response); end
     end
@@ -201,12 +225,21 @@ module Timed
       def self.url = "https://api.anthropic.com/v1/messages"
 
       sig { override.returns(String) }
-      def self.model = "claude-haiku-4-5"
+      def self.model = "claude-sonnet-5-5"
 
       # Claude 4 and earlier models are expected to take it too, but aren't
-      # checked; `claude-sonnet-5-5` rejects it.
+      # checked; the Claude 5.5 models reject it (HTTP 400) unless it is 1.
       sig { override.returns(T::Array[String]) }
       def self.temperature_models = ["claude-haiku-4-5"]
+
+      # At `low` they skip thinking on a request like this one, or think
+      # little, so answer sooner and leave more of `max_tokens` to the
+      # answer. Claude 4.5 models reject `effort` (HTTP 400).
+      sig { override.returns(T::Array[String]) }
+      def self.effort_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
+
+      sig { override.returns(String) }
+      def self.default_effort = "low"
 
       sig { override.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def self.headers(key)
@@ -215,26 +248,39 @@ module Timed
         headers
       end
 
+      # No `thinking`: Claude 5.5 models reject turning it off, and `effort`
+      # decides how much they think. Thinking counts in `max_tokens`, so it
+      # is the most allowed without streaming: at `low`, `claude-haiku-5-5`
+      # used about 28 output tokens a formula, so 8192 would run out at about
+      # 290 formulae.
       sig {
-        override.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything])
+        override.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything],
+                        effort: T.nilable(String))
                 .returns(T::Hash[Symbol, T.anything])
       }
-      def self.body(model, prompt, schema)
-        {
+      def self.body(model, prompt, schema, effort)
+        body = {
           model:,
-          max_tokens:  8192,
+          max_tokens:  16_000,
           system:      SYSTEM_PROMPT,
           messages:    [{ role: "user", content: prompt }],
           tools:       [{ name: TOOL, description: "Record each formula's estimated build time.",
                           input_schema: schema, strict: true }],
           tool_choice: { type: "auto" },
         }
+        body[:output_config] = { effort: } if effort
+        body
       end
 
+      # Without the tool call, names a refusal or running out of
+      # `max_tokens`: only these two fixed words, never other server text.
       sig { override.params(response: T.anything).returns(T.anything) }
       def self.estimates(response)
-        response => { content: [*, { type: "tool_use", input: { estimates: } }, *] }
-        estimates
+        case response
+        in { content: [*, { type: "tool_use", input: { estimates: } }, *] } then estimates
+        in { stop_reason: "refusal" | "max_tokens" => reason }
+          raise Error, "the response has no estimates: it stopped with `#{reason}`"
+        end
       end
     end
 
@@ -254,23 +300,29 @@ module Timed
       sig { override.returns(T::Array[String]) }
       def self.temperature_models = []
 
+      sig { override.returns(T::Array[String]) }
+      def self.effort_models = ["gpt-5-mini"]
+
+      sig { override.returns(String) }
+      def self.default_effort = "minimal"
+
       sig { override.params(key: T.nilable(Secret)).returns(T::Hash[String, String]) }
       def self.headers(key)
         key ? { "Authorization" => "Bearer #{key.value}" } : {}
       end
 
       sig {
-        override.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything])
+        override.params(model: String, prompt: String, schema: T::Hash[Symbol, T.anything],
+                        effort: T.nilable(String))
                 .returns(T::Hash[Symbol, T.anything])
       }
-      def self.body(model, prompt, schema)
+      def self.body(model, prompt, schema, effort)
         body = {
           model:,
           messages:        [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: prompt }],
           response_format: { type: "json_schema", json_schema: { name: TOOL, strict: true, schema: } },
         }
-        # Other models, e.g. on local servers, may reject it.
-        body[:reasoning_effort] = "minimal" if model == self.model
+        body[:reasoning_effort] = effort if effort
         body
       end
 
@@ -290,10 +342,11 @@ module Timed
     sig {
       params(
         key_file: T.nilable(String), provider: T.nilable(String), url: T.nilable(String), model: T.nilable(String),
-        timeout: T.nilable(String), resolver: T.proc.params(host: String).returns(T::Array[String])
+        timeout: T.nilable(String), effort: T.nilable(String),
+        resolver: T.proc.params(host: String).returns(T::Array[String])
       ).returns(Settings)
     }
-    def self.settings(key_file: nil, provider: nil, url: nil, model: nil, timeout: nil,
+    def self.settings(key_file: nil, provider: nil, url: nil, model: nil, timeout: nil, effort: nil,
                       resolver: ->(host) { resolve(host) })
       timeout = setting(timeout, "TIMEOUT")&.then do |seconds|
         # Digits only, so `1e3`, `0x10` and `Infinity` aren't read as numbers.
@@ -302,6 +355,12 @@ module Timed
 
         raise UsageError, "`--llm-timeout` must be a number of seconds over 0 and at most #{MAX_TIMEOUT_SECONDS}."
       end
+      # Not checked against a list of levels, which providers change.
+      effort = setting(effort, "EFFORT")
+      if effort && !effort.match?(/\A[a-z]+\z/)
+        raise UsageError, "`--llm-effort` must be lowercase letters, e.g. `low`."
+      end
+
       key_file = setting(key_file, "API_KEY_FILE")
       key = read_key(Pathname(key_file)) if key_file
       url = setting(url, "URL")
@@ -316,7 +375,7 @@ module Timed
 
       uri = parse_url(url || adapter.url)
       addresses = (uri.scheme == "http") ? local_addresses(uri, resolver) : []
-      Settings.new(provider:, url: uri, model:, key:, addresses:, timeout: timeout || BUDGET_SECONDS)
+      Settings.new(provider:, url: uri, model:, key:, addresses:, timeout: timeout || BUDGET_SECONDS, effort:)
     end
 
     # Asks for build time estimates of `subjects` in one request, within the
@@ -338,7 +397,7 @@ module Timed
       adapter = PROVIDERS.fetch(settings.provider)
       names = subjects.map(&:name)
       prompt = JSON.generate(machine:, formulae: subjects.map(&:serialize))
-      body = adapter.body(settings.model, prompt, schema)
+      body = adapter.body(settings.model, prompt, schema, settings.effort_to_send)
       body[:temperature] = 0 if settings.temperature?
       request = Request.new(uri: settings.url, addresses: settings.addresses,
                             headers: { "Content-Type" => "application/json", **adapter.headers(settings.key) },
@@ -347,7 +406,7 @@ module Timed
       if retry?(response.code) && (time_left = deadline - clock.call).positive?
         response = http.call(request, time_left)
       end
-      raise Error, http_error(response.code) unless (200..299).cover?(response.code)
+      raise Error, http_error(response.code, effort: settings.effort) unless (200..299).cover?(response.code)
 
       answers = valid(response_estimates(adapter, response.body), names)
       if (missing = names - answers.keys).any?
@@ -562,12 +621,12 @@ module Timed
 
     # Just the status and a hint. The body is never shown: a server can echo
     # the key in it in more forms than redaction can recognise.
-    sig { params(code: Integer).returns(String) }
-    private_class_method def self.http_error(code)
+    sig { params(code: Integer, effort: T.nilable(String)).returns(String) }
+    private_class_method def self.http_error(code, effort:)
       # 400 and 404 usually mean a retired model name, or a base URL instead
-      # of the full endpoint.
+      # of the full endpoint; 400, an effort the model doesn't take.
       hint = case code
-      when 400 then "check `--llm-model`"
+      when 400 then effort ? "check `--llm-effort` and `--llm-model`" : "check `--llm-model`"
       when 401, 403 then "check `--llm-api-key-file`"
       when 404 then "check `--llm-url` and `--llm-model`"
       when 429 then "rate-limited"

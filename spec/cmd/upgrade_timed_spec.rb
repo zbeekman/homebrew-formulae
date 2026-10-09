@@ -112,13 +112,15 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
     it "adds the LLM flags, which need `--llm-estimates` and can't be used with `--cask`", :aggregate_failures do
       argv = %w[--llm-estimates --llm-api-key-file=/key --llm-provider=openai --llm-url=https://example.com/v1
-                --llm-model=m --llm-timeout=300]
+                --llm-model=m --llm-timeout=300 --llm-effort=low]
       args = described_class.new(argv).args
       expect([args.llm_estimates?, args.llm_api_key_file, args.llm_provider, args.llm_url, args.llm_model,
-              args.llm_timeout])
-        .to eq([true, "/key", "openai", "https://example.com/v1", "m", "300"])
+              args.llm_timeout, args.llm_effort])
+        .to eq([true, "/key", "openai", "https://example.com/v1", "m", "300", "low"])
       expect { described_class.new(%w[--llm-model=m]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
       expect { described_class.new(%w[--llm-timeout=300]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
+      expect { described_class.new(%w[--llm-effort=low]) }.to raise_error(Homebrew::CLI::OptionConstraintError)
+      expect { described_class.new(%w[--cask --llm-effort=low]) }.to raise_error(Homebrew::CLI::OptionConflictError)
       expect { described_class.new(%w[--no-llm-estimates --llm-url=http://localhost]) }
         .to raise_error(Homebrew::CLI::OptionConstraintError)
       expect { described_class.new(%w[--cask --llm-estimates]) }.to raise_error(Homebrew::CLI::OptionConflictError)
@@ -184,7 +186,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
 
     it "names the variable of every LLM setting", :aggregate_failures do
       expect(help).to include("Enabled by default if $HOMEBREW_TIMED_LLM_ESTIMATES is set.")
-      %w[API_KEY_FILE PROVIDER URL MODEL].each do |name|
+      %w[API_KEY_FILE PROVIDER URL MODEL TIMEOUT EFFORT].each do |name|
         expect(help).to include("$HOMEBREW_TIMED_LLM_#{name}"), "no $HOMEBREW_TIMED_LLM_#{name}"
       end
     end
@@ -544,7 +546,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       answer_with({ "new" => 300, "cmake" => 1 }, requests)
       expect { run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}", "--guess=other=1m") }
         .to output(<<~EOS).to_stdout
-          ==> Asking anthropic claude-haiku-4-5 for 1 estimate
+          ==> Asking anthropic claude-sonnet-5-5 for 1 estimate
           ==> Would upgrade 3 formulae in 1 batch, estimated 9m20s
           ==> Batch 1 of 1: 9m20s
           other                        build    1m00s*
@@ -559,7 +561,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       answer_with(500, requests)
       expect { run_command("--dry-run", "--llm-estimates", "--llm-api-key-file=#{key_file}") }
         .to output(/^new +build +50m00s\?$/).to_stdout
-        .and output(/estimates failed \(anthropic claude-haiku-4-5\), using median build times: HTTP 500/).to_stderr
+        .and output(/estimates failed \(anthropic claude-sonnet-5-5\), using median build times: HTTP 500/).to_stderr
       expect(requests.length).to eq(2)
     end
 
