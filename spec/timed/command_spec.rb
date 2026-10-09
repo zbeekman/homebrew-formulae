@@ -129,7 +129,13 @@ RSpec.describe Timed::Command do
   describe "casks" do
     include TimedCaskHelper
 
-    before { allow(Cask::CaskLoader).to receive(:for).and_call_original }
+    # Brew asks the server for a download's file name and, as when it can't
+    # reach it, here takes it from the URL.
+    before do
+      allow(Cask::CaskLoader).to receive(:for).and_call_original
+      allow_any_instance_of(CurlDownloadStrategy).to receive(:curl_headers)
+        .and_raise(ErrorDuringExecution.new(%w[curl], status: 6))
+    end
 
     describe ".installed_cask" do
       it "loads the installed caskfile, as brew does before it uninstalls the cask, and nothing when not installed" do

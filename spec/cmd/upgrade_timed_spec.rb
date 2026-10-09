@@ -8,10 +8,12 @@
 
 require "cmd/upgrade"
 require_relative "../../cmd/upgrade-timed"
+require_relative "../support/bottles"
 require_relative "../support/casks"
 require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::UpgradeTimed do
+  include TimedBottleHelper
   include TimedCaskHelper
 
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
@@ -34,25 +36,10 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       deps.each { |dep| depends_on dep }
       build_deps.each { |dep| depends_on dep => :build }
       keg_only "it is a test" if keg_only
-      if bottled
-        bottle do
-          T.bind(self, BottleSpecification)
-          sha256 cellar: :any, Utils::Bottles.tag.to_sym => "a" * 64
-        end
-      end
+      TimedBottleHelper.bottle(self) if bottled
     end
     stub_formula_loader(formula)
-    if bottled
-      runtime_dependencies = bottle_deps.map do |dep, version|
-        { "full_name" => dep, "version" => version, "revision" => 0 }
-      end
-      # Like brew's, the tab is empty until the manifest has been fetched.
-      fetches = []
-      allow(formula.bottle).to receive(:fetch_tab) { fetches << :fetched }
-      allow(formula.bottle).to receive(:tab_attributes) do
-        fetches.empty? ? {} : { "runtime_dependencies" => runtime_dependencies }
-      end
-    end
+    stub_bottle_manifest(formula, bottle_deps:) if bottled
     if installed_version
       keg = HOMEBREW_CELLAR/name/installed_version
       (keg/"bin").mkpath
@@ -307,8 +294,8 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
     it "plans a poured formula's outdated dependencies when its bottle's manifest can't be downloaded" do
       stub_formula("lib")
       app = stub_formula("app", bottled: true, deps: %w[lib], bottle_deps: { "lib" => "1.0" })
-      manifest = app.bottle&.github_packages_manifest_resource || raise("no bottle manifest")
-      allow(app.bottle).to receive(:fetch_tab).and_raise(DownloadError.new(manifest, RuntimeError.new("offline")))
+      bottle = app.bottle || raise("no bottle")
+      allow(bottle).to receive(:fetch_tab).and_raise(DownloadError.new(bottle, RuntimeError.new("offline")))
       expect { run_command("--dry-run", "app") }.to output(/\A==> Would upgrade 2 formulae/).to_stdout
     end
 

@@ -8,10 +8,12 @@
 
 require "cmd/reinstall"
 require_relative "../../cmd/reinstall-timed"
+require_relative "../support/bottles"
 require_relative "../support/casks"
 require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::ReinstallTimed do
+  include TimedBottleHelper
   include TimedCaskHelper
 
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
@@ -22,19 +24,15 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
 
   # A formula at version 2.0, in `tap` if given, installed at 2.0 (unless not
   # `installed`) and linked into `opt`, with a receipt from long ago, loadable
-  # by name and full name.
+  # by name and full name. A bottled one's manifest is never downloaded.
   def stub_formula(name, installed: true, deps: [], bottled: false, tap: nil)
     formula = formula(name, tap:) do
       T.bind(self, T.class_of(Formula))
       url "https://brew.sh/#{name}-2.0.tgz"
       deps.each { |dep| depends_on dep }
-      if bottled
-        bottle do
-          T.bind(self, BottleSpecification)
-          sha256 cellar: :any, Utils::Bottles.tag.to_sym => "a" * 64
-        end
-      end
+      TimedBottleHelper.bottle(self) if bottled
     end
+    stub_bottle_manifest(formula) if bottled
     # Brew loads an installed formula by its receipt's tap too.
     stub_formula_loader(formula)
     stub_formula_loader(formula, "homebrew/core/#{name}")
