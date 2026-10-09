@@ -648,6 +648,16 @@ module Timed
       const :fallback, T::Boolean
       # From `--guess` or an LLM, for a build without history.
       const :guessed, T::Boolean, default: false
+
+      # How the plan marks it: `?` for a fallback, `*` for a guess.
+      sig { returns(T.nilable(String)) }
+      def mark
+        if fallback
+          "?"
+        elsif guessed
+          "*"
+        end
+      end
     end
 
     # From the formula's own history of the same kind (pour or build) only;
@@ -761,13 +771,8 @@ module Timed
             next puts "dependencies of #{name}" if dependencies_only
 
             estimate = estimates.fetch(name)
-            mark = if estimate.fallback
-              "?"
-            elsif estimate.guessed
-              "*"
-            end
             puts format("%<name>-28s %<kind>-5s %<estimate>9s", name:, kind: estimate.pour ? "pour" : "build",
-                        estimate: "#{BuildLog.format_duration(estimate.seconds)}#{mark}")
+                        estimate: "#{BuildLog.format_duration(estimate.seconds)}#{estimate.mark}")
           end
         end
       end

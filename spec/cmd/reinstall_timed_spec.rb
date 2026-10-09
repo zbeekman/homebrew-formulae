@@ -436,6 +436,38 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         .to eq("cmake" => "built", "gcc" => "failed", "llvm" => "skipped")
     end
 
+    it "compares each formula's estimate with the install time it logged once the run is done" do
+      %w[cmake gcc].each { |name| stub_formula(name) }
+      allow(Timed::Runner).to receive(:stream) do |argv, &block|
+        names = argv.drop(1).reject { |arg| arg.start_with?("-") }
+        names.each do |name|
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          (keg/"INSTALL_RECEIPT.json").write(JSON.generate(JSON.parse(receipt.read).merge("time" => Time.now.to_i)))
+          ["==> Reinstalling #{name}\n", "🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n"]
+            .each { |line| block.call(line) }
+        end
+        ["==> Installation times\n", "cmake  250.000 s\n", "gcc  2500.000 s\n"].each { |line| block.call(line) }
+        true
+      end
+      expect { run_command("--yes", "gcc", "cmake") }.to output(/
+        ==>\ Estimated\ and\ actual\ times\n.*\n
+        cmake\ {28}3m20s\ {5}4m10s\ {4}-20%\n
+        gcc\ {29}50m00s\ {4}41m40s\ {4}\+20%\n\z
+      /x).to_stdout
+    end
+
+    it "compares, once a failed build has stopped `brew reinstall` before its install times, the estimate of " \
+       "each formula it rebuilt with its build time" do
+      %w[cmake gcc llvm].each { |name| stub_formula(name) }
+      failing << "gcc"
+      expect { run_command("--yes", "llvm", "gcc", "cmake") }.to output(/
+        ==>\ Estimated\ and\ actual\ times\n.*\n
+        cmake\ {28}3m20s\ {5}0m09s\ {2}\+2122%\n
+        gcc\ {29}50m00s\ {9}-\ {7}-\n
+        llvm\ {29}1h23m\ {9}-\ {7}-\n\z
+      /x).to_stdout.and output.to_stderr
+    end
+
     it "runs the call without brew's installed-dependents check, then upgrades the outdated dependents brew " \
        "would, with their options only, then reinstalls from source the dependents with broken linkage of what " \
        "the run installed", :aggregate_failures do

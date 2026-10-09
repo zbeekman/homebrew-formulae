@@ -1053,6 +1053,26 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls.map(&:last)).to eq(%w[lib app])
     end
 
+    it "compares the estimate of each formula of the batches, dependencies too, with the install time it logged " \
+       "once the run is done" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      allow(Timed::Runner).to receive(:stream) do |argv, &block|
+        name = argv.last
+        keg = HOMEBREW_CELLAR/name/"2.0"
+        keg.mkpath
+        FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+        ["==> Installing #{name}\n", "🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n", "==> Installation times\n",
+         "#{name}  30.000 s\n"].each { |line| block.call(line) }
+        true
+      end
+      expect { run_command("--yes", "--guess=lib=1m,app=2m", "app") }.to output(/
+        ==>\ Estimated\ and\ actual\ times\n.*\n
+        lib\ {29}1m00s\*\ {5}0m30s\ {3}\+100%\n
+        app\ {29}2m00s\*\ {5}0m30s\ {3}\+300%\n\z
+      /x).to_stdout
+    end
+
     it "takes what a poured formula needs from its bottle's manifest, as brew does, with `--only-dependencies`" do
       stub_formula("lib", "1.0")
       stub_formula("app", deps: %w[lib], bottled: true, bottle_deps: { "lib" => "1.0" })
@@ -1082,6 +1102,11 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
                      "To finish, run:\n  brew install-timed --only-dependencies app\n").to_stderr
         expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
           .to include("dep" => ["failed"]).and(satisfy { |logged| !logged.key?("app") })
+      end
+
+      it "compares no estimates with install times, as its plan has none" do
+        expect { run_command("--yes", "--only-dependencies", "app") }
+          .not_to output(/Estimated and actual times/).to_stdout
       end
     end
   end

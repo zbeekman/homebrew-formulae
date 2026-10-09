@@ -313,6 +313,26 @@ A new batch starts only:
 A formula that needs another of its batch runs in a later call (see
 [Running](#running)), not a batch of its own.
 
+Once the run is done, after the last casks, it prints
+`Estimated and actual times`, with a row for each formula of the batches, in
+the plan's order: its `estimate`, marked as in the plan; the time the batches
+logged for it (`actual`), as estimates take it: its install time, which
+leaves out the dependencies Homebrew installed for it (see
+[Running](#running)), or, if Homebrew reported none above 0, its build time;
+and the `error`, how far the estimate is from that time as a percentage of
+it, positive for an overestimate, e.g. `+20%` for an estimate of `10m00s` for
+a build that took `8m20s`. The outdated dependents and the dependents with
+broken linkage seen to after the batches have no estimates, so they aren't
+listed, and a time those calls log for a formula of the batches isn't used. A
+formula that failed or was skipped, or poured with no install time above 0,
+shows `-` for `actual` and `error`; the messages above say what happened to
+it. The `error` of a time shown as `0m00s` is `-` too. With colour,
+`estimate` and `actual` are painted as in [`brew build-times`](build-times.md)
+`stats`: green up to 75 seconds, yellow up to 10 minutes and red above, an
+estimate ending in `?` or `*` also in italics, as neither is from the
+formula's history, and the column names bold and underlined. There is no such
+table with `--dry-run`, or when Ctrl-C stops the run.
+
 ## Options
 
 `brew upgrade-timed` takes every `brew upgrade` option, with the same meaning;

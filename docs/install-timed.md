@@ -358,6 +358,13 @@ they need makes it; then the source builds, quickest first, whatever their
 call, and, among those estimated alike, the named formulae first, then those
 of the call before.
 
+Once the run is done, after the last casks, it prints
+`Estimated and actual times`, with each formula's estimate, the time the
+batches logged for it and how far apart they are, as
+[`brew upgrade-timed`](upgrade-timed.md#output) does. The batches of
+dependencies are listed too, as the plan estimated them. There is no such
+table with `--only-dependencies`, whose plan has no estimates.
+
 ## Options
 
 `brew install-timed` takes every `brew install` option, with the same meaning;
