@@ -27,7 +27,7 @@ module Homebrew
           Takes every `brew upgrade` option. Prints the plan from `brew upgrade --dry-run` and the
           batches with their estimates, then asks for confirmation once for the whole run, as
           `brew upgrade` does. With `--dry-run`, stops after printing the plan. Otherwise runs
-          `brew upgrade` once per batch and logs how long each formula took. Upgrades outdated casks with
+          `brew upgrade` for each batch and logs how long each formula took. Upgrades outdated casks with
           `brew upgrade --cask` before the batches, or after them if they may prompt or need the run.
         EOS
         Timed::Command.define_flags(self)
@@ -112,9 +112,7 @@ module Homebrew
         dependants = dependants(checked)
         dependents = dependants.upgradeable.reject { |formula| (planned + exclude).include?(formula.full_name) }
         Timed::Command.show_plan("upgrade", result, estimates, excluded:, casks: any_casks,
-                                                               dependents: dependents.map(&:full_name),
-                                                               linkage: planned.any? &&
-                                                                 !Homebrew::EnvConfig.no_installed_dependents_check?)
+                                                               dependents: dependents.map(&:full_name))
         # Without names, brew's preview lists every formula and cask it would
         # upgrade, casks by token.
         if args.named.empty?
@@ -183,7 +181,7 @@ module Homebrew
                                                             after:) do |calls|
             Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
                                               pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                              stamp: !args.no_stamp_receipts?, arguments:, after: calls)
+                                              stamp: !args.no_stamp_receipts?, apart: true, arguments:, after: calls)
           end
         end
         last = Timed::Command.last_casks("upgrade", last, named: args.named, flags: cask_flags,

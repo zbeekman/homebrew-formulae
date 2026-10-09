@@ -95,7 +95,7 @@ RSpec.describe Timed::Runner do
       formulae[stub.full_name] = stub
     end
 
-    def batch(*names, label: "main") = Timed::Planner::Batch.new(label:, reason: nil, names:)
+    def batch(*names, label: "main", verb: nil) = Timed::Planner::Batch.new(label:, reason: nil, names:, verb:)
 
     # Brew as it upgrades each name or file it is given that isn't installed yet,
     # taking 10 seconds for each: installs a keg with a receipt and prints its
@@ -164,6 +164,58 @@ RSpec.describe Timed::Runner do
                            %w[upgrade --formula --yes --display-times --verbose app]])
     end
 
+    it "runs a batch with a verb of its own as `verbs` says, with its flags instead and its environment added, " \
+       "and logs it with that verb", :aggregate_failures do
+      %w[lib old app].each { |name| stub_formula(name) }
+      fake_brew
+      verbs = { dependency: ["install", %w[--as-dependency --keep-tmp], {}],
+                upgrade:    ["upgrade", %w[--keep-tmp], { "HOMEBREW_X" => "1" }] }
+      run([batch("lib", verb: :dependency), batch("old", verb: :upgrade), batch("app")], verb: "install", verbs:)
+      expect(calls.zip(envs)).to eq([[%w[install --formula --yes --display-times --as-dependency --keep-tmp lib], {}],
+                                     [%w[upgrade --formula --yes --display-times --keep-tmp old],
+                                      { "HOMEBREW_X" => "1" }],
+                                     [%w[install --formula --yes --display-times --verbose app], {}]])
+      expect(builds.transform_values { |entries| entries.map { |entry| entry["verb"] } })
+        .to eq("lib" => %w[install], "old" => %w[upgrade], "app" => %w[install])
+    end
+
+    it "names the verb of the call a formula failed in, where it skips what needs it and in the errors" do
+      %w[lib old app].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib old])
+      expect do
+        run([batch("lib"), batch("old", verb: :upgrade), batch("app")], verb: "install",
+            verbs: { upgrade: ["upgrade", [], {}] }, deps: { "app" => %w[lib old] })
+      end.to output(<<~EOS).to_stderr
+        Warning: Skipping app: dependency lib did not install and dependency old did not upgrade
+        Error: 1 formula did not install: lib
+        Error: 1 formula did not upgrade: old
+      EOS
+    end
+
+    it "says, with `finish`, how to finish all of the batches it didn't install once, in the last error, not for " \
+       "each formula it skips" do
+      %w[lib tool app].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      finish = ->(names) { "brew finish #{names.join(" ")}" }
+      expect { run([batch("lib", "tool"), batch("app")], deps: { "app" => %w[lib] }, finish:) }
+        .to output(<<~EOS).to_stderr
+          Warning: Skipping app: dependency lib did not upgrade
+          Error: 1 formula did not upgrade: lib
+          To finish, run:
+            brew finish lib app
+        EOS
+    end
+
+    it "says nothing more where `finish` has no command" do
+      %w[lib app].each { |name| stub_formula(name) }
+      fake_brew(failing: %w[lib])
+      expect { run([batch("lib"), batch("app")], deps: { "app" => %w[lib] }, finish: ->(_names) {}) }
+        .to output(<<~EOS).to_stderr
+          Warning: Skipping app: dependency lib did not upgrade
+          Error: 1 formula did not upgrade: lib
+        EOS
+    end
+
     it "returns the formulae brew didn't install: those that failed, and those skipped as they need one" do
       %w[lib app tool].each { |name| stub_formula(name) }
       fake_brew(failing: %w[lib])
@@ -212,6 +264,39 @@ RSpec.describe Timed::Runner do
                            "app" => [{ "install_seconds" => 10.5 }])
       expect(JSON.parse((HOMEBREW_CELLAR/"app/2.0/INSTALL_RECEIPT.json").read)["build_times"])
         .to include("install_seconds" => 10.5)
+    end
+
+    it "logs a formula of a batch with the formula `dependency_of` says it was planned for, by short name, and " \
+       "each with its own install time, as that formula's call never included it", :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", tap: Tap.fetch("user", "tap"))
+      fake_brew
+      run([batch("lib", verb: :dependency), batch("user/tap/app")], verb: "install",
+          verbs: { dependency: ["install", %w[--as-dependency], {}] }, dependency_of: { "lib" => "user/tap/app" })
+      logged = builds.transform_values do |entries|
+        entries.map { |entry| entry.slice("install_seconds", "dependency_of") }
+      end
+      expect(logged).to eq("lib" => [{ "install_seconds" => 9.5, "dependency_of" => "app" }],
+                           "app" => [{ "install_seconds" => 9.5 }])
+    end
+
+    it "logs a formula of a batch with the formula brew installed it as a dependency of, where brew names one, " \
+       "rather than the one `dependency_of` says it was planned for" do
+      %w[tool lib].each { |name| stub_formula(name) }
+      allow(described_class).to receive(:stream) do |_argv, &on_line|
+        on_line.call("==> Installing tool dependency: lib (2.0)\n")
+        %w[lib tool].each do |name|
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+        end
+        true
+      end
+      run([batch("tool", "lib", verb: :dependency)], verb: "install", verbs: { dependency: ["install", [], {}] },
+                                                     dependency_of: { "tool" => "app", "lib" => "app" })
+      expect(builds.transform_values { |entries| entries.map { |entry| entry["dependency_of"] } })
+        .to eq("lib" => %w[tool], "tool" => %w[app])
     end
 
     it "logs with each build, the skipped formulae too, its run: the start of the name of the run's logs" do
@@ -328,6 +413,54 @@ RSpec.describe Timed::Runner do
         fake_brew
         run([batch("dep", "app")], pours: %w[dep])
         expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose dep app]])
+      end
+    end
+
+    describe "with `apart`" do
+      it "runs a formula that needs another of its call in a later call, keeping the batch's order, so brew never " \
+         "installs it without, or against the old version of, one that failed in its call", :aggregate_failures do
+        %w[lib tool app top].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib])
+        deps = { "app" => %w[lib], "top" => %w[tool] }
+        expect { run([batch("lib", "tool", "app", "top")], deps:, apart: true) }
+          .to output(/^Warning: Skipping app: dependency lib did not upgrade$/).to_stderr
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib tool],
+                             %w[upgrade --formula --yes --display-times --verbose top]])
+      end
+
+      it "keeps the batch's order across its calls, so a slow formula never runs ahead of a quick one" do
+        %w[lib app tool].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("lib", "app", "tool")], deps: { "app" => %w[lib] }, apart: true)
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose lib],
+                             %w[upgrade --formula --yes --display-times --verbose app tool]])
+      end
+
+      it "runs a formula in a later call than another that needs a dependency of its own that no batch has, as " \
+         "brew tries a dependency once a call and carries on past it for the next formula that needs it" do
+        %w[app tool top].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("app", "tool", "top")], deps: { "app" => %w[shared], "top" => %w[shared] }, apart: true)
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose app tool],
+                             %w[upgrade --formula --yes --display-times --verbose top]])
+      end
+
+      it "doesn't split for a dependency the batches have, which an earlier call installs" do
+        %w[shared app top].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("shared"), batch("app", "top")], deps: { "app" => %w[shared], "top" => %w[shared] }, apart: true)
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times --verbose shared],
+                             %w[upgrade --formula --yes --display-times --verbose app top]])
+      end
+
+      it "splits a run of pours or source builds the same way" do
+        %w[dep app tool].each { |name| stub_formula(name) }
+        fake_brew
+        run([batch("dep", "app", "tool")], flags: %w[--build-from-source], pours: %w[dep app], pour_flags: [],
+                                           deps: { "app" => %w[dep] }, apart: true)
+        expect(calls).to eq([%w[upgrade --formula --yes --display-times dep],
+                             %w[upgrade --formula --yes --display-times app],
+                             %w[upgrade --formula --yes --display-times --build-from-source tool]])
       end
     end
 
@@ -550,6 +683,19 @@ RSpec.describe Timed::Runner do
             brew upgrade user
         EOS
         expect(told).to eq([%w[app]])
+      end
+
+      it "says, with `finish`, how to finish what the batches failed when Ctrl-C stops a call after them" do
+        %w[lib user].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib])
+        finish = ->(names) { "brew finish #{names.join(" ")}" }
+        expect { run([batch("lib")], finish:, after: [after("user", choose: stopped_choose)]) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Interrupted; to finish, run:
+              brew finish lib
+            Warning: Outdated dependents not worked out, as Ctrl-C stopped that; to finish what may be left, run:
+              brew upgrade user
+          EOS
       end
 
       it "says what it didn't work out, and what may be left of it, when Ctrl-C stops that too" do
@@ -963,6 +1109,20 @@ RSpec.describe Timed::Runner do
           .to raise_error(Interrupt).and output("Warning: Interrupted; not finished or logged: app tool\n").to_stderr
         expect(builds.keys).to eq(%w[lib])
         File.open("#{database}.lock") { |lock| expect(lock.flock(File::LOCK_EX | File::LOCK_NB)).to eq(0) }
+      end
+
+      it "says, with `finish`, how to finish what the batches failed, skipped or never ran" do
+        %w[lib tool app top last].each { |name| stub_formula(name) }
+        fake_brew(failing: %w[lib]) { |names| interrupt if names == %w[top] }
+        finish = ->(names) { "brew finish #{names.join(" ")}" }
+        batches = [batch("lib", "tool"), batch("app"), batch("top"), batch("last")]
+        expect { run(batches, deps: { "app" => %w[lib] }, finish:) }
+          .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+            Warning: Skipping app: dependency lib did not upgrade
+            Warning: Interrupted; not finished or logged: last
+            To finish, run:
+              brew finish lib app last
+          EOS
       end
 
       it "says whose dependencies didn't finish with `dependencies_only`, logging what brew finished",

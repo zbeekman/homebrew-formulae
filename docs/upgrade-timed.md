@@ -59,7 +59,7 @@ batches: see [Casks](#casks).
 
 Once confirmed, it runs
 `brew upgrade --formula --yes --display-times` *`options`* *`formula`* ...
-once per batch, from the home directory, with the formula options it was
+for each batch, from the home directory, with the formula options it was
 given other than `--minimum-version` (which the plan has already applied).
 With `--debug`, Homebrew's interactive debugger is turned off
 (`$HOMEBREW_DISABLE_DEBREW`), as its prompt couldn't be answered.
@@ -69,9 +69,18 @@ With `--debug`, Homebrew's interactive debugger is turned off
 call. So when it is given, each batch is split, in its order (dependencies
 first), into runs of formulae the plan shows as a `pour` and runs of the named
 formulae and the others built from source. Each run is one call: a run of
-pours without either option, the rest with them. A batch without pours stays
-one call. A formula that needs one that failed in an earlier call of the batch
-is skipped, as in later batches.
+pours without either option, the rest with them.
+
+A batch may also run as several calls, which the plan doesn't show: a formula
+that needs another of its batch goes in a later call than that one, as within
+a call Homebrew upgrades a formula even if one it needs failed, against its
+old version. So does one that needs a dependency Homebrew installs or upgrades
+itself (e.g. one given to `--exclude`) that a formula already in the call
+needs, as within a call Homebrew tries a dependency only once and carries on
+without it for the next formula that needs it. The calls keep the batch's
+order, so a slow formula never runs ahead of a quicker one. A formula that
+needs one that failed in an earlier call of the batch is skipped, as in later
+batches.
 
 Every call runs without Homebrew's check for outdated dependents
 (`$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`), and without any of Homebrew's
@@ -298,12 +307,11 @@ A new batch starts only:
 - before a keg-only formula estimated over 75 seconds that follows formulae
   that are not keg-only (`brew upgrade` upgrades keg-only formulae first),
   shown as `keg-only` *`formula`*;
-- before a formula estimated over 75 seconds that needs one estimated over 75
-  seconds in the same batch (so a failed dependency never leaves its dependent
-  built against the old version), shown as *`formula`* `needs`
-  *`dependency`*;
 - before the formulae given to `--last` and their dependents, whose batches'
   headings are marked `(--last)`.
+
+A formula that needs another of its batch runs in a later call (see
+[Running](#running)), not a batch of its own.
 
 ## Options
 

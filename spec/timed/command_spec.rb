@@ -1386,6 +1386,9 @@ RSpec.describe Timed::Command do
 
     def batch(label, reason, *names) = Timed::Planner::Batch.new(label:, reason:, names:)
 
+    # The check for broken linkage shows only where a spec asks for it.
+    before { ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1" }
+
     it "marks `--last` batches, gives split reasons and lists `--exclude`d formulae" do
       result = Timed::Planner::Result.new(batches:  [batch("main", nil, "a"), batch("last", "--last", "b"),
                                                      batch("last", "c needs b", "c")],
@@ -1401,6 +1404,25 @@ RSpec.describe Timed::Command do
           c                            build     3m20s
           ==> Excluded
           x y
+        EOS
+    end
+
+    it "marks batches of dependencies with the verb they run with" do
+      result = Timed::Planner::Result.new(
+        batches:  [Timed::Planner::Batch.new(label: "main", reason: nil, names: %w[a], verb: :dependency),
+                   Timed::Planner::Batch.new(label: "main", reason: nil, names: %w[b], verb: :upgrade),
+                   Timed::Planner::Batch.new(label: "last", reason: "--last", names: %w[c], verb: :upgrade)],
+        warnings: [],
+      )
+      expect { described_class.show_plan("install", result, estimates, excluded: []) }
+        .to output(<<~EOS).to_stdout
+          ==> Would install 3 formulae in 3 batches, estimated 5m10s
+          ==> Batch 1 of 3 (--as-dependency): 0m10s
+          a                            build     0m10s
+          ==> Batch 2 of 3 (upgrade): 1m40s
+          b                            build     1m40s
+          ==> Batch 3 of 3 (--last, upgrade): 3m20s
+          c                            build     3m20s
         EOS
     end
 
@@ -1429,9 +1451,10 @@ RSpec.describe Timed::Command do
 
     it "says what it does after the batches, the outdated dependents it upgrades and the check for broken " \
        "linkage, before the `--exclude`d formulae" do
+      ENV.delete("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK")
       result = Timed::Planner::Result.new(batches: [batch("main", nil, "a")], warnings: [])
       expect do
-        described_class.show_plan("install", result, estimates, excluded: %w[x], dependents: %w[d e], linkage: true)
+        described_class.show_plan("install", result, estimates, excluded: %w[x], dependents: %w[d e])
       end.to output(<<~EOS).to_stdout
         ==> Would install 1 formula in 1 batch, estimated 0m10s
         ==> Batch 1 of 1: 0m10s
@@ -1442,6 +1465,26 @@ RSpec.describe Timed::Command do
         ==> Excluded
         x
       EOS
+    end
+
+    it "plans the check for broken linkage whenever there are batches or outdated dependents to upgrade, as " \
+       "brew checks after either, unless the user has turned off brew's installed-dependents check" do
+      headings = T.let([], T::Array[String])
+      allow(described_class).to receive(:ohai) { |title| headings << title }
+      allow(described_class).to receive_messages(oh1: nil, puts: nil)
+      plans = {
+        "batches"    => [[batch("main", nil, "a")], [], nil],
+        "dependents" => [[], %w[d], nil],
+        "neither"    => [[], [], nil],
+        "check off"  => [[batch("main", nil, "a")], %w[d], "1"],
+      }.transform_values do |batches, dependents, no_check|
+        ENV["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = no_check
+        headings.clear
+        described_class.show_plan("reinstall", Timed::Planner::Result.new(batches:, warnings: []), estimates,
+                                  excluded: [], dependents:)
+        headings.include?(Timed::Runner::After::HEADINGS.fetch(Timed::Runner::After::LINKAGE))
+      end
+      expect(plans).to eq("batches" => true, "dependents" => true, "neither" => false, "check off" => false)
     end
 
     it "marks guessed estimates with `*` and fallbacks with `?`" do

@@ -215,10 +215,9 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(Timed::Command).to receive(:show_plan).ordered.and_call_original
       expect { run_command("--dry-run", "--verbose", "--guess=lib=1h", "--last=lib", "app", "lib") }
         .to output(<<~EOS).to_stdout
-          ==> Would install 2 formulae in 2 batches, estimated 1h50m
-          ==> Batch 1 of 2 (--last): 1h00m
+          ==> Would install 2 formulae in 1 batch, estimated 1h50m
+          ==> Batch 1 of 1 (--last): 1h50m
           lib                          build    1h00m*
-          ==> Batch 2 of 2 (--last): 50m00s, app needs lib
           app                          build   50m00s?
           ==> Then check dependents for broken linkage, and reinstall broken ones from source
         EOS
@@ -254,8 +253,8 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         .to_stdout
     end
 
-    it "plans only the named formulae `brew install` would install or upgrade, with brew's messages about each",
-       :aggregate_failures do
+    it "plans the named formulae `brew install` would install or upgrade, with their dependencies, and brew's " \
+       "messages about each", :aggregate_failures do
       stub_formula("dep")
       stub_formula("new", deps: %w[dep])
       stub_formula("old", "1.0")
@@ -264,9 +263,149 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       upgrade = Regexp.escape("old 1.0 is already installed but outdated (so it will be upgraded).")
       current = Regexp.escape("Warning: current 2.0 is already installed and up-to-date.")
       expect { run_command("--dry-run", "current", "pinned", "old", "new") }
-        .to output(/\A#{upgrade}\n==> Would install 2 formulae in 1 batch.*^new .*^old /m).to_stdout
+        .to output(/\A#{upgrade}\n==> Would install 3 formulae in 3 batches.*^old .*^dep .*^new /m).to_stdout
         .and output(/\A#{current}.*^Error: pinned 1\.0 is already installed/m).to_stderr
       expect(Homebrew).not_to be_failed
+    end
+
+    it "plans the dependencies brew would install or upgrade for the named formulae, in batches of their own " \
+       "verb, before the formulae that need them" do
+      stub_formula("lib")
+      stub_formula("old", "1.0")
+      stub_formula("current", "2.0")
+      stub_formula("app", deps: %w[lib old current])
+      expect { run_command("--dry-run", "--guess=lib=1m,old=2m", "app") }.to output(<<~EOS).to_stdout
+        ==> Would install 3 formulae in 3 batches, estimated 53m00s
+        ==> Batch 1 of 3 (--as-dependency): 1m00s
+        lib                          build    1m00s*
+        ==> Batch 2 of 3 (upgrade): 2m00s
+        old                          build    2m00s*
+        ==> Batch 3 of 3: 50m00s
+        app                          build   50m00s?
+        ==> Then check dependents for broken linkage, and reinstall broken ones from source
+      EOS
+    end
+
+    it "leaves to brew, in the named formula's call, the dependencies it would install differently on their own, " \
+       "and plans none with options that change what brew installs for them" do
+      stub_formula("lib")
+      stub_formula("opt")
+      stub_formula("old", "1.0")
+      stub_formula("app", deps: ["lib", "old", { "opt" => "with-x" }])
+      plans = {
+        "default"                     => [%w[app], {}],
+        "HOMEBREW_NO_INSTALL_UPGRADE" => [%w[app], { "HOMEBREW_NO_INSTALL_UPGRADE" => "1" }],
+        "named"                       => [%w[app lib], {}],
+        "excluded"                    => [%w[--exclude=lib app], {}],
+        "--ignore-dependencies"       => [%w[--ignore-dependencies app], {}],
+        "--only-dependencies"         => [%w[--only-dependencies app], {}],
+        "--build-bottle"              => [%w[--build-bottle app], {}],
+        "--debug-symbols"             => [%w[--build-from-source --debug-symbols app], {}],
+      }.transform_values do |argv, env|
+        ENV.update(env)
+        batches = T.let([], T::Array[[T.nilable(Symbol), T::Array[String]]])
+        allow(Timed::Command).to receive(:show_plan) do |_, result|
+          batches = result.batches.map { |batch| [batch.verb, batch.names] }
+        end
+        run_command("--dry-run", *argv)
+        env.each_key { |name| ENV.delete(name) }
+        batches
+      end
+      expect(plans).to eq(
+        "default"                     => [[:dependency, %w[lib]], [:upgrade, %w[old]], [nil, %w[app]]],
+        "HOMEBREW_NO_INSTALL_UPGRADE" => [[:dependency, %w[lib]], [:upgrade, %w[old]], [nil, %w[app]]],
+        "named"                       => [[nil, %w[lib]], [:upgrade, %w[old]], [nil, %w[app]]],
+        "excluded"                    => [[:upgrade, %w[old]], [nil, %w[app]]],
+        "--ignore-dependencies"       => [[nil, %w[app]]],
+        "--only-dependencies"         => [[nil, %w[app]]],
+        "--build-bottle"              => [[nil, %w[app]]],
+        "--debug-symbols"             => [[nil, %w[app]]],
+      )
+    end
+
+    it "plans no dependency without the developer tools, as brew checks first that every one has a bottle" do
+      allow(DevelopmentTools).to receive(:installed?).and_return(false)
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
+    end
+
+    it "leaves to brew an outdated dependency that `brew upgrade` would install differently: one not linked " \
+       "into `opt`, or built as a bottle, which it would build again" do
+      stub_formula("unlinked", "1.0")
+      FileUtils.rm HOMEBREW_PREFIX/"opt/unlinked"
+      stub_formula("bottle", "1.0")
+      tab = HOMEBREW_CELLAR/"bottle/1.0/INSTALL_RECEIPT.json"
+      tab.write(JSON.generate(JSON.parse(tab.read).merge("built_as_bottle" => true)))
+      stub_formula("app", deps: %w[unlinked bottle])
+      expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
+    end
+
+    it "splits before a slow keg-only outdated dependency, which `brew upgrade` moves first" do
+      stub_formula("llvm", "1.0", keg_only: true)
+      stub_formula("quick", "1.0")
+      stub_formula("app", deps: %w[llvm quick])
+      batches = T.let([], T::Array[[T.nilable(Symbol), T.nilable(String), T::Array[String]]])
+      allow(Timed::Command).to receive(:show_plan) do |_, result|
+        batches = result.batches.map { |batch| [batch.verb, batch.reason, batch.names] }
+      end
+      run_command("--dry-run", "--guess=quick=2m", "app")
+      expect(batches).to eq([[:upgrade, nil, %w[quick]], [:upgrade, "keg-only llvm", %w[llvm]], [nil, nil, %w[app]]])
+    end
+
+    it "orders a dependency after only what brew would install for it: none of its build dependencies when " \
+       "brew pours it" do
+      stub_formula("tool")
+      stub_formula("lib", deps: [{ "tool" => :build }], bottled: true)
+      stub_formula("app", deps: %w[lib])
+      batches = T.let([], T::Array[[T.nilable(Symbol), T::Array[String]]])
+      allow(Timed::Command).to receive(:show_plan) do |_, result|
+        batches = result.batches.map { |batch| [batch.verb, batch.names] }
+      end
+      run_command("--dry-run", "--guess=tool=1m,lib=1m,app=1m", "tool", "app")
+      expect(batches).to eq([[:dependency, %w[lib]], [nil, %w[app tool]]])
+    end
+
+    it "leaves to brew an outdated dependency installed from another tap, which `brew upgrade` would upgrade " \
+       "from that tap and `brew install` refuses to replace" do
+      stub_formula("lib", "1.0", tap: CoreTap.instance)
+      tab = HOMEBREW_CELLAR/"lib/1.0/INSTALL_RECEIPT.json"
+      data = JSON.parse(tab.read)
+      tab.write(JSON.generate(data.merge("source" => data.fetch("source").merge("tap" => "other/tap"))))
+      stub_formula("app", deps: %w[lib])
+      expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
+    end
+
+    it "plans the pours before the source builds, even quicker ones" do
+      stub_formula("lib", bottled: true)
+      stub_formula("app", deps: %w[lib])
+      stub_formula("quick")
+      batches = T.let([], T::Array[[T.nilable(Symbol), T::Array[String]]])
+      allow(Timed::Command).to receive(:show_plan) do |_, result|
+        batches = result.batches.map { |batch| [batch.verb, batch.names] }
+      end
+      run_command("--dry-run", "--guess=quick=5s", "app", "quick")
+      expect(batches).to eq([[:dependency, %w[lib]], [nil, %w[quick app]]])
+    end
+
+    it "leaves to brew an outdated dependency installed through an alias whose target has changed, as " \
+       "`brew upgrade` would install that target instead" do
+      stub_formula("lib", "1.0")
+      stub_formula("app", deps: %w[lib])
+      allow(Formulary).to receive(:resolve).and_wrap_original do |original, name, **options|
+        formula = original.call(name, **options)
+        allow(formula).to receive(:installed_alias_target_changed?).and_return(name == "lib")
+        formula
+      end
+      expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
+    end
+
+    it "leaves to brew a dependency installed under its old name, which brew migrates" do
+      lib = stub_formula("lib")
+      allow(lib).to receive(:oldnames).and_return(%w[oldlib])
+      stub_formula("oldlib", "1.0")
+      stub_formula("app", deps: %w[lib])
+      expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
     end
 
     it "fetches the bottle manifests after the preinstall checks and `--cc` warning, as brew does" do
@@ -314,15 +453,14 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect { run_command("--dry-run", "old") }.to output("==> No formulae to install\n").to_stdout
     end
 
-    it "splits batches and gives the reasons, leaving out `--exclude`d formulae" do
+    it "plans named formulae in dependency order, leaving out `--exclude`d formulae" do
       stub_formula("cmake")
       stub_formula("llvm", deps: %w[cmake])
       stub_formula("gcc")
       expect { run_command("--dry-run", "--exclude=gcc", "llvm", "cmake", "gcc") }.to output(<<~EOS).to_stdout
-        ==> Would install 2 formulae in 2 batches, estimated 1h26m
-        ==> Batch 1 of 2: 3m20s
+        ==> Would install 2 formulae in 1 batch, estimated 1h26m
+        ==> Batch 1 of 1: 1h26m
         cmake                        build     3m20s
-        ==> Batch 2 of 2: 1h23m, llvm needs cmake
         llvm                         build     1h23m
         ==> Then check dependents for broken linkage, and reinstall broken ones from source
         ==> Excluded
@@ -654,9 +792,119 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([["install", "--formula", "--yes", "--display-times", *flags, "cmake"]])
     end
 
+    it "installs missing dependencies with `--as-dependency` and upgrades outdated ones, each in batches of " \
+       "their own, with only the options brew gives them, and logs them as dependencies of the named formula",
+       :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("old", "1.0")
+      stub_formula("app", deps: %w[lib old])
+      run_command("--yes", "--build-from-source", "--force", "--keep-tmp", "--verbose", "--guess=lib=1m,old=2m",
+                  "app")
+      expect(brew_calls).to eq([
+        %w[install --formula --yes --display-times --as-dependency --force --verbose --keep-tmp lib],
+        %w[upgrade --formula --yes --display-times --force --verbose --keep-tmp old],
+        %w[install --formula --yes --display-times --force --verbose --build-from-source --keep-tmp app],
+      ])
+      logged = builds.slice("lib", "old", "app").transform_values do |entries|
+        entries.last.slice("verb", "dependency_of")
+      end
+      expect(logged).to eq("lib" => { "verb" => "install", "dependency_of" => "app" },
+                           "old" => { "verb" => "upgrade", "dependency_of" => "app" },
+                           "app" => { "verb" => "install" })
+    end
+
+    it "gives the dependency batches none of the options brew gives only the named formulae" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_formula("bottled_lib")
+      stub_formula("bottled_app", deps: %w[bottled_lib], bottled: true)
+      dependency_calls = {
+        "--force-bottle" => %w[--force-bottle bottled_app],
+        "others"         => %w[--HEAD --cc=clang --include-test --skip-link --skip-post-install --overwrite
+                               --as-dependency app],
+      }.transform_values do |argv|
+        brew_calls.clear
+        run_command("--yes", "--guess=lib=1m,bottled_lib=1m", *argv)
+        brew_calls.first
+      end
+      expect(dependency_calls).to eq(
+        "--force-bottle" => %w[install --formula --yes --display-times --as-dependency bottled_lib],
+        "others"         => %w[install --formula --yes --display-times --as-dependency lib],
+      )
+    end
+
+    it "installs and upgrades dependencies without brew's cleanup, which `brew install` gives only the named " \
+       "formulae, so their old versions stay as they would" do
+      stub_formula("lib")
+      stub_formula("old", "1.0")
+      stub_formula("app", deps: %w[lib old])
+      run_command("--yes", "--guess=lib=1m,old=2m", "app")
+      expect(brew_calls.map(&:first).zip(brew_envs.map { |env| env["HOMEBREW_NO_INSTALL_CLEANUP"] }))
+        .to eq([["install", "1"], ["upgrade", "1"], ["install", nil]])
+    end
+
+    it "installs a dependency in a call after those it needs, so brew never installs it without, or against " \
+       "the old version of, one that failed, and says how to finish", :aggregate_failures do
+      stub_formula("base")
+      stub_formula("old", "1.0")
+      stub_formula("lib", deps: %w[base])
+      stub_formula("app", deps: %w[lib old])
+      failing.push("base", "old")
+      expect { run_command("--yes", "--guess=base=1m,lib=1m,old=2m", "app") }.to output(<<~EOS).to_stderr
+        Warning: Skipping lib: dependency base did not install
+        Warning: Skipping app: dependencies base, lib did not install and dependency old did not upgrade
+        Error: 1 formula did not install: base
+        Error: 1 formula did not upgrade: old
+        To finish, run:
+          brew install-timed app
+      EOS
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times --as-dependency base],
+                                %w[upgrade --formula --yes --display-times old]])
+    end
+
+    it "logs a dependency several named formulae need as one of the first of them in the batches" do
+      stub_formula("lib")
+      stub_formula("slow", deps: %w[lib])
+      stub_formula("quick", deps: %w[lib])
+      run_command("--yes", "--guess=lib=1m,quick=1m,slow=2m", "slow", "quick")
+      expect(builds.fetch("lib").last).to include("dependency_of" => "quick")
+    end
+
+    it "skips a named formula whose dependency failed in its own batch, and says how to finish it" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      failing << "lib"
+      expect { run_command("--yes", "app") }.to output(<<~EOS).to_stderr
+        Warning: Skipping app: dependency lib did not install
+        Error: 1 formula did not install: lib
+        To finish, run:
+          brew install-timed app
+      EOS
+    end
+
+    it "installs a named formula in a call after a named one it needs, so brew never installs it without that " \
+       "one if it fails", :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_formula("tool")
+      failing << "lib"
+      expect { run_command("--yes", "--guess=lib=1m,app=1m,tool=1m", "app", "lib", "tool") }
+        .to output(/^Warning: Skipping app: dependency lib did not install$/).to_stderr
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times lib],
+                                %w[install --formula --yes --display-times tool]])
+    end
+
+    it "leaves to brew an outdated dependency a pour's bottle is fine with, as brew does once it has read the " \
+       "bottle's manifest" do
+      stub_formula("lib", "1.0")
+      stub_formula("app", deps: %w[lib], bottled: true, bottle_deps: { "lib" => "1.0" })
+      run_command("--yes", "app")
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times app]])
+    end
+
     it "builds every formula of a batch from source in one call with `--build-from-source`, as each is named" do
       stub_formula("lib", bottled: true)
-      stub_formula("app", deps: %w[lib])
+      stub_formula("app")
       run_command("--yes", "--build-from-source", "--debug-symbols", "--guess=lib=1m", "app", "lib")
       expect(brew_calls).to eq([%w[install --formula --yes --display-times --build-from-source --debug-symbols lib
                                    app]])
@@ -760,6 +1008,8 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect { run_command("--yes", "llvm", "cmake", "gcc") }.to output(<<~EOS).to_stderr
         Warning: Skipping llvm: dependency cmake did not install
         Error: 1 formula did not install: cmake
+        To finish, run:
+          brew install-timed cmake llvm
       EOS
       expect(brew_calls).to eq([%w[install --formula --yes --display-times cmake gcc]])
       expect(builds.transform_values { |entries| entries.last["status"] })
@@ -771,7 +1021,8 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_formula("lib", "2.0", linked: false)
       failing << "app"
       expect { run_command("--yes", "--overwrite", "--guess=app=1m,lib=1m", "app", "lib") }
-        .to output("Error: 1 formula did not install: app\n").to_stderr
+        .to output("Error: 1 formula did not install: app\nTo finish, run:\n  brew install-timed --overwrite app\n")
+        .to_stderr
     end
 
     it "takes a formula an earlier batch upgraded alongside as installed, though its own call did nothing" do
@@ -807,7 +1058,8 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
          :aggregate_failures do
         failing << "dep"
         expect { run_command("--yes", "--only-dependencies", "app") }
-          .to output("Error: The dependencies of 1 formula did not install: app\n").to_stderr
+          .to output("Error: The dependencies of 1 formula did not install: app\n" \
+                     "To finish, run:\n  brew install-timed --only-dependencies app\n").to_stderr
         expect(builds.transform_values { |entries| entries.map { |entry| entry["status"] } })
           .to include("dep" => ["failed"]).and(satisfy { |logged| !logged.key?("app") })
       end
@@ -866,18 +1118,32 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       end
     end
 
-    it "doesn't install a last cask that needs a formula that failed, which brew would pour for it, saying so",
-       :aggregate_failures do
+    it "doesn't install a last cask that needs a formula that failed, which brew would pour for it, saying so, " \
+       "with the commands that finish the formulae, then the cask, once", :aggregate_failures do
       stub_formula("cmake")
+      stub_formula("other")
       stub_cask("app-for-cmake", nil, stanzas: 'depends_on formula: "cmake"')
-      failing << "cmake"
-      expect { run_command("--yes", "--keep-tmp", "cmake", "app-for-cmake") }.to output(<<~EOS).to_stderr
-        Error: 1 formula did not install: cmake
-        Warning: Not installing 1 cask, which needs formulae that didn't install and aren't installed:
-        app-for-cmake: needs cmake
-        Finish those first with `brew install-timed --keep-tmp cmake`, then install it with `brew install --cask app-for-cmake`.
-      EOS
-      expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake]])
+      failing.push("cmake", "other")
+      expect { run_command("--yes", "--keep-tmp", "cmake", "other", "app-for-cmake") }
+        .to output(<<~EOS).to_stderr
+          Error: 2 formulae did not install: cmake other
+          To finish, run:
+            brew install-timed --keep-tmp cmake other
+            brew install --cask app-for-cmake
+          Warning: Not installing 1 cask, which needs formulae that didn't install and aren't installed:
+          app-for-cmake: needs cmake
+          The commands above finish those, then install it.
+        EOS
+      expect(brew_calls).to eq([%w[install --formula --yes --display-times --keep-tmp cmake other]])
+    end
+
+    it "finishes a dependency batched for a named formula with that formula, which brings it in as a dependency" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
+      failing << "lib"
+      expect { run_command("--yes", "app", "lib-app") }
+        .to output(/^To finish, run:\n  brew install-timed app\n  brew install --cask lib-app\n/).to_stderr
     end
 
     it "keeps `--exclude` and `--no-stamp-receipts`, but not `--yes`, in the command to finish what a last cask " \
@@ -889,7 +1155,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         .and_return(Homebrew::Upgrade::Dependents.new(upgradeable: [user], pinned: [], skipped: []))
       failing << "cmake"
       argv = %w[--yes --keep-tmp --exclude=user --no-stamp-receipts --guess=cmake=1m cmake app-for-cmake]
-      finish = /^Finish those first with `brew install-timed --keep-tmp --exclude=user --no-stamp-receipts cmake`, /
+      finish = /^  brew install-timed --keep-tmp --exclude=user --no-stamp-receipts cmake\n  brew install --cask /
       expect { run_command(*argv) }.to output(finish).to_stderr
     end
 
@@ -948,21 +1214,29 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([%w[install --cask --yes firefox]])
     end
 
-    it "names, when Ctrl-C stops the formulae, the formulae a last cask needs that aren't installed, with the " \
-       "command to finish them as asked first, as brew's cask installer would pour them, and the other last casks " \
-       "with the plain command" do
+    it "names, when Ctrl-C stops the formulae, the formulae a last cask needs that aren't installed, pointing to " \
+       "the commands that finish them as asked, then the cask, given once, as brew's cask installer would pour " \
+       "them, and the other last casks with the plain command" do
       stub_formula("cmake")
       stub_formula("app")
       stub_cask("app-for-cmake", nil, stanzas: 'depends_on formula: "cmake"')
       stub_cask("iterm2", installed_stanzas: 'uninstall quit: "com.iterm2"')
-      allow(Timed::Runner).to receive(:run).and_raise(Interrupt)
+      allow(Timed::Runner).to receive(:stream) do |argv, **|
+        brew_calls << argv
+        Process.kill("INT", Process.pid)
+        false
+      end
       expect { run_command("--yes", "--keep-tmp", "--skip-post-install", "cmake", "app", "app-for-cmake", "iterm2") }
         .to raise_error(Interrupt).and output(<<~EOS).to_stderr
+          Warning: Interrupted; not finished or logged: cmake app
+          To finish, run:
+            brew install-timed --keep-tmp --skip-post-install cmake app
+            brew install --cask app-for-cmake
           Warning: Interrupted, so the casks to install after the formulae didn't run: app-for-cmake iterm2
           1 cask needs formulae of this run that aren't installed, which brew would
           install for it, but not as this run would:
           app-for-cmake: needs cmake
-          Finish those first with `brew install-timed --keep-tmp --skip-post-install cmake`, then install it with `brew install --cask app-for-cmake`.
+          The commands above finish those, then install it.
           Install the other later with `brew install --cask iterm2`.
         EOS
     end
@@ -974,7 +1248,8 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
       installs["app"] = %w[lib]
       failing << "lib"
-      expect { run_command("--yes", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
+      # Excluded, so not batched itself.
+      expect { run_command("--yes", "--exclude=lib", "app", "lib-app") }.to output(/^lib-app: needs lib$/).to_stderr
       expect(brew_calls).to eq([%w[install --formula --yes --display-times app]])
     end
 

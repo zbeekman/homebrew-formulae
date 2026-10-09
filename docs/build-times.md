@@ -36,7 +36,11 @@ its direct dependencies, which are logged on their own with `dependency_of`,
 the formula they were installed for; a dependency's own time leaves out its
 own dependencies the same way, so each second is counted once. It is never
 below 0. Builds logged before this was done have no `dependency_of`, and their
-times include their dependencies'.
+times include their dependencies'. A dependency that
+[`brew install-timed`](install-timed.md) installs or upgrades in a batch of its
+own is logged with `dependency_of` too, naming the first named formula in the
+batches that needs it, whose `brew install` would have installed it; its time
+is not part of that formula's, so nothing is left out of that.
 
 `brew build-times` is a command in this tap. Trust it once with
 `brew trust --command zbeekman/tap/build-times`, or trust the whole tap. See
@@ -372,7 +376,9 @@ mark, as the axis is the run's clock, not a build's length.
   when Homebrew first named it to its summary line, so they include the
   dependencies it installed after that; only its logged install time leaves
   them out. Builds logged without `dependency_of`, as older ones are, and
-  those whose parent isn't in their batch, are not nested.
+  those whose parent isn't in their batch, are not nested; the latter, such
+  as a dependency `brew install-timed` ran in a batch of its own, have their
+  parent after their name, e.g. `geos (for libspatialite)`.
 - The skipped formulae of a call after the batches follow its bars, with no
   bar. Those of the batches follow under `Skipped`, as the log doesn't say
   which batch skipped them.
@@ -451,9 +457,9 @@ time), the run's process and the batch's number, `batch_ended`, when the
 brew calls of its batch ended (a timestamp like `started`; not with a
 skipped formula, which brew wasn't given), `run`, that name up to
 `-batch`, the same for every build of the run, skipped formulae too, and, for
-a formula brew installed as another's dependency, `dependency_of`, the short
-name of that formula. Builds with the same `run` are of the same run, each in
-the batch its log names.
+a formula brew installed as another's dependency, or that `brew install-timed`
+batched as one, `dependency_of`, the short name of that formula. Builds with
+the same `run` are of the same run, each in the batch its log names.
 
 - Builds logged before `run` was added have none, so a build with a log is of
   the run its log's name gives. A skipped formula has no log, so one with no

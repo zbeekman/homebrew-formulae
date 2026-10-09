@@ -118,9 +118,7 @@ module Homebrew
         left_out = set + named.map(&:full_name) + exclude
         dependents = dependants.upgradeable.reject { |formula| left_out.include?(formula.full_name) }
         Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude, casks: casks_named,
-                                                                 dependents: dependents.map(&:full_name),
-                                                                 linkage:    (planned.any? || dependents.any?) &&
-                                                                   !Homebrew::EnvConfig.no_installed_dependents_check?)
+                                                                 dependents: dependents.map(&:full_name))
         # Brew installs a cask that isn't installed.
         installed, new_casks = casks.partition(&:installed?)
         run_dependencies = Timed::Command.run_dependencies(installers.values_at(*planned))
