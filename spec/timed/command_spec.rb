@@ -39,7 +39,7 @@ RSpec.describe Timed::Command do
 
     it "forwards none of the LLM flags, nor keeps them for the `-timed` commands it suggests" do
       options = %w[--llm-estimates --no-llm-estimates --llm-api-key-file=/key --llm-provider=openai
-                   --llm-url=https://example.com --llm-model=m --llm-timeout=300 --verbose]
+                   --llm-url=https://example.com --llm-model=m --llm-timeout=300 --llm-effort=low --verbose]
       forwarded = described_class.forward(options, conflicts:)
       expect([forwarded.preview, forwarded.formula, forwarded.cask, forwarded.own]).to eq([*[%w[--verbose]] * 3, []])
     end
@@ -96,11 +96,13 @@ RSpec.describe Timed::Command do
       runs = {
         "off"      => [{ "HOMEBREW_TIMED_LLM_URL" => url, "HOMEBREW_TIMED_LLM_MODEL" => "m" }, []],
         "variable" => [{ "HOMEBREW_TIMED_LLM_ESTIMATES" => "1", "HOMEBREW_TIMED_LLM_URL" => url,
-                         "HOMEBREW_TIMED_LLM_MODEL" => "m", "HOMEBREW_TIMED_LLM_TIMEOUT" => "90" }, []],
+                         "HOMEBREW_TIMED_LLM_MODEL" => "m", "HOMEBREW_TIMED_LLM_TIMEOUT" => "90",
+                         "HOMEBREW_TIMED_LLM_EFFORT" => "medium" }, []],
         "flags"    => [{}, ["--llm-estimates", "--llm-api-key-file=#{key_file}", "--llm-provider=anthropic",
-                            "--llm-url=#{url}", "--llm-model=qwen2.5:7b", "--llm-timeout=300"]],
+                            "--llm-url=#{url}", "--llm-model=qwen2.5:7b", "--llm-timeout=300", "--llm-effort=high"]],
         "unusable" => [{}, ["--llm-estimates"]],
         "timeout"  => [{}, ["--llm-estimates", "--llm-url=#{url}", "--llm-model=m", "--llm-timeout=0"]],
+        "effort"   => [{}, ["--llm-estimates", "--llm-url=#{url}", "--llm-model=m", "--llm-effort=High"]],
       }
       settings_by_run = runs.to_h do |label, (env, argv)|
         ENV.delete_if { |name, _| name.start_with?("HOMEBREW_TIMED_LLM_") }
@@ -109,7 +111,7 @@ RSpec.describe Timed::Command do
         described_class.define_flags(parser)
         settings = begin
           described_class.llm_settings(parser.parse(argv))&.then do |found|
-            [found.provider, found.url.to_s, found.model, found.key&.value, found.timeout]
+            [found.provider, found.url.to_s, found.model, found.key&.value, found.timeout, found.effort]
           end
         rescue UsageError => e
           e.message
@@ -118,10 +120,11 @@ RSpec.describe Timed::Command do
       end
       expect(settings_by_run).to eq(
         "off"      => nil,
-        "variable" => ["openai", url, "m", nil, 90.0],
-        "flags"    => ["anthropic", url, "qwen2.5:7b", "sk-proj-FAKEOPENAIKEY0123456789", 300.0],
+        "variable" => ["openai", url, "m", nil, 90.0, "medium"],
+        "flags"    => ["anthropic", url, "qwen2.5:7b", "sk-proj-FAKEOPENAIKEY0123456789", 300.0, "high"],
         "unusable" => "Invalid usage: LLM estimates need `--llm-api-key-file` unless `--llm-url` is set.",
         "timeout"  => "Invalid usage: `--llm-timeout` must be a number of seconds over 0 and at most 86400.",
+        "effort"   => "Invalid usage: `--llm-effort` must be lowercase letters, e.g. `low`.",
       )
     end
   end

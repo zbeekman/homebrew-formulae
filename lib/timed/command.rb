@@ -91,16 +91,22 @@ module Timed
                   depends_on:  "--llm-estimates"
       parser.flag "--llm-model=",
                   description: "The model to ask, needed with `--llm-url`. " \
-                               "Defaults to `$HOMEBREW_TIMED_LLM_MODEL`, else a small model of the provider.",
+                               "Defaults to `$HOMEBREW_TIMED_LLM_MODEL`, else a model of the provider.",
                   depends_on:  "--llm-estimates"
       parser.flag "--llm-timeout=",
                   description: "Seconds to wait for the LLM's answer, including one retry, e.g. longer for a slow " \
                                "local server. Defaults to `$HOMEBREW_TIMED_LLM_TIMEOUT`, else 45.",
                   depends_on:  "--llm-estimates"
+      parser.flag "--llm-effort=",
+                  description: "How hard the model works on its answer, e.g. `low` or `high`: lowercase letters, " \
+                               "sent as given to any model. Defaults to `$HOMEBREW_TIMED_LLM_EFFORT`, else, on the " \
+                               "provider's API, `low` for `claude-haiku-5-5`, `claude-sonnet-5-5` and " \
+                               "`claude-opus-5-5`, `minimal` for `gpt-5-mini` and none for other models.",
+                  depends_on:  "--llm-estimates"
       (last ? PLAN_FLAGS : PLAN_FLAGS - ["last"]).each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
-    LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model llm_timeout].freeze
+    LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model llm_timeout llm_effort].freeze
     PLAN_FLAGS = T.let(["guess", "estimator", "last", "exclude", *LLM_FLAGS].freeze, T::Array[String])
     # `--no-llm-estimates` too, as `options` adds it.
     OWN_FLAGS = T.let([*PLAN_FLAGS, "no_llm_estimates", "no_stamp_receipts"].freeze, T::Array[String])
@@ -117,7 +123,7 @@ module Timed
 
       LLM.settings(key_file: args.public_send(:llm_api_key_file), provider: args.public_send(:llm_provider),
                    url: args.public_send(:llm_url), model: args.public_send(:llm_model),
-                   timeout: args.public_send(:llm_timeout))
+                   timeout: args.public_send(:llm_timeout), effort: args.public_send(:llm_effort))
       # rubocop:enable Style/SendWithLiteralMethodName
     end
 
