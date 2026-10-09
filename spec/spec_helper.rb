@@ -27,9 +27,8 @@ require "ipaddr"
 # connections (`TCPSocket.open`, as `Net::HTTP` uses, `TCPSocket.new` and
 # `Socket.tcp`). Only loopback and local files are allowed, and GitHub for an
 # example tagged `:needs_github`. A request from a thread that outlives its
-# example fails the example running then. Known gaps: a `--location` redirect
-# from an allowed host to another isn't seen, and `http_proxy`, `https_proxy`
-# and `ALL_PROXY` from the developer's shell aren't cleared.
+# example fails the example running then. Known gap: a `--location` redirect
+# from an allowed host to another isn't seen.
 module NetworkGuard
   # An `Exception`, so no `rescue` of a `StandardError` in brew hides it.
   class Blocked < Exception; end # rubocop:disable Lint/InheritException

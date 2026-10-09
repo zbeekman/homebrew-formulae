@@ -20,6 +20,10 @@ RSpec.describe "the spec harness", type: :system do
     expect(File.basename(Dir.home)).to start_with("homebrew-tap-specs-")
   end
 
+  it "runs without the proxy variables of the shell, which curl would send even a `localhost` request to" do
+    expect(ENV.keys.grep(/\A(?:http|https|ftp|all)_proxy\z/i)).to be_empty
+  end
+
   it "checks Sorbet signatures at runtime" do
     not_a_number = T.let("1", T.untyped) # hides the mistake from the static check
     expect { HarnessSpec::SigProbe.new.double(not_a_number) }.to raise_error(TypeError)
