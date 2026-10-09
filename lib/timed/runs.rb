@@ -310,7 +310,10 @@ module Timed
     sig { params(builds: T::Array[Build]).returns(T::Array[[Build, String]]) }
     def self.nest(builds)
       names = builds.map(&:name)
-      children = builds.group_by { |build| build.dependency_of if names.include?(build.dependency_of) }
+      children = builds.group_by do |build|
+        parent = build.dependency_of
+        parent if parent != build.name && names.include?(parent)
+      end
       rows = T.let([], T::Array[[Build, String]])
       [*children.fetch(nil, []), *builds].each { |build| add_row(build, 0, children, rows) }
       rows

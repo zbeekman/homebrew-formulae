@@ -279,6 +279,12 @@ RSpec.describe Timed::Runs do
       expect(names).to eq([["Batch 1", ["x", "a", "└ c", "└ b", "y", "s"]], ["Batch 2", ["z"]]])
     end
 
+    it "keeps a build that names itself as its parent flat, in order of start" do
+      run = run_of(build, build(name: "s", started: 5.0, dependency_of: "s"), build(name: "b", started: 10.0))
+      expect(described_class.timeline(run, 1, width: 57, paint: plain).fetch(1).last.map { |line| line[0, 7].to_s })
+        .to eq(["a      ", "s      ", "b      "])
+    end
+
     it "widens the name column for the indent of a dependency's name" do
       run = run_of(build, build(name: "b", dependency_of: "a"), build(name: "longest", dependency_of: "b"))
       expect(described_class.timeline(run, 1, width: 80, paint: plain).fetch(1).last.map { |line| line[0, 18] })
