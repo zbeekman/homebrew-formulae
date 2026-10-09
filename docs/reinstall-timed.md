@@ -23,11 +23,15 @@ Unlike `brew install` and `brew upgrade`, `brew reinstall` doesn't auto-update
 first, and neither does `brew reinstall-timed`. It prints what
 `brew reinstall` would reinstall, with the dependencies it would install or
 upgrade and the outdated dependents it would upgrade, as `brew reinstall`
-prints them before asking, then the order with the estimates. It then asks for
-confirmation once, under `brew reinstall`'s rules: only if Homebrew would also
-install or upgrade dependencies of the formulae, or upgrade outdated dependents
-of them, or install dependencies of the casks. Without a terminal it carries on
-without asking, as `brew reinstall` does.
+prints them before asking, then the order with the estimates, followed by
+those outdated dependents it upgrades after the formulae (see Running). It then
+asks for confirmation once, under `brew reinstall`'s rules: only if Homebrew
+would also install or upgrade dependencies of the formulae, or upgrade outdated
+dependents of them, or install dependencies of the casks. Unlike
+`brew reinstall`, it also asks when it reinstalls no formula (e.g. every formula
+named is pinned) but would upgrade outdated dependents of the named formulae,
+which `brew reinstall` then upgrades without asking. Without a terminal it
+carries on without asking, as `brew reinstall` does.
 
 Pinned formulae and casks are reported and left out, and unknown names are
 reported at the end and make the command fail, all as `brew reinstall` does.
@@ -50,6 +54,38 @@ not by its name. With `--debug`, Homebrew's
 interactive debugger is turned off (`$HOMEBREW_DISABLE_DEBREW`), as its prompt
 couldn't be answered.
 
+The call runs without Homebrew's installed-dependents check
+(`$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`), and without any of Homebrew's
+hints about environment variables (`$HOMEBREW_NO_ENV_HINTS`): that check looks
+for dependents with broken linkage only after it has upgraded some outdated
+dependents, so a reinstall that changes a keg (e.g. a source build with other
+options) could leave a dependent's linkage broken without a word. Instead, the
+command does what that check does after the call, as
+[`brew install-timed`](install-timed.md#running) does after its batches:
+
+- It upgrades the outdated dependents that Homebrew's check finds for the named
+  formulae not given to `--exclude`, including pinned ones, which
+  `brew reinstall` refuses to reinstall but checks; so it does this even when
+  it reinstalls no formula (e.g. every formula named is pinned) and there is
+  no call, as `brew reinstall` does. It leaves out the named formulae, as
+  `brew reinstall` does, and those given to `--exclude`. It runs
+  `brew upgrade --formula --yes --display-times` *`options`* *`formula`* ...
+  with the options `brew reinstall` gives them, as there.
+- It then checks the installed dependents of the formulae the run installed for
+  broken library linkage, even if no dependent was upgraded, and reinstalls the
+  broken ones from source, each with its own
+  `brew reinstall --formula --yes --display-times --build-from-source`
+  *`options`* *`formula`*, as there.
+
+Both run even when a failed build has stopped `brew reinstall` (see below),
+where Homebrew does neither, as the formulae reinstalled before it may have
+broken their dependents' linkage; a dependent that needs a formula that failed
+or wasn't reinstalled is left alone. Whatever they leave undone or can't do
+(e.g. a pinned or outdated broken dependent) is named with the command that
+finishes it, as there. With `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` set by
+the user, neither runs, as Homebrew then does neither, and the call runs with
+the user's setting (with Homebrew's warning about it).
+
 Homebrew's output and errors are shown as they arrive, in colour if the output
 is a terminal (unless `$HOMEBREW_NO_COLOR` is set), and kept without colours in
 `$HOMEBREW_LOGS/timed/`*`time`*`-`*`pid`*`-batch1.log`, where *`time`* is when
@@ -63,11 +99,14 @@ started in the same second keep their own logs. Then it:
   records an install time no earlier than the second `brew reinstall` started.
   If it doesn't, the formula failed, and so does the command, as with
   `brew reinstall`;
-- logs each formula Homebrew worked on, including the outdated dependents it
-  upgraded alongside, in the log shown by [`brew build-times`](build-times.md),
-  with `reinstall`, the run and the run's log. A formula's logged install time
-  leaves out the dependencies Homebrew installed for it, which are logged with
-  `dependency_of` (see [`brew build-times`](build-times.md));
+- logs each formula Homebrew worked on, including any dependencies it installed
+  alongside, in the log shown by [`brew build-times`](build-times.md), with
+  `reinstall`, the batch (`main`), the run and the run's log; the outdated
+  dependents upgraded after the call are logged with `upgrade` and
+  `dependents`, and the dependents with broken linkage with `reinstall` and
+  `linkage`. A formula's logged install time leaves out the dependencies
+  Homebrew installed for it, which are logged with `dependency_of` (see
+  [`brew build-times`](build-times.md));
 - adds the times to the install receipt of each keg Homebrew installed, under
   `build_times`, unless `--no-stamp-receipts` is given.
 
@@ -87,16 +126,21 @@ reinstalled, and runs Homebrew's periodic cleanup, unless
 
 Ctrl-C stops Homebrew too. The command waits for it to exit, then logs and
 stamps the formulae that Homebrew finished (with build and wall times, but no
-install time), lists the rest, which are not logged, and exits with status 130,
-as Homebrew does, even if Homebrew finished anyway. The casks of the last call
-then don't run: a warning names them, with the command to reinstall them
-later. One that needs a formula of the run that isn't installed is named with
-it, and with the `brew reinstall-timed` command for the named formulae that
-bring it in, to run first, as Homebrew would install that formula for the cask
-without the options given for it. That command keeps the formula options it
-was given, and its `--exclude` and `--no-stamp-receipts`; it has no `--yes`,
-so it asks as usual, and no `--guess`, `--estimator` or LLM options, which only
-shape the plan.
+install time), lists the rest, which are not logged, works out the outdated
+dependents and broken ones still to see to, without upgrading or reinstalling
+anything, and names them with the commands that finish them, as
+[`brew install-timed`](install-timed.md#running) does. It exits with status
+130, as Homebrew does, even if Homebrew finished anyway. Ctrl-C while it
+downloads the outdated dependents' bottle manifests, before the call, stops the
+run with a warning that the batches (here, the call) didn't run. The casks of
+the last call then don't run either: a warning names them, with the command to
+reinstall them later. One that needs a formula of the run that isn't installed
+is named with it, and with the `brew reinstall-timed` command for the named
+formulae that bring it in, to run first, as Homebrew would install that formula
+for the cask without the options given for it. That command keeps the formula
+options it was given, and its `--exclude` and `--no-stamp-receipts`; it has no
+`--yes`, so it asks as usual, and no `--guess`, `--estimator` or LLM options,
+which only shape the plan.
 
 ## Casks
 
@@ -129,12 +173,12 @@ given. The casks of the first call, before the formulae, have been reinstalled
 by then; those of the last call, after the formulae, don't run: a warning
 names them, with the command to reinstall them later, as after Ctrl-C. After
 any other failure Homebrew carries on to the casks, and so does the command,
-as it does after a failed build of a dependent that Homebrew rebuilds or
-upgrades alongside, or a failed post-install step. Homebrew prints
-the installation times as it finishes, if it installed anything, so then it
-didn't stop. Otherwise the command takes brew as stopped when it never started
-a formula it was given (more of them than downloads it couldn't tie to a
-formula failed), or when the call's last formula printed the end of its build
+as it does after a failed post-install step. The last call comes after the
+calls for outdated dependents and broken linkage, which it may need. Homebrew
+prints the installation times as it finishes, if it installed anything, so then
+it didn't stop. Otherwise the command takes brew as stopped when it never
+started a formula it was given (more of them than downloads it couldn't tie to
+a formula failed), or when the call's last formula printed the end of its build
 log, or with `--verbose` its `did not build` error. So when nothing in the call
 was installed, a formula brew left out before installing it, for a failed
 check, still makes it skip the last casks, with its warning. Without
@@ -153,8 +197,12 @@ A heading gives the number of formulae, in one batch, and the estimated total.
 A row per formula, in the order they will be reinstalled, shows `pour` or
 `build` and its estimate. An estimate ending in `?` has no history of that kind
 of build to go on, as in `brew build-times stats`, and one ending in `*` is
-from `--guess` or an LLM (`--llm-estimates`). Then come the casks to reinstall
-first, and those to reinstall last, each with why.
+from `--guess` or an LLM (`--llm-estimates`). The outdated dependents it
+upgrades after the formulae follow, under `Then upgrade outdated dependents`,
+then
+`Then check dependents for broken linkage, and reinstall broken ones from source`
+(unless `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set). Then come the casks
+to reinstall first, and those to reinstall last, each with why.
 
 ## Options
 
@@ -182,7 +230,7 @@ itself, once for the whole run. It adds:
 `--exclude`
 
 : Comma-separated formulae to leave out of the run. Homebrew may still
-  install or upgrade them as dependencies or dependents of the others.
+  install or upgrade them as dependencies of the others.
 
 `--guess`, `--estimator` and `--exclude` plan formulae only, so they can't be
 used with `--cask`, and each name must be a formula.

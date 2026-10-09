@@ -648,10 +648,12 @@ RSpec.describe "brew internals", type: :system do
       expect(options & %w[-n --dry-run]).to eq([])
     end
 
-    it "asks by `Install.formulae_ask_prompt_needed?`, through `Install.ask_formulae`, unless `--no-ask`" do
+    it "asks by `Install.formulae_ask_prompt_needed?`, through `Install.ask_formulae`, unless `--no-ask`, but " \
+       "never when it reinstalls no formula, where `brew reinstall-timed` asks anyway" do
       reinstall = brew_source("cmd/reinstall.rb")
-      ask_formulae = brew_source("install.rb")[/^      def ask_formulae\(.*?^      end$/m]
-      prompt_check = "return if prompt && !formulae_ask_prompt_needed?(formulae_installer, dependants)"
+      ask_formulae = brew_source("install.rb")[/^      def ask_formulae\(.*?^      end$/m].to_s
+      prompt_check = "return if formulae_installer.empty?\n        " \
+                     "return if prompt && !formulae_ask_prompt_needed?(formulae_installer, dependants)"
       expect([reinstall.include?("ask = !args.no_ask?"),
               reinstall.match?(/Install\.ask_formulae\(\n\s+formulae_installers,\n\s+dependants,\n\s+action:\s+
                                 "reinstallation",/x),
@@ -667,6 +669,18 @@ RSpec.describe "brew internals", type: :system do
               ),
               brew_source("formula_installer.rb").include?("keg.optlink(verbose: verbose?, overwrite: overwrite?)")])
         .to eq([true, true, true])
+    end
+
+    it "checks the outdated dependents of each named formula, pinned ones it refuses too, even when it reinstalls " \
+       "none, and upgrades those not named, as `brew reinstall-timed` does" do
+      reinstall = brew_source("cmd/reinstall.rb")
+      installers = brew_source("upgrade.rb")[/^      def dependent_formula_installers\(.*?^      end$/m].to_s
+      refused = /reinstall_contexts = formulae\.filter_map do \|formula\|\n\s+if formula\.pinned\?/
+      expect([reinstall.match?(/unless formulae\.empty\?\n(?:.*\n)*?\s+#{refused}/),
+              reinstall.match?(/Upgrade\.dependants\(\n\s+formulae,/),
+              reinstall.match?(/Upgrade\.upgrade_dependents\(\n\s+dependants, formulae,/),
+              installers.include?("deps.upgradeable.reject { |formula| formula_names.include?(formula.full_name) }")])
+        .to eq([true, true, true, true])
     end
 
     it "stops at a failed build, where `brew install` and `brew upgrade` carry on" do

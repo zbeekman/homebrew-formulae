@@ -67,8 +67,11 @@ brew build-times stats                        # the times estimates come from
   or cask in the run. Without a terminal (`/dev/tty` can't be opened) and with
   `$SUDO_ASKPASS` unset, casks that may need `sudo` are skipped, with a warning
   naming them and the command to run them later.
-- Each command's page above says what it runs, including what happens to the
-  installed dependents of the formulae it installs, upgrades or reinstalls.
+- After the formulae, each upgrades the outdated dependents Homebrew's own
+  check would, then checks the installed dependents of what it installed for
+  broken linkage and reinstalls broken ones from source, unless
+  `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set. Each command's page above
+  says what it runs.
 
 ## LLM estimates
 A formula built from source with no history in `brew build-times` is estimated

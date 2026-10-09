@@ -99,15 +99,30 @@ module Homebrew
           estimates: estimates.transform_values(&:seconds),
           exclude:,
         )
+        planned = result.batches.flat_map(&:names)
 
+        # Brew's installed-dependents check of the named formulae, as named
+        # (`Upgrade.dependants`), pinned ones too, as `brew reinstall` checks
+        # those it refuses, even if it reinstalls nothing, but not those given
+        # to `--exclude`.
+        checked = named.select do |formula|
+          formula.pinned? ? exclude.exclude?(formula.full_name) : planned.include?(formula.latest_formula.full_name)
+        end
         # What `brew reinstall` prints before asking, whether or not it would.
-        dependants = Upgrade.dependants(named, flags: args.flags_only, **installer_options)
+        dependants = Upgrade.dependants(checked, flags: args.flags_only, **installer_options)
         Install.ask_formulae(installers.values, dependants, action: "reinstallation", prompt: false,
                              flags: args.flags_only, **installer_options)
-        Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude, casks: casks_named)
+        # The outdated dependents brew's check finds are upgraded after the
+        # formulae, but never a named formula, as `brew reinstall` leaves those
+        # out (`Upgrade.dependent_formula_installers`), nor an excluded one.
+        left_out = set + named.map(&:full_name) + exclude
+        dependents = dependants.upgradeable.reject { |formula| left_out.include?(formula.full_name) }
+        Timed::Command.show_plan("reinstall", result, estimates, excluded: set & exclude, casks: casks_named,
+                                                                 dependents: dependents.map(&:full_name),
+                                                                 linkage:    (planned.any? || dependents.any?) &&
+                                                                   !Homebrew::EnvConfig.no_installed_dependents_check?)
         # Brew installs a cask that isn't installed.
         installed, new_casks = casks.partition(&:installed?)
-        planned = result.batches.flat_map(&:names)
         run_dependencies = Timed::Command.run_dependencies(installers.values_at(*planned))
         cask_plan = Timed::Command.cask_plan({ reinstall: installed, install: new_casks },
                                              in_run: planned, run_dependencies:, zap: args.zap?,
@@ -115,12 +130,14 @@ module Homebrew
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
         Timed::Command.show_casks("reinstall", cask_plan, named: args.named, flags: forwarded.cask)
-        return if args.dry_run? || (result.batches.empty? && cask_plan.first.empty? && cask_plan.last.empty?)
+        return if args.dry_run? || [result.batches, dependents, cask_plan.first, cask_plan.last].all?(&:empty?)
 
         # Once, by brew's rules: if brew would install or upgrade dependencies
         # of the formulae, or upgrade outdated dependents of them, or install
-        # dependencies of the casks. Exits on "n"; returns false without a
-        # terminal, where brew carries on unasked.
+        # dependencies of the casks. Unlike brew (`Install.ask_formulae`),
+        # also when it reinstalls no formula, as the dependents of pinned ones
+        # are still upgraded. Exits on "n"; returns false without a terminal,
+        # where brew carries on unasked.
         cask_names = casks.map(&:full_name)
         if !args.no_ask? && (Install.formulae_ask_prompt_needed?(installers.values, dependants) ||
            Install.ask_prompt_needed?(planned_names: cask_names + cask_dependencies, requested_names: cask_names))
@@ -134,13 +151,24 @@ module Homebrew
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
                                       roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
                                       needs:   run_dependencies)
-        outcome = if result.batches.any?
+        outcome = if result.batches.any? || dependents.any?
+          # The outdated dependents and broken linkage are seen to before the
+          # last casks, which may need them, even with no call, as
+          # `brew reinstall` upgrades those of pinned formulae it refuses.
+          # Unlike `brew reinstall`, also after a failed build has stopped it,
+          # as the formulae reinstalled before that may have broken their
+          # dependents' linkage.
+          after = lambda do
+            Timed::Command.after(dependents, checked, args:, excluded: exclude, flags: forwarded.formula,
+                                                      own: forwarded.own)
+          end
           # One call, so nothing is skipped for a failure, but a failed build
           # ends `brew reinstall` before the formulae after it.
-          Timed::Command.before_last_casks("reinstall", last, named: args.named, flags: forwarded.cask, run:) do
+          Timed::Command.before_last_casks("reinstall", last, named: args.named, flags: forwarded.cask, run:,
+                                                              after:) do |calls|
             Timed::Runner.run(result.batches, verb: "reinstall", flags: forwarded.formula, formulae:, deps: {},
                                               stamp: !args.no_stamp_receipts?, stops_at_failure: true,
-                                              succeeded: Timed::Runner::REINSTALLED, arguments:)
+                                              succeeded: Timed::Runner::REINSTALLED, arguments:, after: calls)
           end
         end
         # What stops `brew reinstall` early, such as a failed build, stops it
