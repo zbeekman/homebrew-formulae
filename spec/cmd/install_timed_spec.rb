@@ -843,6 +843,15 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         .to eq([["install", "1"], ["upgrade", "1"], ["install", nil]])
     end
 
+    it "gives the named formulae right after a dependency batch a plain `brew install`, with brew's cleanup" do
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib])
+      run_command("--yes", "app")
+      expect(brew_calls.zip(brew_envs.map { |env| env["HOMEBREW_NO_INSTALL_CLEANUP"] }))
+        .to eq([[%w[install --formula --yes --display-times --as-dependency lib], "1"],
+                [%w[install --formula --yes --display-times app], nil]])
+    end
+
     it "installs a dependency in a call after those it needs, so brew never installs it without, or against " \
        "the old version of, one that failed, and says how to finish", :aggregate_failures do
       stub_formula("base")

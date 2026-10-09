@@ -834,7 +834,7 @@ RSpec.describe "brew internals", type: :system do
       ])
     end
 
-    it "work out the dependencies, in `compute_dependencies`, from the bottle manifest when pouring, then " \
+    it "works out the dependencies, in `compute_dependencies`, from the bottle manifest when pouring, then " \
        "the requirements, then `expand_dependencies`, which `install` does again, uncached, before installing" do
       install = installer_statements("install")
       expect([installer_statements("compute_dependencies"), install.include?("unless ignore_deps?"),
