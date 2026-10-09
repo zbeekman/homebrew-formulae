@@ -621,6 +621,16 @@ RSpec.describe "brew internals", type: :system do
       .to eq("llvm" => 2811.4, "a-formula-with-a-long-name" => 123456.789)
   end
 
+  it "times a formula's install from before it installs its dependencies, each named after the full name of the " \
+     "formula it is a dependency of, so `Timed::Runner.parse` takes their times from its time" do
+    install = brew_source("formula_installer.rb")[/^  def install\n.*?^  end$/m].to_s
+    expect([install.match?(/start_time = Time\.now\n.*install_dependencies\(deps\)\n.*end_time - start_time\)/m),
+            install.include?("Homebrew.messages.package_installed(formula.name, end_time - start_time)"),
+            brew_source("formula_installer.rb")
+              .include?("oh1 \"\#{action} \#{formula.full_name} dependency: \#{Formatter.identifier(dep.name)} \"")])
+      .to eq([true, true, true])
+  end
+
   describe "`Dependency.expand`" do
     it "names each dependency it keeps by its formula's full name, and prunes by `action` only without a block" do
       expand = brew_source("dependency.rb")[/^    def expand\(.*?^    end$/m]

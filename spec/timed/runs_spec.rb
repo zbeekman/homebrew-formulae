@@ -28,9 +28,10 @@ RSpec.describe Timed::Runs do
 
   def run_of(*builds) = Timed::Runs::Run.new(id: "20261001-100000-1", builds:)
 
-  def build(name: "a", status: "built", label: "main", batch: 1, started: 0.0, seconds: 10.0, ended: nil)
+  def build(name: "a", status: "built", label: "main", batch: 1, started: 0.0, seconds: 10.0, ended: nil,
+            dependency_of: nil)
     Timed::Runs::Build.new(name:, status:, verb: "install", label:, batch:, started: Time.at(started).utc, seconds:,
-                           batch_ended: (Time.at(ended).utc if ended))
+                           batch_ended: (Time.at(ended).utc if ended), dependency_of:)
   end
 
   describe ".all" do
@@ -100,11 +101,19 @@ RSpec.describe Timed::Runs do
         .to eq([["20261001-000000-2", ["f1"]], ["20261001-235959-1", ["f0"]]])
     end
 
-    it "reads a status, verb or batch label that isn't a string, as nothing checks them, as text" do
-      build = { "status" => nil, "verb" => 1, "batch" => 2, "started" => "2026-10-01T10:00:00Z",
+    it "reads a status, verb, batch label or parent that isn't a string, as nothing checks them, as text" do
+      build = { "status" => nil, "verb" => 1, "batch" => 2, "dependency_of" => 3, "started" => "2026-10-01T10:00:00Z",
                 "log"    => "/logs/20261001-100000-1-batch1.log" }
       read = described_class.all(log_of(build)).fetch(0).builds.fetch(0)
-      expect([read.status, read.verb, read.label]).to eq(["", "1", "2"])
+      expect([read.status, read.verb, read.label, read.dependency_of]).to eq(["", "1", "2", "3"])
+    end
+
+    it "reads the formula a build was a dependency of, if logged" do
+      builds = [nil, "f0"].map do |parent|
+        { "status" => "built", "started" => "2026-10-01T10:00:00Z", "dependency_of" => parent,
+          "log" => "/logs/20261001-100000-1-batch1.log" }.compact
+      end
+      expect(described_class.all(log_of(*builds)).fetch(0).builds.map(&:dependency_of)).to eq([nil, "f0"])
     end
 
     it "takes a wall time of 0 with a longer install time as unknown, as logged when brew's dependency heading " \
@@ -244,6 +253,36 @@ RSpec.describe Timed::Runs do
       run = run_of(build, build(name: "b", started: 15.0, seconds: nil))
       expect(described_class.timeline(run, 1, width: 57, paint: plain).fetch(1))
         .to eq(["Batch 1", ["a        built      0m10s  #{"█" * 20}", "b        built          -  #{" " * 29}█"]])
+    end
+
+    it "puts a dependency's row after its parent's, marked `└`, two more spaces in for each level" do
+      run = run_of(build(seconds: 30.0), build(name: "b", started: 10.0, seconds: 10.0, dependency_of: "a"),
+                   build(name: "c", started: 12.0, seconds: 3.0, dependency_of: "b"))
+      expect(described_class.timeline(run, 1, width: 57, paint: plain).fetch(1))
+        .to eq(["Batch 1", ["a        built      0m30s  #{"█" * 30}",
+                            "└ b      built      0m10s  #{" " * 10}#{"█" * 10}",
+                            "  └ c    built      0m03s  #{" " * 12}#{"█" * 3}"]])
+    end
+
+    # Brew names a core formula it installs, rather than upgrades or
+    # reinstalls, after its dependencies, so a dependency can start first.
+    it "nests a dependency under its parent even if it started first, in order of start, and leaves flat those " \
+       "with no parent in their batch, as older entries have none, and one that names itself" do
+      run = run_of(build(name: "x"), build(name: "c", started: 1.0, dependency_of: "a"), build(started: 5.0),
+                   build(name: "y", started: 6.0, dependency_of: "gone"),
+                   build(name: "b", started: 7.0, dependency_of: "a"),
+                   build(name: "s", started: 8.0, dependency_of: "s"),
+                   build(name: "z", batch: 2, started: 20.0, dependency_of: "a"))
+      names = described_class.timeline(run, 1, width: 57, paint: plain).drop(1).map do |heading, lines|
+        [heading, lines.map { |line| line[0, 7].to_s.rstrip }]
+      end
+      expect(names).to eq([["Batch 1", ["x", "a", "└ c", "└ b", "y", "s"]], ["Batch 2", ["z"]]])
+    end
+
+    it "widens the name column for the indent of a dependency's name" do
+      run = run_of(build, build(name: "b", dependency_of: "a"), build(name: "longest", dependency_of: "b"))
+      expect(described_class.timeline(run, 1, width: 80, paint: plain).fetch(1).last.map { |line| line[0, 18] })
+        .to eq(["a            built", "└ b          built", "  └ longest  built"])
     end
 
     it "has no time axis for a run that only skipped formulae, as nothing ran" do

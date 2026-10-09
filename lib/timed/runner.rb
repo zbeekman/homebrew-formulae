@@ -557,12 +557,12 @@ module Timed
     # (`Reinstall.reinstall_formula`), each install of a tap formula
     # (`Formula#print_tap_action`), and an install once its dependencies are
     # installed (`FormulaInstaller#install`); and where it starts on a
-    # dependency (`FormulaInstaller#install_dependency`), which newer brews
-    # follow with its version, e.g. `(4.5.1)` or `(1.7.5 -> 1.7.6)`. An
-    # install of a core formula with no dependencies to install has no
-    # heading.
+    # dependency (`FormulaInstaller#install_dependency`), after the full name
+    # of the formula it is a dependency of, which newer brews follow with its
+    # version, e.g. `(4.5.1)` or `(1.7.5 -> 1.7.6)`. An install of a core
+    # formula with no dependencies to install has no heading.
     HEADING = /\A==> (?:Upgrading|Installing|Reinstalling) (?<name>[^\s:]+)(?: from \S+| --\S.*| *)\z/
-    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)(?: \([^)]*\))?\z/
+    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) (?<parent>\S+) dependency: (?<name>\S+)(?: \([^)]*\))?\z/
 
     # Where brew pours a bottle, named `<name>--<version>…`
     # (`FormulaInstaller#pour`, `Bottle::Filename`).
@@ -620,8 +620,12 @@ module Timed
     # upgraded alongside the batch. `version` is the keg's, from brew's last
     # summary line for the formula or a failed bottle download; `status` is
     # `built` or `poured` from that summary line, else `failed`;
-    # `install_seconds` from the `Installation times` table
-    # (`--display-times`); `build_seconds` from that summary's `built in`;
+    # `dependency_of`, by short name, the formula brew installed it as a
+    # dependency of; `install_seconds` from the `Installation times` table
+    # (`--display-times`), less those of its direct dependencies there (but
+    # one of its own name), as brew's time for a formula includes theirs, and
+    # theirs their own, but never below 0; `build_seconds` from that
+    # summary's `built in`;
     # `problems` from errors printed while brew was working on the formula,
     # from where it names it to its summary line. `started` is the batch's
     # `started` plus when the formula was first named (the batch's start
@@ -672,6 +676,8 @@ module Timed
         if (match = HEADING.match(line) || DEPENDENCY_HEADING.match(line))
           @current = seen(match[:name].to_s, time)
           @release = false
+          parent = match.named_captures["parent"]
+          build(@current)["dependency_of"] = Utils.name_from_full_name(parent) if parent
         elsif (match = POURING.match(line))
           @current = seen(match[:name].to_s, @unclaimed || time)
           @release = false
@@ -702,12 +708,24 @@ module Timed
       sig { params(started: T.nilable(Time)).returns(T::Hash[String, BuildLog::Build]) }
       def builds(started)
         close_problem
+        # The times brew reported for each formula's direct dependencies,
+        # which its own time includes, as theirs include their own. One of
+        # the same name, in another tap, is the same formula to the log.
+        dependencies = Hash.new(0.0)
+        @builds.each do |name, build|
+          parent = build["dependency_of"]
+          next if parent.nil? || parent == name || build["install_seconds"].nil?
+
+          dependencies[parent] += build["install_seconds"]
+        end
         @builds.to_h do |name, build|
           first = @first_seen[name]
           finished = @finished[name]
+          seconds = build["install_seconds"]
           timing = {
-            "started"      => (started + (first || 0) if started)&.iso8601,
-            "wall_seconds" => ((finished - first).round(1) if first && finished),
+            "install_seconds" => ([seconds - dependencies[name], 0.0].max.round(3) if seconds),
+            "started"         => (started + (first || 0) if started)&.iso8601,
+            "wall_seconds"    => ((finished - first).round(1) if first && finished),
           }
           result = build.merge(timing).compact
           result["status"] ||= "failed"

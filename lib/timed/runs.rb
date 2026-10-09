@@ -50,6 +50,9 @@ module Timed
       # When the brew calls of its batch ended; nil for a skipped formula, or
       # one logged before the runner logged that.
       const :batch_ended, T.nilable(Time), default: nil
+      # The formula brew installed it as a dependency of; nil if none, or
+      # logged before the runner logged that.
+      const :dependency_of, T.nilable(String), default: nil
 
       sig { returns(T::Boolean) }
       def skipped? = status == "skipped"
@@ -217,27 +220,29 @@ module Timed
     # the header, which has the time axis from 0 to the run's length, unless
     # the run only skipped formulae, then one for each batch and call after
     # the batches, with a row for each formula: its name, its status, its
-    # time and its bar on the axis, painted by status, the call's skipped
-    # formulae last, with no bar, then the skipped formulae of the batches.
+    # time and its bar on the axis, painted by status, a dependency's after
+    # its parent's (`nest`), the call's skipped formulae last, with no bar,
+    # then the skipped formulae of the batches.
     sig {
       params(run: Run, number: Integer, width: Integer, paint: Plot::Paint)
         .returns(T::Array[[String, T::Array[String]]])
     }
     def self.timeline(run, number, width:, paint: Columns::PAINT)
+      nested = run.builds.chunk_while { |previous, build| section(previous) == section(build) }.map { nest(it) }
       # At least as wide as `formula`.
-      name_width = run.builds.map { |build| build.name.length }.push(7).max.to_i
+      name_width = nested.flatten(1).map { |_, name| name.length }.push(7).max.to_i
       columns = [[width, Plot::MIN_WIDTH].max - name_width - 20, MIN_COLUMNS].max
       length = run.length_text
       axis = "  0#{length.rjust(columns - 1)}" unless run.skipped_only?
       header = "#{heading("formula", name_width, paint)}  #{heading("status", 7, paint)}  " \
                "#{heading("time", 7, paint, right: true)}#{axis}"
-      sections = run.builds.chunk_while { |previous, build| section(previous) == section(build) }.map do |builds|
-        first = builds.fetch(0)
-        rows = builds.map do |build|
+      sections = nested.map do |builds|
+        first = builds.fetch(0).first
+        rows = builds.map do |build, name|
           style = Columns::STATUS_STYLES[build.status]
           seconds = build.seconds
           time = seconds ? BuildLog.format_duration(seconds) : "-"
-          row = "#{build.name.ljust(name_width)}  #{pad(build.status, 7, paint, style:)}  #{time.rjust(7)}"
+          row = "#{name.ljust(name_width)}  #{pad(build.status, 7, paint, style:)}  #{time.rjust(7)}"
           next row.rstrip if build.skipped?
 
           from = build.started - run.started
@@ -297,6 +302,35 @@ module Timed
     end
     private_class_method :section
 
+    # The builds of a section, in order, each with the name its row shows:
+    # a dependency's row follows its parent's, if the parent is in the
+    # section, marked `└`, two more spaces in for each level. A build whose
+    # parent isn't there, or that is its own parent, as two formulae of the
+    # same name in different taps would be, has its name alone.
+    sig { params(builds: T::Array[Build]).returns(T::Array[[Build, String]]) }
+    def self.nest(builds)
+      names = builds.map(&:name)
+      children = builds.group_by { |build| build.dependency_of if names.include?(build.dependency_of) }
+      rows = T.let([], T::Array[[Build, String]])
+      [*children.fetch(nil, []), *builds].each { |build| add_row(build, 0, children, rows) }
+      rows
+    end
+    private_class_method :nest
+
+    # Adds `build`, at `depth`, then its `children`, to `rows`, unless it is
+    # there already.
+    sig {
+      params(build: Build, depth: Integer, children: T::Hash[T.nilable(String), T::Array[Build]],
+             rows: T::Array[[Build, String]]).void
+    }
+    def self.add_row(build, depth, children, rows)
+      return if rows.any? { |row, _| row.equal?(build) }
+
+      rows << [build, depth.zero? ? build.name : "#{"  " * (depth - 1)}└ #{build.name}"]
+      children.fetch(build.name, []).each { |child| add_row(child, depth + 1, children, rows) }
+    end
+    private_class_method :add_row
+
     # By section, its skipped formulae last, then by start.
     sig { params(build: Build).returns([Integer, Integer, Integer, Time, String]) }
     def self.order(build)
@@ -315,7 +349,8 @@ module Timed
       # and so logged a dependency's wall time as 0.
       seconds = nil if seconds&.zero? && entry["install_seconds"].to_f.positive?
       Build.new(name:, status: entry["status"].to_s, verb: entry["verb"]&.to_s, label: entry["batch"]&.to_s,
-                batch: match && match[:batch].to_i, started:, seconds:, batch_ended: timestamp(entry["batch_ended"]))
+                batch: match && match[:batch].to_i, started:, seconds:, batch_ended: timestamp(entry["batch_ended"]),
+                dependency_of: entry["dependency_of"]&.to_s)
     end
     private_class_method :build_from
 

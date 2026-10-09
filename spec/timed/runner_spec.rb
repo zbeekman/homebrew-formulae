@@ -189,6 +189,31 @@ RSpec.describe Timed::Runner do
         .to eq(log(1, pid: 101) => "Upgrading lib", log(1, pid: 202) => "Upgrading app")
     end
 
+    it "logs a dependency with its parent, and the parent with only its own install time, which it stamps",
+       :aggregate_failures do
+      stub_formula("app")
+      allow(described_class).to receive(:stream) do |_argv, &on_line|
+        on_line.call("==> Upgrading app\n")
+        on_line.call("==> Installing app dependency: lib (2.0)\n")
+        %w[lib app].each do |name|
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          on_line.call("🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n")
+        end
+        ["==> Installation times\n", "lib   9.500 s\n", "app  20.000 s\n"].each { |line| on_line.call(line) }
+        true
+      end
+      run([batch("app")])
+      logged = builds.transform_values do |entries|
+        entries.map { |entry| entry.slice("install_seconds", "dependency_of") }
+      end
+      expect(logged).to eq("lib" => [{ "install_seconds" => 9.5, "dependency_of" => "app" }],
+                           "app" => [{ "install_seconds" => 10.5 }])
+      expect(JSON.parse((HOMEBREW_CELLAR/"app/2.0/INSTALL_RECEIPT.json").read)["build_times"])
+        .to include("install_seconds" => 10.5)
+    end
+
     it "logs with each build, the skipped formulae too, its run: the start of the name of the run's logs" do
       %w[lib tool app].each { |name| stub_formula(name) }
       fake_brew(failing: %w[lib])
@@ -1088,12 +1113,13 @@ RSpec.describe Timed::Runner do
           "gumbo-parser" => built("0.14.1", 39.0, 40.0),
           "virtualenv"   => built("21.13.0", 87.201, 88.0),
           "glances"      => built("4.5.7", 212.655, 214.0),
-          "asciidoctor"  => poured("2.0.26", 1.411),
-          "cpp-httplib"  => poured("0.58.0", 1.091),
-          "doctest"      => poured("2.5.3", 1.233),
-          "span-lite"    => poured("0.11.0", 1.046),
-          "tl-expected"  => poured("1.3.1", 1.08),
-          "ccache"       => built("4.14.1", 96.435, 89.0),
+          "asciidoctor"  => poured("2.0.26", 1.411).merge("dependency_of" => "ccache"),
+          "cpp-httplib"  => poured("0.58.0", 1.091).merge("dependency_of" => "ccache"),
+          "doctest"      => poured("2.5.3", 1.233).merge("dependency_of" => "ccache"),
+          "span-lite"    => poured("0.11.0", 1.046).merge("dependency_of" => "ccache"),
+          "tl-expected"  => poured("1.3.1", 1.08).merge("dependency_of" => "ccache"),
+          # Brew's 96.435 s, less its dependencies' 5.861 s.
+          "ccache"       => built("4.14.1", 90.574, 89.0),
           "hunspell"     => built("1.7.4", 67.421, 68.0),
           "liquid-dsp"   => built("1.8.3", 37.721, 38.0),
           "qpdf"         => built("12.4.2", 106.434, 108.0),
@@ -1217,12 +1243,13 @@ RSpec.describe Timed::Runner do
         ["🍺  /prefix/Cellar/lib/2.0: 12 files, 1.1MB, built in 1 minute 1 second\n", 62.25],
         ["==> Installation times\n", 62.5],
         ["dep                       3.200 s\n", 62.5],
-        ["lib                      58.100 s\n", 62.5],
+        ["lib                      61.300 s\n", 62.5],
       ]
+      # A parent's wall time includes its dependencies, as its bar spans them.
       expect(described_class.parse(lines, started: Time.new(2026, 9, 25, 11, 23, 0, "-04:00"))).to eq(
         "lib" => { "version" => "2.0", "status" => "built", "install_seconds" => 58.1, "build_seconds" => 61.0,
                    "started" => "2026-09-25T11:23:00-04:00", "wall_seconds" => 61.8 },
-        "dep" => { "version" => "1.0", "status" => "poured", "install_seconds" => 3.2,
+        "dep" => { "version" => "1.0", "status" => "poured", "install_seconds" => 3.2, "dependency_of" => "lib",
                    "started" => "2026-09-25T11:23:02-04:00", "wall_seconds" => 3.5 },
       )
     end
@@ -1237,6 +1264,80 @@ RSpec.describe Timed::Runner do
       ]
       expect(described_class.parse(lines).transform_values { |build| build["wall_seconds"] })
         .to eq("subversion" => nil, "swig" => 94.0, "apr" => 4.0)
+    end
+
+    # Brew's time for a formula runs from before it installs the formula's
+    # dependencies (`FormulaInstaller#install`), and each dependency's own
+    # install does the same for any dependencies it installs itself.
+    it "logs a dependency's parent, by its short name, and leaves only the parent's own time in its install time, " \
+       "counting each second once however deep the dependencies" do
+      dependency = ->(parent, name) { "==> Installing #{parent} dependency: #{name} (1.0)" }
+      summary = ->(name, built = nil) { "🍺  /prefix/Cellar/#{name}/1.0: 4KB#{", built in #{built}" if built}" }
+      times = ->(**seconds) { ["==> Installation times", *seconds.map { |name, value| "#{name}  #{value} s" }] }
+      outputs = {
+        "one dependency"                => [
+          "==> Upgrading subversion", dependency.call("subversion", "swig"),
+          summary.call("swig", "1 minute 34 seconds"), "==> Installing subversion",
+          summary.call("subversion", "3 minutes 35 seconds"), *times.call(swig: "92.326", subversion: "308.073")
+        ],
+        "two poured, of a tap formula"  => [
+          "==> Installing dependencies for user/tap/app: b and c", dependency.call("user/tap/app", "b"),
+          summary.call("b"), dependency.call("user/tap/app", "c"), summary.call("c"),
+          "==> Installing user/tap/app", summary.call("app", "50 seconds"),
+          *times.call(b: "1.250", c: "2.500", app: "60.000")
+        ],
+        # Brew installs a chain in dependency order, each named as the top
+        # formula's.
+        "chain, as brew names it"       => [
+          dependency.call("a", "c"), summary.call("c", "10 seconds"), dependency.call("a", "b"),
+          summary.call("b", "20 seconds"), "==> Installing a", summary.call("a", "1 minute 10 seconds"),
+          *times.call(c: "10.000", b: "20.000", a: "100.000")
+        ],
+        # b's time includes c's, and a's includes b's.
+        "chain, each named as its own"  => [
+          dependency.call("a", "b"), dependency.call("b", "c"), summary.call("c", "10 seconds"), "==> Installing b",
+          summary.call("b", "20 seconds"), "==> Installing a", summary.call("a", "1 minute 10 seconds"),
+          *times.call(c: "10.000", b: "30.000", a: "100.000")
+        ],
+        # A failed dependency fails its parent, and neither has a time.
+        "failed dependency"             => [
+          "==> Upgrading x", summary.call("x", "5 seconds"), "==> Upgrading a", dependency.call("a", "b"),
+          "Error: b: it failed", *times.call(x: "5.000")
+        ],
+        "dependency longer than parent" => [
+          dependency.call("a", "b"), summary.call("b"), "==> Installing a", summary.call("a"),
+          *times.call(b: "2.000", a: "1.500")
+        ],
+        # Two formulae of the same name in different taps, which the log
+        # can't tell apart, so it keeps the last time and takes none away.
+        "dependency of the same name"   => [
+          dependency.call("user/tap/foo", "foo"), summary.call("foo"), "==> Installing user/tap/foo",
+          summary.call("foo", "9 seconds"), "==> Installation times", "foo  2.000 s", "foo  9.000 s"
+        ],
+      }
+      parsed = outputs.transform_values do |lines|
+        described_class.parse(lines.map { |line| ["#{line}\n", nil] })
+                       .transform_values { |build| build.slice("install_seconds", "dependency_of") }
+      end
+      expect(parsed).to eq(
+        "one dependency"                => { "subversion" => { "install_seconds" => 215.747 },
+                                             "swig"       => { "install_seconds" => 92.326,
+                                                               "dependency_of"   => "subversion" } },
+        "two poured, of a tap formula"  => { "b"   => { "install_seconds" => 1.25, "dependency_of" => "app" },
+                                             "c"   => { "install_seconds" => 2.5, "dependency_of" => "app" },
+                                             "app" => { "install_seconds" => 56.25 } },
+        "chain, as brew names it"       => { "c" => { "install_seconds" => 10.0, "dependency_of" => "a" },
+                                             "b" => { "install_seconds" => 20.0, "dependency_of" => "a" },
+                                             "a" => { "install_seconds" => 70.0 } },
+        "chain, each named as its own"  => { "b" => { "install_seconds" => 20.0, "dependency_of" => "a" },
+                                             "c" => { "install_seconds" => 10.0, "dependency_of" => "b" },
+                                             "a" => { "install_seconds" => 70.0 } },
+        "failed dependency"             => { "x" => { "install_seconds" => 5.0 }, "a" => {},
+                                             "b" => { "dependency_of" => "a" } },
+        "dependency longer than parent" => { "b" => { "install_seconds" => 2.0, "dependency_of" => "a" },
+                                             "a" => { "install_seconds" => 0.0 } },
+        "dependency of the same name"   => { "foo" => { "install_seconds" => 9.0, "dependency_of" => "foo" } },
+      )
     end
 
     it "reads coloured output, tap formulae, options and summaries without the install badge" do
