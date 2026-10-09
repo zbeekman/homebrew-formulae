@@ -528,6 +528,17 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect([brew_calls, Homebrew.failed?]).to eq([[%w[install --formula --yes --display-times cmake]], true])
     end
 
+    it "fails a formula whose requirements aren't met with brew's messages, as brew does before installing any " \
+       "of its dependencies, so it schedules none", :aggregate_failures do
+      stub_formula("lib")
+      stub_formula("app", deps: ["lib", { arch: Hardware::CPU.arm? ? :x86_64 : :arm64 }])
+      stub_formula("cmake")
+      expect { run_command("--yes", "app", "cmake") }
+        .to output(/^app: The \w+ architecture is required .*^Error: app: An unsatisfied requirement failed/m)
+        .to_stderr
+      expect([brew_calls, Homebrew.failed?]).to eq([[%w[install --formula --yes --display-times cmake]], true])
+    end
+
     it "checks each formula as brew does before its plan: a disabled or forbidden one fails and is left out, " \
        "a deprecated one warns", :aggregate_failures do
       stub_formula("old", status: :disabled)
