@@ -22,10 +22,13 @@ module Timed
     # What came of `run`: the formulae (by full name) brew didn't install, as
     # they failed, were skipped or never ran, those of the calls after the
     # batches included, and whether, with `stops_at_failure`, a call stopped
-    # early, which ends the whole brew command.
+    # early, which ends the whole brew command; and how long each formula of
+    # the batches (by full name) that brew installed in them, not in the
+    # calls after them, took as logged (`BuildLog.duration`), where known.
     class Outcome < T::Struct
       const :unfinished, T::Array[String]
       const :stopped_early, T::Boolean
+      const :durations, T::Hash[String, Float], default: {}
     end
 
     # Whether brew installed a formula, from when its call started.
@@ -135,6 +138,9 @@ module Timed
       failed_after = T.let({}, T::Hash[String, T::Array[String]])
       # The formulae the run installed, by short name, with how.
       installed = T.let({}, T::Hash[String, String])
+      # How long each formula the batches installed took, as logged, by
+      # short name.
+      durations = T.let({}, T::Hash[String, Float])
       # The formulae left when Ctrl-C stopped the run, and what each call
       # after the batches had left: `:pending` if it hadn't worked that out
       # yet, `:stopped` if Ctrl-C stopped it doing so.
@@ -341,7 +347,13 @@ module Timed
           entries.transform_values! do |entry|
             entry.merge("verb" => step_verb, "batch" => step.label, "run" => prefix)
           end
-          entries.each { |name, entry| installed[name] = entry.fetch("status") if DONE.include?(entry["status"]) }
+          entries.each do |name, entry|
+            next unless DONE.include?(entry["status"])
+
+            installed[name] = entry.fetch("status")
+            seconds = BuildLog.duration(entry)
+            durations[name] = seconds if seconds && call.nil?
+          end
           BuildLog.update(database) { |build_log| entries.each { |name, entry| build_log.record(name, entry) } }
           if stamp
             entries.each do |name, entry|
@@ -431,7 +443,10 @@ module Timed
       # Even if brew finished anyway, so that whatever runs this stops too.
       raise Interrupt if interrupts.any?
 
-      Outcome.new(unfinished: failed | skipped | failed_after.values.flatten, stopped_early:)
+      Outcome.new(unfinished: failed | skipped | failed_after.values.flatten, stopped_early:,
+                  durations: planned.filter_map do |name|
+                    durations[Utils.name_from_full_name(name)]&.then { [name, it] }
+                  end.to_h)
     end
 
     # A failed download that brew names by its file, not its formula

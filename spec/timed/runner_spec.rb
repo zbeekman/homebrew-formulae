@@ -223,6 +223,41 @@ RSpec.describe Timed::Runner do
       expect([outcome.unfinished, outcome.stopped_early]).to eq([%w[lib app], false])
     end
 
+    it "returns the build time of a formula brew reported no install time for, or none above 0, as estimates " \
+       "take it" do
+      %w[lib app].each { |name| stub_formula(name) }
+      allow(described_class).to receive(:stream) do |_argv, &on_line|
+        { "lib" => "9 seconds", "app" => "1 minute 5 seconds" }.each do |name, built|
+          keg = HOMEBREW_CELLAR/name/"2.0"
+          keg.mkpath
+          FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+          ["==> Upgrading #{name}\n", "🍺  #{keg}: 3 files, 12KB, built in #{built}\n"]
+            .each { |line| on_line.call(line) }
+        end
+        ["==> Installation times\n", "app  0.000 s\n"].each { |line| on_line.call(line) }
+        true
+      end
+      expect(run([batch("lib", "app")]).durations).to eq("lib" => 9.0, "app" => 65.0)
+    end
+
+    it "returns the install time logged for each formula of the batches brew installed, by full name, not those " \
+       "that failed or were skipped" do
+      %w[lib tool app].each { |name| stub_formula(name) }
+      stub_formula("dep", tap: Tap.fetch("user", "tap"))
+      fake_brew(failing: %w[lib])
+      outcome = run([batch("user/tap/dep", verb: :dependency), batch("lib", "tool"), batch("app")],
+                    verb: "install", verbs: { dependency: ["install", %w[--as-dependency], {}] },
+                    deps: { "app" => %w[lib] })
+      expect(outcome.durations).to eq("user/tap/dep" => 9.5, "tool" => 9.5)
+    end
+
+    it "returns the install time of a formula of the batches brew installed in an earlier batch, alongside " \
+       "another" do
+      %w[lib app].each { |name| stub_formula(name) }
+      fake_brew(alongside: { %w[app] => %w[lib] })
+      expect(run([batch("app"), batch("lib")]).durations).to eq("app" => 9.5, "lib" => 9.5)
+    end
+
     it "names a formula to brew by its argument in `arguments`, and logs it by its name", :aggregate_failures do
       stub_formula("lib")
       fake_brew
@@ -511,6 +546,19 @@ RSpec.describe Timed::Runner do
                              %w[upgrade --formula --yes --display-times --verbose user other],
                              %w[reinstall --formula --yes --display-times -s broken]])
         expect(envs).to eq([no_check] * 6)
+      end
+
+      it "returns the install time a formula of the batches was logged with there, not in a call after them" do
+        stub_formula("lib")
+        seconds = %w[9.500 30.000]
+        allow(described_class).to receive(:stream) do |_argv, &on_line|
+          install("lib")
+          ["==> Upgrading lib\n", "🍺  #{HOMEBREW_CELLAR}/lib/2.0: 3 files, 12KB, built in 9 seconds\n",
+           "==> Installation times\n", "lib  #{seconds.shift} s\n"].each { |line| on_line.call(line) }
+          true
+        end
+        outcome = run([batch("lib")], after: [after(choose: ->(_installed, _blocked) { [formulae.fetch("lib")] })])
+        expect(outcome.durations).to eq("lib" => 9.5)
       end
 
       it "turns off the check even with no calls after the batches" do

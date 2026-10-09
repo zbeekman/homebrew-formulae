@@ -832,6 +832,29 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
                                         %w[upgrade --cask --yes iterm2]])
     end
 
+    it "compares each formula's estimate with the install time it logged once the run is done, after the last " \
+       "casks, but not with `--dry-run`", :aggregate_failures do
+      stub_formula("cmake")
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Runner).to receive(:stream) do |argv, &block|
+        next true if argv.include?("--dry-run")
+
+        keg = HOMEBREW_CELLAR/"cmake/2.0"
+        keg.mkpath
+        FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
+        ["🍺  #{keg}: 3 files, 12KB, built in 9 seconds\n", "==> Installation times\n", "cmake  250.000 s\n"]
+          .each { |line| block.call(line) }
+        true
+      end
+      expect { run_command("--dry-run", "cmake", "iterm2") }.not_to output(/Estimated and actual times/).to_stdout
+      expect { run_command("--yes", "cmake", "iterm2") }.to output(/
+        ^==>\ Running\ the\ last\ cask:\ iterm2\n
+        ==>\ Estimated\ and\ actual\ times\n
+        formula\ {23}estimate\ {4}actual\ {3}error\n
+        cmake\ {28}3m20s\ {5}4m10s\ {4}-20%\n\z
+      /x).to_stdout
+    end
+
     it "doesn't upgrade the last casks when Ctrl-C stops the calls after the batches, naming them with how to " \
        "upgrade them later", :aggregate_failures do
       stub_formula("cmake")

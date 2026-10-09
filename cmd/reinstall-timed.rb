@@ -10,6 +10,7 @@ require "trust"
 require "upgrade"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
+require_relative "../lib/timed/estimates_table"
 require_relative "../lib/timed/planner"
 require_relative "../lib/timed/runner"
 
@@ -180,6 +181,7 @@ module Homebrew
                                                               run_dependencies:)
           Timed::Runner.run_casks("reinstall", last, flags: forwarded.cask, label: "last")
         end
+        Timed::EstimatesTable.show(planned, estimates, outcome.durations) if outcome
       end
 
       # The installer `brew reinstall` would use, with the options it would use.

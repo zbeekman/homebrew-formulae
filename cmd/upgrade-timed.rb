@@ -11,6 +11,7 @@ require "minimum_version"
 require "trust"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
+require_relative "../lib/timed/estimates_table"
 require_relative "../lib/timed/planner"
 require_relative "../lib/timed/runner"
 
@@ -188,6 +189,7 @@ module Homebrew
                                                           unfinished: outcome&.unfinished || [], run:,
                                                           run_dependencies:)
         Timed::Runner.run_casks("upgrade", last, flags: cask_flags, label: "last")
+        Timed::EstimatesTable.show(planned, estimates, outcome.durations) if outcome
       end
 
       private

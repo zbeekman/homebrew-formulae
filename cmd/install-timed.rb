@@ -14,6 +14,7 @@ require "trust"
 require "upgrade"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
+require_relative "../lib/timed/estimates_table"
 require_relative "../lib/timed/planner"
 require_relative "../lib/timed/receipts"
 require_relative "../lib/timed/runner"
@@ -338,6 +339,8 @@ module Homebrew
                                                                 unfinished: outcome&.unfinished || [], run:,
                                                                 run_dependencies:, merged: true)
         Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")
+        # With `--only-dependencies`, the plan has no estimates.
+        Timed::EstimatesTable.show(planned, estimates, outcome.durations) if outcome && !args.only_dependencies?
       end
 
       private

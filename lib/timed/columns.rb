@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "utils/tty"
+require_relative "build_log"
 require_relative "plot"
 
 module Timed
@@ -48,6 +49,15 @@ module Timed
       painted = style ? paint.call(text, style) : text
       painted = paint.call(painted, :italic) if italic
       right ? "#{gap}#{painted}" : "#{painted}#{gap}"
+    end
+
+    # `seconds` as a duration right-aligned in 9 characters, painted in the
+    # band of `Plot.band`; `-` when nil.
+    sig { params(seconds: T.nilable(Float), paint: Plot::Paint).returns(String) }
+    def seconds_cell(seconds, paint)
+      return "-".rjust(9) if seconds.nil?
+
+      pad(BuildLog.format_duration(seconds), 9, paint, style: Plot.band(seconds), right: true)
     end
   end
 end

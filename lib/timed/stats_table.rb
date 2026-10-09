@@ -206,13 +206,5 @@ module Timed
       end
       [header, *rows]
     end
-
-    sig { params(seconds: T.nilable(Float), paint: Plot::Paint).returns(String) }
-    def self.seconds_cell(seconds, paint)
-      return "-".rjust(9) if seconds.nil?
-
-      pad(BuildLog.format_duration(seconds), 9, paint, style: Plot.band(seconds), right: true)
-    end
-    private_class_method :seconds_cell
   end
 end

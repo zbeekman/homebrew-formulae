@@ -204,6 +204,13 @@ then
 (unless `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set). Then come the casks
 to reinstall first, and those to reinstall last, each with why.
 
+Once the run is done, after the last casks, it prints
+`Estimated and actual times`, with each formula's estimate, the time the call
+logged for it and how far apart they are, as
+[`brew upgrade-timed`](upgrade-timed.md#output) does. As a failed build stops
+`brew reinstall` before it reports any install time, the formulae it rebuilt
+before that are compared with their build times.
+
 ## Options
 
 `brew reinstall-timed` takes every `brew reinstall` option, with the same
