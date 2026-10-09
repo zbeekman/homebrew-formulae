@@ -2,9 +2,9 @@
 
 ## Usage
 
-`brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
+`brew build-times` \[`stats`\] \[`--sort=`*`key`*\] \[`--reverse`\] \[`--quartiles`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
-`brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[*`formula`* ...\]
+`brew build-times histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[`--quartiles`\] \[*`formula`* ...\]
 
 `brew build-times runs`
 
@@ -34,7 +34,7 @@ default, `$XDG_CONFIG_HOME/homebrew` when that is set). It is written with mode
 
 ## Subcommands
 
-### `stats` \[`--sort=`*`key`*\] \[`--reverse`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
+### `stats` \[`--sort=`*`key`*\] \[`--reverse`\] \[`--quartiles`\] \[`--json`\[=*`version`*\]\] \[*`formula`* ...\]
 
 The default subcommand. Print a table with a row for each logged formula, or
 for each *`formula`* named, then the fallback estimate for formulae with no
@@ -85,6 +85,11 @@ stay together, ordered by its first row.
   name, and a row with no history counts as zero. Any other key is a usage
   error naming these.
 - `--reverse`: reverse the order of the rows, whether sorted or not.
+- `--quartiles`: with colour, paint `estimate` and the blocks of the trend by
+  the quartile of the estimates of the rows listed (those of the formulae
+  named, if any), instead of the fixed bands: the first quartile blue, the
+  second green, the third yellow and the fourth red. See
+  [Quartiles](#quartiles).
 - `--json`\[=*`version`*\]: print the build history as JSON instead of the
   tables, as `brew tap-info --json` does. `v1` is the default and the only
   accepted *`version`*; any other is a usage error. See [JSON](#json).
@@ -154,7 +159,7 @@ brew build-times stats --json llvm
 ]
 ```
 
-### `histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[*`formula`* ...\]
+### `histogram` \[`--poured`\] \[`--builds`\] \[`--smooth`\] \[`--linear`\] \[`--quartiles`\] \[*`formula`* ...\]
 
 Plot a histogram of the source build times of every logged formula, or of
 each *`formula`* named: a heading naming what is counted and the shortest and
@@ -227,6 +232,11 @@ There is no `--json`; `stats --json` gives every time plotted.
   puts in one bin's width centred there, so where it crosses the middle of a
   bin it is the bin's expected count. Equal times are smoothed over about one
   bin's width at them.
+- `--quartiles`: with colour, paint each bar by the quartile of its median
+  among the times plotted (one mean for each formula, or every build with
+  `--builds`), instead of the fixed bands: the first quartile blue, the
+  second green, the third yellow and the fourth red. See
+  [Quartiles](#quartiles).
 
 ```console
 $ brew build-times histogram
@@ -442,6 +452,29 @@ formula is renamed; this puts it back. Casks are never stamped.
 `$HOMEBREW_TIMED_NO_STAMP_RECEIPTS` is set; that variable, like
 `--no-stamp-receipts`, only stops `brew install-timed`, `brew upgrade-timed`
 and `brew reinstall-timed` from stamping the kegs they install.
+
+## Quartiles
+
+`stats` and `histogram` take `--quartiles` to colour by how a time ranks among
+those shown, instead of by the fixed bands (green up to 75 seconds, yellow up
+to 10 minutes, red above), which stay the default. The first quartile is
+blue, the second green, the third yellow and the fourth red.
+
+- The cut points are the quartiles of what is shown, interpolated between the
+  nearest values (the 25th, 50th and 75th percentiles). In `stats` they are
+  those of the `estimate` of the rows listed, so naming formulae narrows
+  them, and the blocks of the trend use the same cut points. In `histogram`
+  they are those of the times plotted, and each bar takes the quartile of the
+  median of its times.
+- A time on a cut point is in the lower quartile, so when many times are
+  equal the higher colours may not appear: with times of 10 s, 10 s, 10 s,
+  10 s and 500 s, only 500 s is red and the rest blue.
+- With fewer than 4 times (rows, formulae or builds), there are no quartiles
+  and the fixed bands are used.
+- Only the colours of times change. `built` and `poured`, the `last` of a
+  failed build, `×`, the italics of a guess and the header are as without it,
+  and the LLM estimates table keeps the fixed bands. Without colour, the output
+  is the same with or without it, and `--smooth` curves are never coloured.
 
 ## Options
 

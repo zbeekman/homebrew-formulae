@@ -20,6 +20,9 @@ module Homebrew
           def poured?; end
 
           sig { returns(T::Boolean) }
+          def quartiles?; end
+
+          sig { returns(T::Boolean) }
           def smooth?; end
         end
       end
@@ -33,6 +36,9 @@ module Homebrew
         module Args
           sig { returns(T.nilable(T.any(String, TrueClass))) }
           def json; end
+
+          sig { returns(T::Boolean) }
+          def quartiles?; end
 
           sig { returns(T::Boolean) }
           def reverse?; end

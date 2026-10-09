@@ -192,6 +192,45 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         ENV["HOMEBREW_NO_COLOR"] = "1"
         expect(capture_stdout { described_class.new(%w[stats]).run }).not_to include("\e")
       end
+
+      describe "`--quartiles`" do
+        # The cell of the estimate and the block after the last cell of a row.
+        def painted(*args)
+          capture_stdout { described_class.new(["stats", *args]).run }.lines.drop(1).first(6).map do |line|
+            [line[/\e\[(\d+)m\d\w+\e\[0m  \S/, 1], line[/\e\[(\d+)m[▁-█×]\e\[0m\n\z/, 1]]
+          end
+        end
+
+        # The estimates are 1s, 3m28s, 1h26m, 1m06s, 3s and 20s, in the order of
+        # the table, with the quartiles 7.25 s, 43 s and 172.5 s. The fixed
+        # bands would paint 3m28s yellow and 1m06s yellow; wget's trend ends
+        # in a red `×`.
+        it "paints the estimates and the trend by their quartiles, not the fixed bands" do
+          expect(painted("--quartiles"))
+            .to eq([%w[34 34], %w[31 31], %w[31 31], %w[33 33], %w[34 34], %w[32 31]])
+        end
+
+        it "takes the quartiles of the rows listed" do
+          expect(painted("--quartiles", "asciidoc", "awscli", "llvm", "wget").first(4).map(&:first))
+            .to eq(%w[34 33 31 32])
+        end
+
+        it "uses the fixed bands with fewer than 4 rows" do
+          expect(painted("--quartiles", "awscli", "llvm")).to eq(painted("awscli", "llvm"))
+        end
+
+        it "keeps the kind, a failed last, the header and the LLM estimates table as without it" do
+          estimates = { "llvm" => { "version" => "23.1.2", "seconds" => 20.0, "model" => "m",
+                                    "date" => "2026-09-20" } }
+          database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
+          kept = [[], %w[--quartiles]].map do |args|
+            lines = capture_stdout { described_class.new(["stats", *args]).run }.lines
+            [lines.fetch(0), lines.map { |line| line[/\e\[3[56]m(?:built|poured)\e\[0m/] },
+             lines.fetch(6)[/\e\[31m1\.25\.1 failed 2026-09-27\e\[0m/], *lines.last(2)]
+          end
+          expect([kept.fetch(1), kept.fetch(1).last]).to match([kept.fetch(0), /\e\[32m0m20s\e\[0m/])
+        end
+      end
     end
 
     describe "sorting" do
@@ -458,6 +497,42 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     end
   end
 
+  describe "histogram --quartiles" do
+    before { allow(Tty).to receive(:width).and_return(60) }
+
+    def histogram(*args) = capture_stdout { described_class.new(["histogram", *args]).run }
+
+    # The 5 builds are 66.5 s, 189.52 s, 190.868 s, 205 s and 5163.1 s.
+    let(:builds) { [189.52, 190.868, 205.0, 5163.1, 66.5] }
+
+    it "plots the same lines as without it, with no colour" do
+      expect(histogram("--builds", "--quartiles")).to eq(histogram("--builds"))
+    end
+
+    it "colours the bars by the quartiles of every build plotted with `--builds`" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      expected = Timed::Plot.histogram(builds, width: 60, paint: Timed::Columns::PAINT, quartiles: true)
+      expect(histogram("--builds", "--quartiles")).to include(expected.fetch(9))
+    end
+
+    it "uses the quartiles of the per-formula means by default, and the fixed bands with fewer than 4 values" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      expect(histogram("--quartiles")).to eq(histogram)
+    end
+
+    it "paints with blue, which the fixed bands never do" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      expect(histogram("--builds", "--quartiles").scan(/\e\[(\d+)m█/).flatten.uniq.sort).to eq(%w[31 33 34])
+    end
+
+    it "works with `--poured`, `--linear` and `--smooth`" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      outputs = [%w[--poured --builds], %w[--linear --builds], %w[--smooth --builds]]
+                .to_h { |args| [args, Tty.strip_ansi(histogram(*args, "--quartiles"))] }
+      expect(outputs).to eq(outputs.keys.to_h { |args| [args, Tty.strip_ansi(histogram(*args))] })
+    end
+  end
+
   describe "runs and run" do
     # Two runs, the latest with every kind of batch, a failed and a skipped
     # formula.
@@ -579,6 +654,12 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         .to include("Show and annotate the log of how long formulae took to build from source or to pour a bottle. " \
                     "brew install-timed, brew upgrade-timed and brew reinstall-timed use it to order the formulae " \
                     "they run.")
+    end
+
+    it "describes `--quartiles` once, for both `stats` and `histogram`, as brew keeps one description per option" do
+      whole = described_class.parser.generate_help_text.gsub(/\s+/, " ")
+      expect(whole).to include("--quartiles Colour times by their quartile among those shown (blue, green, " \
+                               "yellow, red) instead of the fixed bands; fewer than 4 values use the fixed bands.")
     end
 
     it "lists `stats` first" do

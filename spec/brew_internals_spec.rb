@@ -1026,10 +1026,10 @@ RSpec.describe "brew internals", type: :system do
 
     it "has the colours and reset the table paints with, as escape sequences when colour is on" do
       ENV["HOMEBREW_COLOR"] = "1"
-      codes = [:green, :yellow, :red, :cyan, :magenta, :italic, :bold, :underline].to_h do |colour|
+      codes = [:blue, :green, :yellow, :red, :cyan, :magenta, :italic, :bold, :underline].to_h do |colour|
         [colour, "#{Tty.public_send(colour)}x#{Tty.reset}"]
       end
-      expect(codes).to eq(green: "\e[32mx\e[0m", yellow: "\e[33mx\e[0m", red: "\e[31mx\e[0m",
+      expect(codes).to eq(blue: "\e[34mx\e[0m", green: "\e[32mx\e[0m", yellow: "\e[33mx\e[0m", red: "\e[31mx\e[0m",
                           cyan: "\e[36mx\e[0m", magenta: "\e[35mx\e[0m", italic: "\e[3mx\e[0m",
                           bold: "\e[1mx\e[0m", underline: "\e[4mx\e[0m")
     end
