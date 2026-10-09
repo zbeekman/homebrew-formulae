@@ -41,8 +41,9 @@ jobs:
             if (( ${#formulae[@]} > 1 )); then
               echo "::error::${sha:0:10} modifies ${#formulae[@]} formulae (${formulae[*]}); use one commit per formula."
               status=1
-            elif (( ${#formulae[@]} == 1 )) && [[ "${subject}" != "${formulae[0]}: "* ]]; then
-              echo "::error::${sha:0:10} modifies ${formulae[0]}; its subject must start with \"${formulae[0]}: \"."
+            elif (( ${#formulae[@]} == 1 )) &&
+                 [[ "${subject}" != "${formulae[0]}: "* && "${subject}" != "${formulae[0]} "[0-9]* ]]; then
+              echo "::error::${sha:0:10} modifies ${formulae[0]}; its subject must start with \"${formulae[0]}: \" or \"${formulae[0]} <version>\"."
               status=1
             fi
           done
