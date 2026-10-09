@@ -8,7 +8,7 @@ module Timed
   # a string or lines out. It does no I/O and never touches the terminal; a
   # caller that wants colour passes a `paint` proc.
   module Plot
-    # Paints `text` in a style: `:green`, `:yellow` or `:red`.
+    # Paints `text` in a style: `:blue`, `:green`, `:yellow` or `:red`.
     Paint = T.type_alias { T.proc.params(text: String, style: Symbol).returns(String) }
 
     BLOCKS = %w[▁ ▂ ▃ ▄ ▅ ▆ ▇ █].freeze
@@ -23,21 +23,53 @@ module Timed
     GREEN_UP_TO = 75.0
     YELLOW_UP_TO = 600.0
 
-    sig { params(seconds: Float).returns(Symbol) }
-    def self.band(seconds)
-      if seconds <= GREEN_UP_TO then :green
+    # The colours of the first to the fourth quartile.
+    QUARTILE_STYLES = [:blue, :green, :yellow, :red].freeze
+
+    # The colour of `seconds`: the fixed bands, or, with `cuts` (the quartiles
+    # of the values shown, from `quartile_cuts`), the first quartile blue, the
+    # second green, the third yellow and the fourth red; a value on a cut is
+    # in the lower quartile.
+    sig { params(seconds: Float, cuts: T.nilable(T::Array[Float])).returns(Symbol) }
+    def self.band(seconds, cuts: nil)
+      if cuts
+        QUARTILE_STYLES.fetch(cuts.count { |cut| seconds > cut })
+      elsif seconds <= GREEN_UP_TO then :green
       elsif seconds <= YELLOW_UP_TO then :yellow
       else :red
       end
     end
 
+    # The first, second and third quartiles of `values`, interpolated between
+    # the nearest values; nil for fewer than 4 values, which `band` then
+    # paints by the fixed bands.
+    sig { params(values: T::Array[Float]).returns(T.nilable(T::Array[Float])) }
+    def self.quartile_cuts(values)
+      return if values.length < 4
+
+      sorted = values.sort
+      [0.25, 0.5, 0.75].map { |fraction| quantile(sorted, fraction) }
+    end
+
+    # `fraction` of the way through `sorted`, interpolated.
+    sig { params(sorted: T::Array[Float], fraction: Float).returns(Float) }
+    def self.quantile(sorted, fraction)
+      position = (sorted.length - 1) * fraction
+      lower = sorted.fetch(position.floor)
+      lower + ((position - position.floor) * (sorted.fetch(position.ceil) - lower))
+    end
+    private_class_method :quantile
+
     # One block for each of the latest builds (oldest first), `×` for a failed
     # one (nil), and `-` for none. The blocks are scaled to the range of the
     # builds themselves on a log scale, and a range under 10 % is flat, so
     # noise does not look like a trend. With `paint`, each is painted in the
-    # band of its time, and `×` red.
-    sig { params(builds: T::Array[T.nilable(Float)], paint: T.nilable(Paint)).returns(String) }
-    def self.sparkline(builds, paint: nil)
+    # band of its time (or quartile, with `cuts`), and `×` red.
+    sig {
+      params(builds: T::Array[T.nilable(Float)], paint: T.nilable(Paint), cuts: T.nilable(T::Array[Float]))
+        .returns(String)
+    }
+    def self.sparkline(builds, paint: nil, cuts: nil)
       latest = builds.last(SPARKLINE_LENGTH)
       return "-" if latest.empty?
 
@@ -47,7 +79,7 @@ module Timed
       cells = latest.map do |seconds|
         next [FAILED, :red] if seconds.nil?
 
-        [block(seconds, low, high), band(seconds)]
+        [block(seconds, low, high), band(seconds, cuts:)]
       end
       cells.map { |text, style| paint ? paint.call(text, style) : text }.join
     end
@@ -137,7 +169,8 @@ module Timed
     # Gaussian kernel density estimate of the log values, on the scale of the
     # bars, is drawn in braille instead of them, on the same axes, with the y
     # axis up to its peak. With `paint`, each bar is painted in the band of the
-    # median of its values; the curve never is.
+    # median of its values; the curve never is. With `quartiles`, the bands are
+    # the quartiles of `values` instead of the fixed ones (see `band`).
     #
     # With `linear`, the x axis is linear from 0 instead, in bins of a width
     # from `LINEAR_WIDTHS`: the nearest to the Freedman–Diaconis width (the
@@ -146,10 +179,10 @@ module Timed
     # multiples of a step from `LINEAR_TICK_STEPS`.
     sig {
       params(values: T::Array[Float], width: Integer, smooth: T::Boolean, linear: T::Boolean,
-             paint: T.nilable(Paint))
+             paint: T.nilable(Paint), quartiles: T::Boolean)
         .returns(T::Array[String])
     }
-    def self.histogram(values, width:, smooth: false, linear: false, paint: nil)
+    def self.histogram(values, width:, smooth: false, linear: false, paint: nil, quartiles: false)
       shortest, longest = values.minmax
       return [] if shortest.nil? || longest.nil?
 
@@ -165,7 +198,7 @@ module Timed
         binned = Array.new(axis.bins) { [] }
         values.each { |seconds| binned.fetch(axis.column(seconds) / axis.per_bin) << seconds }
         top = binned.map(&:length).max || 1
-        grid = bars(binned, axis.per_bin, top)
+        grid = bars(binned, axis.per_bin, top, quartiles ? quartile_cuts(values) : nil)
       end
 
       rows = grid.each_with_index.map do |cells, row|
@@ -229,12 +262,7 @@ module Timed
     sig { params(values: T::Array[Float]).returns(Float) }
     def self.interquartile_range(values)
       sorted = values.sort
-      quartile = lambda do |fraction|
-        position = (sorted.length - 1) * fraction
-        lower = sorted.fetch(position.floor)
-        lower + ((position - position.floor) * (sorted.fetch(position.ceil) - lower))
-      end
-      quartile.call(0.75) - quartile.call(0.25)
+      quantile(sorted, 0.75) - quantile(sorted, 0.25)
     end
     private_class_method :interquartile_range
 
@@ -266,14 +294,16 @@ module Timed
 
     # The bars as rows of cells, from the top: each bin of `binned` values
     # `per_bin` columns wide and its count over `top` of the height, in eighths
-    # of a row, at least one for any count, in the band of the median value.
+    # of a row, at least one for any count, in the band of the median value
+    # (see `band` for `cuts`).
     sig {
-      params(binned: T::Array[T::Array[Float]], per_bin: Integer, top: Integer).returns(T::Array[T::Array[Cell]])
+      params(binned: T::Array[T::Array[Float]], per_bin: Integer, top: Integer, cuts: T.nilable(T::Array[Float]))
+        .returns(T::Array[T::Array[Cell]])
     }
-    def self.bars(binned, per_bin, top)
+    def self.bars(binned, per_bin, top, cuts)
       columns = binned.flat_map do |bin|
         eighths = bin.empty? ? 0 : [(bin.length * HEIGHT * 8.0 / top).round, 1].max
-        style = band(BuildLog.median(bin)) unless bin.empty?
+        style = band(BuildLog.median(bin), cuts:) unless bin.empty?
         column = (0...HEIGHT).map do |row|
           filled = (eighths - ((HEIGHT - 1 - row) * 8)).clamp(0, 8)
           filled.zero? ? [" ", nil] : [BLOCKS.fetch(filled - 1), style]

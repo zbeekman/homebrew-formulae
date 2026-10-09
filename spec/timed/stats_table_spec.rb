@@ -8,6 +8,49 @@
 require_relative "../../lib/timed/stats_table"
 
 RSpec.describe Timed::StatsTable do
+  describe ".lines with `quartiles`" do
+    let(:paint) { ->(text, style) { "<#{style}:#{text}>" } }
+    let(:log) do
+      packages = { "a" => 10.0, "b" => 50.0, "c" => 200.0, "d" => 1000.0 }.transform_values do |seconds|
+        { "builds" => [{ "build_seconds" => seconds, "started" => "2026-09-01", "status" => "built",
+                         "version" => "1" }] }
+      end
+      Timed::BuildLog.new("schema_version" => Timed::BuildLog::SCHEMA_VERSION, "packages" => packages)
+    end
+
+    def lines(names, **options)
+      described_class.lines(names.flat_map { |name| described_class.rows(log, name) }, paint:, **options)
+    end
+
+    # The style of the estimate and of the trend block of each row.
+    def styles(lines)
+      lines.drop(1).map { |line| [line[/<(\w+):\S+>  \S/, 1], line[/<(\w+):[▁-█×]>\z/, 1]] }
+    end
+
+    it "paints the estimate and the trend by the quartile of the estimates of the rows" do
+      expect(styles(lines(%w[a b c d], quartiles: true)))
+        .to eq([%w[blue blue], %w[green green], %w[yellow yellow], %w[red red]])
+    end
+
+    it "paints by the fixed bands without it" do
+      expect(styles(lines(%w[a b c d]))).to eq([%w[green green], %w[green green], %w[yellow yellow], %w[red red]])
+    end
+
+    it "counts a repeated estimate for each row, a value on a cut being in the lower quartile" do
+      expect(styles(lines(%w[a b c d b c], quartiles: true)).map(&:first))
+        .to eq(%w[blue blue yellow red blue yellow])
+    end
+
+    it "falls back to the fixed bands for fewer than 4 rows" do
+      expect(lines(%w[a b c], quartiles: true)).to eq(lines(%w[a b c]))
+    end
+
+    it "keeps the header and the kind as without it" do
+      with, without = [{ quartiles: true }, {}].map { |options| lines(%w[a b c d], **options) }
+      expect([with.first, with.fetch(1)[/<cyan:built>/]]).to eq([without.first, "<cyan:built>"])
+    end
+  end
+
   describe ".json_rows" do
     let(:log) do
       Timed::BuildLog.new(

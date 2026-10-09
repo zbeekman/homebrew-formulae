@@ -10,9 +10,10 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 ## Commands
 - [`brew build-times`](docs/build-times.md): show and annotate the log of how
   long formulae took to build from source or pour (as a table or, with
-  `stats --json`, as JSON), plot a histogram of those times, list the runs of
-  the `-timed` commands and draw a timeline of each, and restore the times in
-  install receipts.
+  `stats --json`, as JSON), plot a histogram of those times (the table and
+  the histogram can be coloured by quartile), list the runs of the `-timed`
+  commands and draw a timeline of each, and restore the times in install
+  receipts.
 - [`brew install-timed`](docs/install-timed.md): install formulae in batches
   ordered by estimated build time, quickest first, and log how long each took;
   casks go before the batches, or after them if they may prompt.

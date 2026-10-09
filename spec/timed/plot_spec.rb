@@ -16,6 +16,38 @@ RSpec.describe Timed::Plot do
     end
   end
 
+  describe ".quartile_cuts" do
+    it "is the first, second and third quartiles, interpolated between the values" do
+      cuts = { "four" => [1.0, 2.0, 3.0, 4.0], "unsorted" => [40.0, 10.0, 30.0, 20.0, 50.0] }
+             .transform_values { |values| described_class.quartile_cuts(values) }
+      expect(cuts).to eq("four" => [1.75, 2.5, 3.25], "unsorted" => [20.0, 30.0, 40.0])
+    end
+
+    it "is nil for fewer than 4 values" do
+      cuts = [[], [1.0], [1.0, 2.0], [1.0, 2.0, 3.0]].map { |values| described_class.quartile_cuts(values) }
+      expect(cuts).to eq([nil] * 4)
+    end
+
+    it "is the value repeated for equal values" do
+      expect(described_class.quartile_cuts([5.0] * 4)).to eq([5.0, 5.0, 5.0])
+    end
+  end
+
+  describe ".band with cuts" do
+    let(:cuts) { [10.0, 20.0, 30.0] }
+
+    it "is blue up to the first cut, green, yellow, then red above the third, ignoring the fixed bands" do
+      bands = [1.0, 10.0, 10.1, 20.0, 20.1, 30.0, 30.1, 86_400.0]
+              .to_h { |seconds| [seconds, described_class.band(seconds, cuts:)] }
+      expect(bands).to eq(1.0 => :blue, 10.0 => :blue, 10.1 => :green, 20.0 => :green, 20.1 => :yellow,
+                          30.0 => :yellow, 30.1 => :red, 86_400.0 => :red)
+    end
+
+    it "uses the fixed bands with nil cuts" do
+      expect(described_class.band(100.0, cuts: nil)).to eq(:yellow)
+    end
+  end
+
   describe ".sparkline" do
     def spark(*builds, **options) = described_class.sparkline(builds, **options)
 
@@ -58,6 +90,12 @@ RSpec.describe Timed::Plot do
     it "paints each block by the band of its build, and × red" do
       paint = ->(text, style) { "<#{style}:#{text}>" }
       expect(spark(10.0, nil, 100.0, 1000.0, paint:)).to eq("<green:▁><red:×><yellow:▅><red:█>")
+    end
+
+    it "paints each block by the quartile of its build with `cuts`, and × red" do
+      paint = ->(text, style) { "<#{style}:#{text}>" }
+      expect(spark(10.0, nil, 100.0, 700.0, 1000.0, paint:, cuts: [20.0, 500.0, 900.0]))
+        .to eq("<blue:▁><red:×><green:▅><yellow:▇><red:█>")
     end
   end
 
@@ -173,6 +211,41 @@ RSpec.describe Timed::Plot do
       paint = ->(text, style) { "<#{style}:#{text}>" }
       expect(described_class.histogram([10.0, 10.0, 1000.0], width: 40, paint:).fetch(9))
         .to eq("  │<green:████████████>            <red:████████████>")
+    end
+
+    context "with `quartiles`" do
+      let(:paint) { ->(text, style) { "<#{style}:#{text}>" } }
+      # One value in each of four bins, so each bar is the quartile of its own
+      # value (`bar_styles` joins neighbouring bars of one style).
+      let(:values) { [10.0, 40.0, 200.0, 1000.0] }
+
+      def bar_styles(lines) = lines.fetch(9).scan(/<(\w+):/).flatten
+
+      it "paints each bar by the quartile of the median of its values" do
+        expect(bar_styles(described_class.histogram(values, width: 40, paint:, quartiles: true)))
+          .to eq(%w[blue green yellow red])
+      end
+
+      it "paints by the fixed bands without it" do
+        expect(bar_styles(described_class.histogram(values, width: 40, paint:))).to eq(%w[green yellow red])
+      end
+
+      it "falls back to the fixed bands for fewer than 4 values" do
+        few = [10.0, 40.0, 1000.0]
+        expect(described_class.histogram(few, width: 40, paint:, quartiles: true))
+          .to eq(described_class.histogram(few, width: 40, paint:))
+      end
+
+      it "paints linear bars too" do
+        lines = described_class.histogram([10.0, 20.0, 700.0, 3000.0], width: 40, paint:, quartiles: true,
+                                          linear: true)
+        expect(bar_styles(lines)).to eq(%w[blue yellow red])
+      end
+
+      it "leaves the layout alone, and the curve unpainted" do
+        plain = described_class.histogram(values, width: 40, smooth: true)
+        expect(described_class.histogram(values, width: 40, smooth: true, paint:, quartiles: true)).to eq(plain)
+      end
     end
 
     # How many rows up the curve reaches in `columns` of the plot, 0 if it is

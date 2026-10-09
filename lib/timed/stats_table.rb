@@ -153,8 +153,12 @@ module Timed
     end
 
     # The header and a line for each row. `paint` is how the colour is added.
-    sig { params(rows: T::Array[Row], paint: Plot::Paint).returns(T::Array[String]) }
-    def self.lines(rows, paint: Columns::PAINT)
+    # With `quartiles`, the estimates and the trend are painted by the quartile
+    # of the estimates of `rows`, if there are 4 or more, instead of by the
+    # fixed bands.
+    sig { params(rows: T::Array[Row], paint: Plot::Paint, quartiles: T::Boolean).returns(T::Array[String]) }
+    def self.lines(rows, paint: Columns::PAINT, quartiles: false)
+      cuts = Plot.quartile_cuts(rows.map(&:estimate)) if quartiles
       last_width = rows.map { |row| row.last.length }.push(4).max.to_i
       columns = [
         heading("formula", NAME_WIDTH, paint),
@@ -164,11 +168,11 @@ module Timed
         heading("estimate", 9, paint, right: true),
       ]
       header = "#{columns.join(" ")}  #{heading("last", last_width, paint)}  #{heading("trend", 5, paint)}"
-      [header] + rows.map { |row| line(row, last_width, paint) }
+      [header] + rows.map { |row| line(row, last_width, paint, cuts) }
     end
 
-    sig { params(row: Row, last_width: Integer, paint: Plot::Paint).returns(String) }
-    def self.line(row, last_width, paint)
+    sig { params(row: Row, last_width: Integer, paint: Plot::Paint, cuts: T.nilable(T::Array[Float])).returns(String) }
+    def self.line(row, last_width, paint, cuts)
       estimate = "#{BuildLog.format_duration(row.estimate)}#{"?" if row.guess}"
       kind = row.kind
       columns = [
@@ -176,10 +180,11 @@ module Timed
         pad(kind || "-", 6, paint, style: kind && Columns::STATUS_STYLES[kind]),
         row.n.to_s.rjust(3),
         *row.statistics.map { |text| text.rjust(8) },
-        pad(estimate, 9, paint, style: Plot.band(row.estimate), right: true, italic: row.guess),
+        pad(estimate, 9, paint, style: Plot.band(row.estimate, cuts:), right: true,
+                                   italic: row.guess),
       ]
       last = pad(row.last, last_width, paint, style: row.last_failed ? :red : nil)
-      "#{columns.join(" ")}  #{last}  #{Plot.sparkline(row.trend, paint:)}"
+      "#{columns.join(" ")}  #{last}  #{Plot.sparkline(row.trend, paint:, cuts:)}"
     end
     private_class_method :line
 

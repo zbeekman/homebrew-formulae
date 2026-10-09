@@ -12,6 +12,11 @@ require_relative "../lib/timed/stats_table"
 module Homebrew
   module Cmd
     class BuildTimes < AbstractCommand
+      # Brew's whole-command help keeps one description per option name, so
+      # `stats` and `histogram` share this one; their banners say the rest.
+      QUARTILES_DESCRIPTION = "Colour times by their quartile among those shown (blue, green, yellow, red) " \
+                              "instead of the fixed bands; fewer than 4 values use the fixed bands."
+
       # Brew lists subcommands in reverse order of definition, so `stats`,
       # defined last, comes first.
       class RestampSubcommand < Homebrew::AbstractSubcommand
@@ -114,13 +119,14 @@ module Homebrew
       class HistogramSubcommand < Homebrew::AbstractSubcommand
         subcommand_args do
           usage_banner <<~EOS
-            `brew build-times histogram` [`--poured`] [`--builds`] [`--smooth`] [`--linear`] [<formula> ...]:
+            `brew build-times histogram` [`--poured`] [`--builds`] [`--smooth`] [`--linear`] [`--quartiles`] [<formula> ...]:
             Plot a histogram of the source build times of <formula> or every logged formula.
             Each formula counts once, with the mean of its times. Time is on a log scale, from the shortest to the longest,
             with ticks at 1s, 10s, 1m, 10m, 1h and 10h, or with `--linear` on a linear scale from 0; `┴` in the axis,
             labelled `75s batch split`, marks 75 seconds, where the `-timed` commands start to split batches.
             With colour, each bar is green up to 75 seconds, yellow up to 10 minutes and red above, by the median of
-            its times. It needs at least 2 times to plot.
+            its times. With `--quartiles`, the colours follow the quartiles of the times plotted instead: first blue,
+            second green, third yellow, fourth red. It needs at least 2 times to plot.
           EOS
           switch "--poured",
                  description: "Plot the times of pours instead of source builds."
@@ -132,6 +138,8 @@ module Homebrew
           switch "--linear",
                  description: "Plot time on a linear scale from 0 instead, in bins of a round width near the " \
                               "Freedman–Diaconis width, such as 20s, 5m or 2h, with ticks on their edges."
+          switch "--quartiles",
+                 description: QUARTILES_DESCRIPTION
           named_args :formula
         end
 
@@ -151,14 +159,14 @@ module Homebrew
           ohai "#{title}, from #{Timed::BuildLog.format_duration(values.min)} to " \
                "#{Timed::BuildLog.format_duration(values.max)}",
                *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, linear: args.linear?,
-                                                paint: Timed::Columns::PAINT)
+                                                paint: Timed::Columns::PAINT, quartiles: args.quartiles?)
         end
       end
 
       class StatsSubcommand < Homebrew::AbstractSubcommand
         subcommand_args default: true do
           usage_banner <<~EOS
-            `brew build-times stats` [`--sort=`<key>] [`--reverse`] [`--json`[`=`<version>]] [<formula> ...]:
+            `brew build-times stats` [`--sort=`<key>] [`--reverse`] [`--quartiles`] [`--json`[`=`<version>]] [<formula> ...]:
             Show build time statistics and estimates for <formula> or every logged formula.
             Builds that poured a bottle and builds from source are never mixed.
             The estimate of a source build is its mean plus 1.5 standard deviations, and of a pour its mean.
@@ -168,6 +176,8 @@ module Homebrew
             The trend shows the latest 8 builds of that kind, oldest first, each scaled to the row's own range.
             A failed build is shown as `×` in the trend of every row of the formula.
             With colour, the column names of the header are bold and underlined.
+            With `--quartiles`, the estimates and the trend are coloured by the quartile of the estimates of the rows
+            listed instead of the fixed bands: first blue, second green, third yellow, fourth red.
             Colour follows Homebrew's own rules (off when not a terminal or with `HOMEBREW_NO_COLOR`).
             With `--json`, print a JSON array instead, never coloured: for each row `name`, `kind`, `n`, `median`,
             `mean` and `stdev` (seconds) and its `builds`, each with `seconds`, `date`, `version` and `status`.
@@ -178,6 +188,8 @@ module Homebrew
                             "Without it the rows are in the order of the log, or of the formulae named."
           switch "--reverse",
                  description: "Reverse the order of the rows."
+          switch "--quartiles",
+                 description: QUARTILES_DESCRIPTION
           flag "--json",
                description: "Print the build history as JSON instead of the tables. Currently the default and " \
                             "only accepted value for <version> is `v1`."
@@ -200,7 +212,7 @@ module Homebrew
                                         reverse: args.reverse? || false)
           return puts JSON.pretty_generate(Timed::StatsTable.json_rows(log, rows)) if json
 
-          Timed::StatsTable.lines(rows).each { |line| puts line }
+          Timed::StatsTable.lines(rows, quartiles: args.quartiles?).each { |line| puts line }
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
           estimates = args.named.empty? ? log.estimates.sort.to_h : log.estimates.slice(*names)
