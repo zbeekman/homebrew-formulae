@@ -1018,9 +1018,9 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
-  describe "`Tty`, which paints `brew build-times stats` and `histogram`" do
-    # It can be 0; `histogram` draws at least 40 columns whatever it is.
-    it "gives the width of the terminal, which `histogram` fits, as a number of columns" do
+  describe "`Tty`, which paints `brew build-times stats`, `histogram`, `runs` and `run`" do
+    # It can be 0; `histogram` and `run` draw at least 40 columns whatever it is.
+    it "gives the width of the terminal, which `histogram` and `run` fit, as a number of columns" do
       expect(Tty.width).to be_a(Integer)
     end
 

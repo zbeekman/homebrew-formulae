@@ -52,7 +52,9 @@ module Timed
     # after, with when the call started: a formula failed unless that says
     # brew installed it (by default, if its version is installed). Each
     # formula brew worked on is logged in `database` with the
-    # verb, the batch's label and its log, and each keg brew installed gets
+    # verb, the batch's label, its log, when the batch's calls ended
+    # (`batch_ended`) and the run (`run`, the start of the logs' names, shared
+    # by the whole run), and each keg brew installed gets
     # its times in its receipt unless not `stamp`. A formula that `deps` says
     # needs one that failed or was skipped is skipped and logged as such.
     # With `stops_at_failure` (brew stops a call at a failed build), brew
@@ -165,7 +167,10 @@ module Timed
           else
             step.names
           end
+          # The same moment on both clocks, so times from `start` add to
+          # `started`.
           started = now.call
+          start = clock.call
           entries = T.let({}, T::Hash[String, BuildLog::Build])
           # With `dependencies_only`, the formulae whose dependencies brew
           # finished, which aren't logged for themselves.
@@ -189,7 +194,6 @@ module Timed
             oh1 "#{heading}: #{names.join(" ")}"
             log = logs/"#{prefix}-batch#{index}.log"
             lines = T.let([], T::Array[Line])
-            start = clock.call
             # In the batch's order, dependencies first, so brew never pours
             # a formula as a dependency before its call to build it.
             runs = if call&.reinstall?
@@ -251,6 +255,8 @@ module Timed
                 names -= unstarted
               end
             end
+            # On the clock of `started` in `parse`.
+            ended = (started + (clock.call - start)).iso8601
             success = results.all?
             # Brew didn't finish the batch, so a formula it didn't get to
             # hasn't failed.
@@ -275,12 +281,15 @@ module Timed
                 builds[short] = build
               elsif !formula_installed
                 (call ? (failed_after[call.label] ||= []) : failed) << name
+                # A formula brew never named started, as far as the log
+                # knows, when its batch did.
                 builds[short] = build.merge("status"  => "failed",
-                                            "version" => build["version"] || formula.pkg_version.to_s)
+                                            "version" => build["version"] || formula.pkg_version.to_s,
+                                            "started" => build["started"] || started.iso8601)
               end
             end
             builds.select! { |_, build| DONE.include?(build["status"]) } if stopped
-            entries.merge!(builds.transform_values { |build| build.merge("log" => log.to_s) })
+            entries.merge!(builds.transform_values { |build| build.merge("log" => log.to_s, "batch_ended" => ended) })
           end
           # By short name, as the log keys formulae; what brew did with a
           # formula it tried anyway is kept instead.
@@ -290,7 +299,9 @@ module Timed
             }
           end
 
-          entries.transform_values! { |entry| entry.merge("verb" => step_verb, "batch" => step.label) }
+          entries.transform_values! do |entry|
+            entry.merge("verb" => step_verb, "batch" => step.label, "run" => prefix)
+          end
           entries.each { |name, entry| installed[name] = entry.fetch("status") if DONE.include?(entry["status"]) }
           BuildLog.update(database) { |build_log| entries.each { |name, entry| build_log.record(name, entry) } }
           if stamp
@@ -546,10 +557,12 @@ module Timed
     # (`Reinstall.reinstall_formula`), each install of a tap formula
     # (`Formula#print_tap_action`), and an install once its dependencies are
     # installed (`FormulaInstaller#install`); and where it starts on a
-    # dependency (`FormulaInstaller#install_dependency`). An install of a core
-    # formula with no dependencies to install has no heading.
+    # dependency (`FormulaInstaller#install_dependency`), which newer brews
+    # follow with its version, e.g. `(4.5.1)` or `(1.7.5 -> 1.7.6)`. An
+    # install of a core formula with no dependencies to install has no
+    # heading.
     HEADING = /\A==> (?:Upgrading|Installing|Reinstalling) (?<name>[^\s:]+)(?: from \S+| --\S.*| *)\z/
-    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)\z/
+    DEPENDENCY_HEADING = /\A==> (?:Upgrading|Installing) \S+ dependency: (?<name>\S+)(?: \([^)]*\))?\z/
 
     # Where brew pours a bottle, named `<name>--<version>…`
     # (`FormulaInstaller#pour`, `Bottle::Filename`).

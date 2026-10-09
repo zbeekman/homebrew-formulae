@@ -13,8 +13,10 @@ module Timed
     SCHEMA_VERSION = 1
 
     # Fields kept from a recorded build, plus `verb` (`install`, `upgrade` or
-    # `reinstall`).
-    ENTRY_KEYS = %w[version started build_seconds install_seconds wall_seconds status batch problems log verb].freeze
+    # `reinstall`), `run` (the `-timed` run's id, as its logs' names start)
+    # and `batch_ended` (when the brew calls of its batch ended).
+    ENTRY_KEYS = %w[version started build_seconds install_seconds wall_seconds status batch problems log verb
+                    run batch_ended].freeze
 
     DURATION_KEYS = %w[build_seconds install_seconds wall_seconds].freeze
 

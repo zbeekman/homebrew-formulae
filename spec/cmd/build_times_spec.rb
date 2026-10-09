@@ -458,6 +458,104 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     end
   end
 
+  describe "runs and run" do
+    # Two runs, the latest with every kind of batch, a failed and a skipped
+    # formula.
+    let(:fixture) { Pathname(__FILE__).dirname.parent/"fixtures/runs-build-log.json" }
+    let(:list) do
+      <<~EOS
+        run  started           verbs              built  poured  failed  skipped   length
+          1  2026-10-01 10:00  upgrade,reinstall      3       1       1        2    1h03m
+          2  2026-09-30 09:00  upgrade                1       0       0        1    1m00s
+      EOS
+    end
+
+    before { allow(Tty).to receive(:width).and_return(80) }
+
+    def build_times(*args) = capture_stdout { described_class.new(args).run }
+
+    def timeline(number)
+      run = Timed::Runs.all(Timed::BuildLog.load(database)).fetch(number - 1)
+      sections = Timed::Runs.timeline(run, number, width: 80, paint: ->(text, _style) { text })
+      "#{sections.map { |heading, lines| ["==> #{heading}", *lines].join("\n") }.join("\n")}\n" \
+        "#{Timed::Runs.total(run).join("\n")}\n"
+    end
+
+    it "lists the runs, newest first" do
+      expect(build_times("runs")).to eq(list)
+    end
+
+    it "draws the timeline of the latest run by default, or of the run numbered, then the total" do
+      outputs = [[], %w[1], %w[2]].to_h { |args| [args, build_times("run", *args)] }
+      expect(outputs).to eq([] => timeline(1), %w[1] => timeline(1), %w[2] => timeline(2))
+    end
+
+    it "fits the timeline to the width of the terminal" do
+      allow(Tty).to receive(:width).and_return(120)
+      expect(build_times("run").lines.fetch(1)).to eq("formula  status      time  0#{" " * 87}1h03m\n")
+    end
+
+    it "says so when no runs are logged" do
+      database.write(JSON.generate("schema_version" => 1, "packages" => {}))
+      expect([build_times("runs"), build_times("run")]).to eq(["==> No runs logged\n"] * 2)
+    end
+
+    it "fails for a run that is not logged, naming how many are" do
+      expect { described_class.new(%w[run 3]).run }
+        .to raise_error(SystemExit).and output("Error: no run 3: 2 runs logged\n").to_stderr
+    end
+
+    it "fails the same way for a number too large to index an array" do
+      huge = "999999999999999999999"
+      expect { described_class.new(["run", huge]).run }
+        .to raise_error(SystemExit).and output("Error: no run #{huge}: 2 runs logged\n").to_stderr
+    end
+
+    it "takes a number with leading zeros" do
+      expect(build_times("run", "02")).to eq(timeline(2))
+    end
+
+    it "rejects a number that is not a whole number from 1 as a usage error" do
+      errors = %w[0 one 1.5].to_h do |number|
+        message = begin
+          described_class.new(["run", number]).run
+          nil
+        rescue UsageError => e
+          e.message
+        end
+        [number, message]
+      end
+      expect(errors).to eq(%w[0 one 1.5].to_h do |number|
+        [number, "Invalid usage: `run` takes the number of a run, as `brew build-times runs` lists them, " \
+                 "not #{number}."]
+      end)
+    end
+
+    it "takes a negative number for an option brew doesn't know" do
+      expect { described_class.new(%w[run -1]) }.to raise_error(OptionParser::InvalidOption, "invalid option: -1")
+    end
+
+    it "takes one number at most" do
+      expect { described_class.new(%w[run 1 2]) }.to raise_error(Homebrew::CLI::MaxNamedArgumentsError)
+    end
+
+    describe "colour" do
+      before { ENV["HOMEBREW_COLOR"] = "1" }
+
+      it "paints the list's header and failed builds, the same list without the colour codes" do
+        coloured = build_times("runs")
+        expect([coloured.lines.fetch(0)[/\A\S+/], coloured.lines.fetch(1)[/\e\[31m\d/], Tty.strip_ansi(coloured)])
+          .to eq(["\e[4m\e[1mrun\e[0m\e[0m", "\e[31m1", list])
+      end
+
+      it "paints each status and bar of the timeline in its colour, the same timeline without the colour codes" do
+        coloured = build_times("run")
+        expect([coloured.scan(/\e\[(\d+)m([█×]+)/).map(&:first).uniq, Tty.strip_ansi(coloured)])
+          .to eq([%w[35 36 31], timeline(1)])
+      end
+    end
+  end
+
   describe "help" do
     let(:help) { described_class.parser.generate_help_text(remaining_args: []).gsub(/\s+/, " ") }
 
@@ -465,6 +563,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       summaries = {
         "stats"     => "Show build time statistics and estimates for formula or every logged formula.",
         "histogram" => "Plot a histogram of the source build times of formula or every logged formula.",
+        "runs"      => "List the runs of brew install-timed, brew upgrade-timed and brew reinstall-timed in the " \
+                       "log, newest first.",
+        "run"       => "Draw a timeline of run number, as brew build-times runs numbers them, or of the latest run.",
         "note"      => "Append text to the problems recorded for the latest logged build of formula.",
         "restamp"   => "Add the logged build times to the install receipts of installed formulae that lack them.",
       }

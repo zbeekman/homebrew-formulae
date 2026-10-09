@@ -6,6 +6,7 @@ require "abstract_subcommand"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/plot"
 require_relative "../lib/timed/receipts"
+require_relative "../lib/timed/runs"
 require_relative "../lib/timed/stats_table"
 
 module Homebrew
@@ -52,6 +53,64 @@ module Homebrew
         end
       end
 
+      class RunSubcommand < Homebrew::AbstractSubcommand
+        subcommand_args do
+          usage_banner <<~EOS
+            `brew build-times run` [<number>]:
+            Draw a timeline of run <number>, as `brew build-times runs` numbers them, or of the latest run.
+            A heading for each batch, `Batch` and its number, with `(--last)` for the last, and for each call after
+            the batches, then a row for each formula with its status, its time and a bar from when brew first named
+            it to when it finished, on a linear time axis shared by the whole run. A formula with no time is drawn as
+            one column where it started, `×` if it failed. A call's skipped formulae follow its bars, and those of the
+            batches come last, under `Skipped`, with no bar. The gaps between the bars are brew's own work, such as
+            downloads and checks, and builds with no time; the last lines give the total. With colour, each status
+            and its bar are painted: built cyan, poured magenta and failed red.
+          EOS
+          named_args :number, max: 1
+        end
+
+        sig { override.void }
+        def run
+          named = args.named.first || "1"
+          unless named.match?(/\A0*[1-9]\d*\z/)
+            raise UsageError, "`run` takes the number of a run, as `brew build-times runs` lists them, not #{named}."
+          end
+
+          runs = Timed::Runs.all(Timed::BuildLog.load(Timed::BuildLog.default_path))
+          return ohai "No runs logged" if runs.empty?
+
+          number = named.to_i
+          # Before indexing, which raises for a number past a native integer.
+          chosen = runs[number - 1] if number <= runs.length
+          odie "no run #{number}: #{Utils.pluralize("run", runs.length, include_count: true)} logged" if chosen.nil?
+          Timed::Runs.timeline(chosen, number, width: Tty.width).each { |heading, lines| ohai heading, *lines }
+          puts Timed::Runs.total(chosen)
+        end
+      end
+
+      class RunsSubcommand < Homebrew::AbstractSubcommand
+        subcommand_args do
+          usage_banner <<~EOS
+            `brew build-times runs`:
+            List the runs of `brew install-timed`, `brew upgrade-timed` and `brew reinstall-timed` in the log, newest first.
+            Each line has the run's number (1 for the latest), when it started, the verbs of its calls, how many
+            builds it logged as built, poured, failed and skipped, and its length, from the first start to the last
+            finish. Builds logged with a date alone, before the runs were kept, or, other than skipped formulae, with
+            no log of a run are left out.
+            Casks are never in the log. With colour, a number of failed builds other than 0 is red.
+          EOS
+          named_args :none
+        end
+
+        sig { override.void }
+        def run
+          runs = Timed::Runs.all(Timed::BuildLog.load(Timed::BuildLog.default_path))
+          return ohai "No runs logged" if runs.empty?
+
+          Timed::Runs.lines(runs).each { |line| puts line }
+        end
+      end
+
       class HistogramSubcommand < Homebrew::AbstractSubcommand
         subcommand_args do
           usage_banner <<~EOS
@@ -92,7 +151,7 @@ module Homebrew
           ohai "#{title}, from #{Timed::BuildLog.format_duration(values.min)} to " \
                "#{Timed::BuildLog.format_duration(values.max)}",
                *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, linear: args.linear?,
-                                                paint: Timed::StatsTable::PAINT)
+                                                paint: Timed::Columns::PAINT)
         end
       end
 

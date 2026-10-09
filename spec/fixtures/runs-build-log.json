@@ -1,0 +1,169 @@
+{
+  "packages": {
+    "asciidoc": {
+      "builds": [
+        {
+          "install_seconds": 1.4,
+          "started": "2026-09-24",
+          "status": "poured",
+          "version": "10.2.1_1"
+        }
+      ]
+    },
+    "cmake": {
+      "builds": [
+        {
+          "batch": "main",
+          "started": "2026-09-30T09:05:00-04:00",
+          "status": "skipped",
+          "verb": "upgrade",
+          "version": "4.1.2"
+        },
+        {
+          "started": "2026-10-01",
+          "status": "skipped",
+          "version": "4.1.2"
+        }
+      ]
+    },
+    "fmt": {
+      "builds": [
+        {
+          "batch": "main",
+          "build_seconds": 55.0,
+          "install_seconds": 58.0,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20260930-090000-111-batch1.log",
+          "started": "2026-09-30T09:00:10-04:00",
+          "status": "built",
+          "verb": "upgrade",
+          "version": "11.0.2",
+          "wall_seconds": 60.0
+        },
+        {
+          "batch": "main",
+          "build_seconds": 80.0,
+          "install_seconds": 85.0,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20261001-100000-222-batch1.log",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T10:00:12-04:00",
+          "status": "built",
+          "verb": "upgrade",
+          "version": "12.0.0",
+          "wall_seconds": 90.0
+        }
+      ]
+    },
+    "libpng": {
+      "builds": [
+        {
+          "batch": "linkage",
+          "build_seconds": 50.0,
+          "install_seconds": 55.0,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20261001-100000-222-batch4.log",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T11:03:00-04:00",
+          "status": "built",
+          "verb": "reinstall",
+          "version": "1.6.50",
+          "wall_seconds": 60.0
+        }
+      ]
+    },
+    "llvm": {
+      "builds": [
+        {
+          "build_seconds": 5160.0,
+          "install_seconds": 5163.1,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20260925-080000-99-batch1.log",
+          "started": "2026-09-25",
+          "status": "built",
+          "version": "23.1.2"
+        },
+        {
+          "batch": "last",
+          "build_seconds": 3560.0,
+          "install_seconds": 3580.0,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20261001-100000-222-batch2.log",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T10:02:00-04:00",
+          "status": "built",
+          "verb": "upgrade",
+          "version": "23.1.3",
+          "wall_seconds": 3600.0
+        }
+      ]
+    },
+    "ninja": {
+      "builds": [
+        {
+          "batch": "main",
+          "install_seconds": 4.0,
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20261001-100000-222-batch1.log",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T10:00:05-04:00",
+          "status": "poured",
+          "verb": "upgrade",
+          "version": "1.13.1",
+          "wall_seconds": 5.0
+        }
+      ]
+    },
+    "quux": {
+      "builds": [
+        {
+          "batch": "dependents",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T11:02:20-04:00",
+          "status": "skipped",
+          "verb": "upgrade",
+          "version": "2.0"
+        }
+      ]
+    },
+    "qux": {
+      "builds": [
+        {
+          "batch": "dependents",
+          "log": "/Users/me/Library/Logs/Homebrew/timed/20261001-100000-222-batch3.log",
+          "problems": [
+            "Error: qux 1.0 did not build"
+          ],
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T11:02:30-04:00",
+          "status": "failed",
+          "verb": "upgrade",
+          "version": "1.0"
+        }
+      ]
+    },
+    "wget": {
+      "builds": [
+        {
+          "batch": "main",
+          "started": "2026-09-01T08:00:00-04:00",
+          "status": "skipped",
+          "verb": "upgrade",
+          "version": "1.25.0"
+        },
+        {
+          "started": "2026-09-30T09:30:00-04:00",
+          "status": "failed",
+          "version": "1.25.0"
+        }
+      ]
+    },
+    "zlib": {
+      "builds": [
+        {
+          "batch": "main",
+          "run": "20261001-100000-222",
+          "started": "2026-10-01T10:00:00-04:00",
+          "status": "skipped",
+          "verb": "upgrade",
+          "version": "1.3.1"
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}

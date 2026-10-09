@@ -65,7 +65,7 @@ started in the same second keep their own logs. Then it:
   `brew reinstall`;
 - logs each formula Homebrew worked on, including the outdated dependents it
   upgraded alongside, in the log shown by [`brew build-times`](build-times.md),
-  with `reinstall` and the log of the run;
+  with `reinstall`, the run and the run's log;
 - adds the times to the install receipt of each keg Homebrew installed, under
   `build_times`, unless `--no-stamp-receipts` is given.
 

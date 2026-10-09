@@ -153,9 +153,9 @@ runs started in the same second keep their own logs. After each batch, it:
   the batch (e.g. dependencies), in the log shown by
   [`brew build-times`](build-times.md), with `upgrade`, the batch (`main`,
   `last` for `--last`, or `dependents` for the outdated dependents upgraded
-  after the batches) and the batch's log; the dependents with broken linkage
-  are logged with `reinstall` and `linkage`. A failed formula is logged with
-  the version it was to be upgraded to;
+  after the batches), the run and the batch's log; the dependents with broken
+  linkage are logged with `reinstall` and `linkage`. A failed formula is logged
+  with the version it was to be upgraded to;
 - adds the times to the install receipt (`INSTALL_RECEIPT.json`) of each keg
   Homebrew installed, under `build_times`, unless `--no-stamp-receipts` is
   given;
