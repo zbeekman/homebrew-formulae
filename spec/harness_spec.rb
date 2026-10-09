@@ -37,7 +37,7 @@ RSpec.describe "the spec harness", type: :system do
       curl
     end
 
-    def curl(url) = SystemCommand.run(fake_curl, args: ["--head", url])
+    def curl(*operands) = SystemCommand.run(fake_curl, args: ["--head", *operands])
 
     # The requests the guard stopped in this example, which fail it after it
     # runs unless cleared.
@@ -56,6 +56,33 @@ RSpec.describe "the spec harness", type: :system do
       end
       network_requests.clear
       expect(stopped).to eq(urls.to_h { |url| [url, true] })
+    end
+
+    it "stops curl reaching a host given without a scheme or by `--url`, as curl reads them" do
+      commands = [%w[example.com], %w[example.com:8080/path], %w[--url example.com], %w[-oout.txt example.com],
+                  %w[--max-time 10 -o out.txt example.com], %w[-fsSLo out.txt example.com], %w[-- example.com],
+                  %w[192.0.2.1], %w[user@example.com], %w[ghcr.io/v2/], %w[-x proxy.example.com localhost],
+                  %w[-xproxy.example.com localhost],
+                  %w[--socks5 proxy.example.com:1080 localhost]]
+      stopped = commands.to_h do |command|
+        curl(*command)
+        [command.join(" "), false]
+      rescue NetworkGuard::Blocked
+        [command.join(" "), true]
+      end
+      network_requests.clear
+      expect(stopped).to eq(commands.to_h { |command| [command.join(" "), true] })
+    end
+
+    it "lets curl read the options and values brew passes, and reach loopback without a scheme" do
+      commands = [["--max-time", "10", "--user-agent", "Homebrew/5.1", "--header", "Accept: text/html", "-o",
+                   "out.part", "localhost"],
+                  ["--retry", "3", "--output", "out.txt", "--write-out", "%<code>s", "127.0.0.1:8080/x"],
+                  %w[-fsSL [::1]:80],
+                  %w[--url localhost --connect-timeout 5], %w[-o out.txt -- file:///dev/null], %w[--head],
+                  %w[--referer https://example.org/ file:///dev/null]]
+      allowed = commands.to_h { |command| [command.join(" "), curl(*command).success?] }
+      expect(allowed).to eq(commands.to_h { |command| [command.join(" "), true] })
     end
 
     it "lets curl read local files and reach loopback servers" do
@@ -142,6 +169,12 @@ RSpec.describe "the spec harness", type: :system do
       expect(reached).to eq("https://github.com/" => true, "https://api.github.com/" => true,
                             "https://ghcr.io/v2/" => true, "https://raw.githubusercontent.com/" => true,
                             "https://brew.sh/" => false, "https://github.com.example/" => false)
+    end
+
+    it "stops GitHub for an example that sets `needs_github: false`, as one nested in a tagged group may",
+       needs_github: false do
+      expect { curl("https://github.com/") }.to raise_error(NetworkGuard::Blocked)
+      network_requests.clear
     end
 
     it "lets an example tagged `:needs_github` run curl through brew's `Utils::Curl`", :needs_github do

@@ -27,7 +27,9 @@ require "ipaddr"
 # connections (`TCPSocket.open`, as `Net::HTTP` uses, `TCPSocket.new` and
 # `Socket.tcp`). Only loopback and local files are allowed, and GitHub for an
 # example tagged `:needs_github`. A request from a thread that outlives its
-# example fails the example running then.
+# example fails the example running then. Known gaps: a `--location` redirect
+# from an allowed host to another isn't seen, and `http_proxy`, `https_proxy`
+# and `ALL_PROXY` from the developer's shell aren't cleared.
 module NetworkGuard
   # An `Exception`, so no `rescue` of a `StandardError` in brew hides it.
   class Blocked < Exception; end # rubocop:disable Lint/InheritException
@@ -44,13 +46,74 @@ module NetworkGuard
     false
   end
 
-  # The URLs among `curl`'s `args` on hosts it may not reach; a URL that
+  # The long options of `curl` that take a value, which is not a URL to fetch:
+  # a bare argument after one is its value, not an operand. (Curl has no
+  # `--option=value` form.) Short options are letters, as `-o` in
+  # `-fsSLo out.txt`.
+  VALUE_OPTIONS = T.let(<<~OPTIONS.split.to_set.freeze, T::Set[String])
+    abstract-unix-socket alt-svc aws-sigv4 cacert capath cert cert-type ciphers config connect-timeout connect-to
+    continue-at cookie cookie-jar create-file-mode crlfile curves data data-ascii data-binary data-raw
+    data-urlencode delegation dns-interface dns-ipv4-addr dns-ipv6-addr dns-servers dump-header ech egd-file engine
+    etag-compare etag-save expect100-timeout form form-string ftp-account ftp-alternative-to-user ftp-method
+    ftp-port haproxy-clientip happy-eyeballs-timeout-ms header hostpubmd5 hostpubsha256 hsts interface ip-tos json
+    keepalive-time key key-type krb libcurl limit-rate local-port login-options mail-auth mail-from mail-rcpt
+    max-filesize max-redirs max-time netrc-file noproxy oauth2-bearer output output-dir parallel-max pass
+    pinnedpubkey proto proto-default proto-redir proxy-cacert proxy-capath proxy-cert proxy-cert-type
+    proxy-ciphers proxy-crlfile proxy-header proxy-key proxy-key-type proxy-pass proxy-pinnedpubkey
+    proxy-service-name proxy-tls13-ciphers proxy-tlsauthtype proxy-tlspassword proxy-tlsuser proxy-user pubkey
+    quote random-file range rate referer request request-target resolve retry retry-delay retry-max-time
+    sasl-authzid service-name speed-limit speed-time stderr telnet-option
+    tftp-blksize time-cond tls-max tls13-ciphers tlsauthtype tlspassword tlsuser trace trace-ascii trace-config
+    unix-socket upload-file url-query user user-agent variable write-out
+  OPTIONS
+  # Including `-x`, the proxy, whose value is a host to contact.
+  VALUE_SHORT_OPTION = /[AbcCdDeEFHKmoPQrtTuUwxXyYz]/
+  private_constant :VALUE_OPTIONS, :VALUE_SHORT_OPTION
+
+  # What `curl` would contact among its `args`: every operand, which curl
+  # reads as a URL even without a scheme (`example.com`) or after `--`, and
+  # the value of `-x`. Only the values of options that curl takes one for (see
+  # `VALUE_OPTIONS`) are not operands, so a long option missing there (as
+  # `--url` and the proxy options are) counts its value as a host, failing
+  # the example rather than letting a request by. Left out on purpose, as
+  # brew never passes them: `--connect-to`, `--resolve`, `--dns-servers` and
+  # `-K`/`--config` (brew passes `--config` only for an absolute
+  # `HOMEBREW_CURLRC`, which `spec/run.rb` clears).
+  sig { params(args: T::Array[T.any(String, Integer, Float, Pathname)]).returns(T::Array[String]) }
+  def self.curl_targets(args)
+    targets = []
+    next_is = T.let(nil, T.nilable(Symbol))
+    operands_only = T.let(false, T::Boolean)
+    args.map(&:to_s).each do |arg|
+      if next_is
+        targets << arg if next_is == :url
+        next_is = nil
+      elsif operands_only || !arg.start_with?("-")
+        targets << arg
+      elsif arg == "--"
+        operands_only = true
+      elsif arg.start_with?("--")
+        next_is = :value if VALUE_OPTIONS.include?(arg.delete_prefix("--"))
+      elsif (index = arg.index(VALUE_SHORT_OPTION, 1))
+        proxy = arg[index] == "x"
+        value = arg[(index + 1)..].to_s
+        if value.empty?
+          next_is = proxy ? :url : :value
+        elsif proxy
+          targets << value
+        end
+      end
+    end
+    targets
+  end
+
+  # The targets among `curl`'s `args` on hosts it may not reach; one that
   # can't be parsed counts, as does an empty host other than a file's, which
   # curl reads from the path (`https:///host/`).
   sig { params(args: T::Array[T.any(String, Integer, Float, Pathname)], github: T::Boolean).returns(T::Array[String]) }
   def self.remote_urls(args, github:)
-    args.map(&:to_s).grep(%r{\A[a-z][a-z0-9+.-]*://}i).reject do |url|
-      uri = URI.parse(url)
+    curl_targets(args).reject do |target|
+      uri = URI.parse(target.match?(%r{\A[a-z][a-z0-9+.-]*://}i) ? target : "http://#{target}")
       uri.scheme&.casecmp?("file") || (uri.hostname.present? && allowed?(uri.hostname, github:))
     rescue URI::InvalidURIError
       false
@@ -82,7 +145,7 @@ module NetworkGuard
     config.before do |example|
       T.bind(self, RSpec::Mocks::ExampleMethods)
       requests = example.metadata[:network_requests] = []
-      github = example.metadata.key?(:needs_github)
+      github = example.metadata[:needs_github].present?
       allow(SystemCommand).to receive(:run).and_wrap_original do |run, executable, **options|
         if File.basename(executable.to_s) == "curl"
           NetworkGuard.remote_urls(options.fetch(:args, []), github:).each { |url| NetworkGuard.stop(requests, url) }
