@@ -8,10 +8,12 @@
 
 require "cmd/install"
 require_relative "../../cmd/install-timed"
+require_relative "../support/bottles"
 require_relative "../support/casks"
 require_relative "../support/llm"
 
 RSpec.describe Homebrew::Cmd::InstallTimed do
+  include TimedBottleHelper
   include TimedCaskHelper
 
   let(:database) { Pathname(ENV.fetch("HOMEBREW_USER_CONFIG_HOME"))/"build-log.json" }
@@ -30,9 +32,10 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
   # if `linked` (unless keg-only by default), into the prefix. Its receipt is
   # for this computer's architecture, installed on request unless not
   # `on_request`, with `build_times` if given. `status` is `:deprecated` or
-  # `:disabled` if given. A bottled one's manifest is never downloaded.
+  # `:disabled` if given. A bottled one's manifest is never downloaded; given
+  # `bottle_deps`, its tab lists them with the version each needs at least.
   def stub_formula(name, installed_version = nil, deps: [], keg_only: false, linked: !keg_only, bottled: false,
-                   tap: nil, on_request: true, build_times: nil, status: nil)
+                   bottle_deps: nil, tap: nil, on_request: true, build_times: nil, status: nil)
     formula = formula(name, tap:) do
       T.bind(self, T.class_of(Formula))
       url "https://brew.sh/#{name}-2.0.tgz"
@@ -41,14 +44,9 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       keg_only "it is a test" if keg_only
       deprecate! date: "2020-01-01", because: :unmaintained if status == :deprecated
       disable! date: "2020-01-01", because: :unmaintained if status == :disabled
-      if bottled
-        bottle do
-          T.bind(self, BottleSpecification)
-          sha256 cellar: :any, Utils::Bottles.tag.to_sym => "a" * 64
-        end
-      end
+      TimedBottleHelper.bottle(self) if bottled
     end
-    allow(formula.bottle).to receive_messages(github_packages_manifest_resource: nil, fetch_tab: nil) if bottled
+    stub_bottle_manifest(formula, bottle_deps:) if bottled
     stub_formula_loader(formula)
     stub_formula_loader(formula, name) if tap
     if installed_version
@@ -587,11 +585,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
        "the bottle's manifest" do
       allow(Homebrew::Install).to receive(:ask_formulae).and_call_original
       stub_formula("lib", "1.0")
-      app = stub_formula("app", deps: %w[lib], bottled: true)
-      fetches = []
-      allow(app.bottle).to receive(:fetch_tab) { fetches << :fetched }
-      lib = { "full_name" => "lib", "version" => "1.0", "revision" => 0 }
-      allow(app.bottle).to receive(:tab_attributes) { fetches.empty? ? {} : { "runtime_dependencies" => [lib] } }
+      stub_formula("app", deps: %w[lib], bottled: true, bottle_deps: { "lib" => "1.0" })
       expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
       expect { run_to_end("app") }.to output(/^==> Would upgrade 1 dependency for app:\nlib\n/).to_stdout
     end
@@ -790,12 +784,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
 
     it "takes what a poured formula needs from its bottle's manifest, as brew does, with `--only-dependencies`" do
       stub_formula("lib", "1.0")
-      app = stub_formula("app", deps: %w[lib], bottled: true)
-      # Like brew's, the tab is empty until the manifest has been fetched.
-      fetches = []
-      allow(app.bottle).to receive(:fetch_tab) { fetches << :fetched }
-      lib = { "full_name" => "lib", "version" => "1.0", "revision" => 0 }
-      allow(app.bottle).to receive(:tab_attributes) { fetches.empty? ? {} : { "runtime_dependencies" => [lib] } }
+      stub_formula("app", deps: %w[lib], bottled: true, bottle_deps: { "lib" => "1.0" })
       installs["app"] = []
       expect { run_command("--yes", "--only-dependencies", "app") }.not_to output.to_stderr
     end

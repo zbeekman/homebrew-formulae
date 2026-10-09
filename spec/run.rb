@@ -19,6 +19,12 @@ Utils::GemSetup.install_bundler_gems!(groups: %w[style tests]) # rubocop:disable
 Homebrew::EnvConfig::ENVS.each_key do |env|
   ENV.delete(env.to_s) unless [:HOMEBREW_CACHE, :HOMEBREW_LOGS, :HOMEBREW_TEMP].include?(env)
 end
+# Nor a proxy of the shell, which curl would send even a request to
+# `localhost` through, past the network guard. These are the upper-case ones
+# `bin/brew` passes on (`HTTPS_PROXY`, `FTP_PROXY`, `ALL_PROXY`); the
+# lower-case ones are in `Homebrew::EnvConfig::ENVS`, cleared above. A spec
+# that needs one sets it itself.
+ENV.keys.grep(/\A(?:http|https|ftp|all)_proxy\z/i).each { |proxy| ENV.delete(proxy) }
 ENV["HOMEBREW_TESTS"] = "1"
 ENV["HOMEBREW_NO_AUTO_UPDATE"] = "1"
 ENV["HOMEBREW_NO_ANALYTICS_THIS_RUN"] = "1"
